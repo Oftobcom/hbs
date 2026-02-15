@@ -1,0 +1,7 @@
+I’m sending a long context. Do not reply until I write: READY. Just acknowledge received.
+
+Goal 1: Mathematical modeling of human organs and various diseases and defects of the human body using the theory of differential games with Caputo fractional derivatives.
+Goal 2: Development of numerical approximations and numerical methods based on the results of Goal 1.
+Goal 3: Development of a simulation of the human body and various diseases and defects of the human body in Python 3 based on the results of Goal 2.
+Goal 4: Conducting various numerical experiments.
+Goal 5: Writing and publishing a series of scientific articles based on the results of previous Goals in Q2 category journals.

@@ -1,0 +1,4 @@
+I’m sending a long context. Do not reply until I write: READY. Just acknowledge received.
+Critically analyze the attached files.
+These files are created for simulating the "heart–lungs–liver–kidneys–gastrointestinal tract–brain" system with a ventricular septal defect (VSD).
+The simulation of the "heart – lungs – liver – kidneys – gastrointestinal tract – brain" system will be used for research on the topic: "The impact of congenital ventricular septal defect on the 'heart – lungs – liver – kidneys – gastrointestinal tract – brain' system."
