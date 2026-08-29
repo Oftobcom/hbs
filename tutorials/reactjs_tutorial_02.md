@@ -28,6 +28,13 @@ mkdir -p src/services
 mkdir -p src/hooks
 mkdir -p src/utils
 
+# Создаём структуру папок (Windows 10)
+mkdir src\components
+mkdir src\pages
+mkdir src\services
+mkdir src\hooks
+mkdir src\utils
+
 # Удаляем ненужные файлы (опционально)
 rm src/App.test.js src/setupTests.js src/logo.svg
 ```
