@@ -56,7 +56,7 @@ class GITract(OrganModel):
         absorption_nutrients = self.k_abs_nutrients * intake_nutrients * abs_factor
 
         dP_art = (Q_in - Q_cap) / self.C_art
-        dP_cap = (Q_cap + absorption_water - Q_out) / self.C_cap
+        dP_cap = (Q_cap - Q_out) / self.C_cap
 
         self._current_outputs = {
             'Q_out': Q_out,

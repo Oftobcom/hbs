@@ -16,6 +16,7 @@ class Heart4Chambers(OrganModel):
                  V0_la=5, V0_lv=10, V0_ra=5, V0_rv=15,
                  R_mitral=0.05, R_aortic=0.03,
                  R_tricuspid=0.05, R_pulmonary=0.03,
+                 R_venous=0.02,
                  R_vsd=np.inf,          # сопротивление дефекта (бесконечность = нет шунта)
                  hr_min=20, hr_max=200):
         self.hr_base = hr
@@ -34,6 +35,7 @@ class Heart4Chambers(OrganModel):
             'tricuspid': R_tricuspid,
             'pulmonary': R_pulmonary
         }
+        self.R_venous = R_venous
         self.R_vsd = R_vsd
         self._current_hr = self.hr_base
         self._current_T = self.T_base
@@ -75,7 +77,8 @@ class Heart4Chambers(OrganModel):
                 return Emin
 
     def _pressure(self, chamber, V, t):
-        return self._elastance(t, chamber) * (V - self.V0[chamber])
+        effective_volume = max(0.0, V - self.V0[chamber])
+        return self._elastance(t, chamber) * effective_volume
 
     def get_derivatives(self, t, state, inputs):
         V_la, V_lv, V_ra, V_rv = state
@@ -107,7 +110,7 @@ class Heart4Chambers(OrganModel):
         else:
             Q_vsd = 0.0
 
-        R_venous = 0.1
+        R_venous = self.R_venous
         Q_sv_to_ra = (P_sv - P_ra) / R_venous
         Q_pv_to_la = (P_pv - P_la) / R_venous
 

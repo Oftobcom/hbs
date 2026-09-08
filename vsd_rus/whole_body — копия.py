@@ -9,6 +9,7 @@ from kidney import KidneyHemodynamic
 from blood import BloodPool
 from gitract import GITract
 from brain import Brain
+from baroreflex import Baroreflex
 
 class WindkesselVessel(OrganModel):
     """Двухэлементная модель Windkessel для сосудистого компартмента."""
@@ -40,11 +41,14 @@ class WholeBodyModel:
                  blood_params=None,
                  gitract_params=None,
                  brain_params=None,
+                 baroreflex_params=None,
                  vsd_resistance=np.inf,            # сопротивление ДМЖП
                  flow_dependent_lungs=False,       # учитывать рост сопротивления лёгких при перегрузке
                  R_sys_peripheral=1.0,
                  C_sys_art=2.0, C_sys_ven=10.0, C_pul_ven=5.0,
                  P_sa0=80.0, P_sv0=5.0, P_pv0=8.0,
+                 fluid_intake_rate=0.0,
+                 insensible_loss_rate=0.0,
                  substance_names=None):
         if substance_names is None:
             substance_names = ['tox', 'bilirubin', 'ammonia', 'albumin']
@@ -76,11 +80,19 @@ class WholeBodyModel:
         self.gitract = GITract(**(gitract_params or {}))
         self.brain = Brain(**(brain_params or {}))
 
+        # Создаём барорефлекс с параметрами по умолчанию или переданными
+        baroreflex_params = baroreflex_params or {}
+        self.baroreflex = Baroreflex(**baroreflex_params)
+
         self.sys_art = WindkesselVessel(C=C_sys_art, P0=P_sa0)
         self.sys_ven = WindkesselVessel(C=C_sys_ven, P0=P_sv0)
         self.pul_ven = WindkesselVessel(C=C_pul_ven, P0=P_pv0)
         self.R_sys_peripheral = R_sys_peripheral
 
+        self.fluid_intake_rate = fluid_intake_rate
+        self.insensible_loss_rate = insensible_loss_rate
+
+        # Порядок органов определяет структуру вектора состояния
         self.organ_list = [
             self.heart,   # 4
             self.lungs,   # 2
@@ -88,6 +100,7 @@ class WholeBodyModel:
             self.blood,   # 1+4 =5
             self.gitract, # 2
             self.brain,   # 1
+            self.baroreflex,  # 1
             self.sys_art, # 1
             self.sys_ven, # 1
             self.pul_ven  # 1
@@ -99,6 +112,9 @@ class WholeBodyModel:
             self.state_slices.append(slice(start, start+size))
             start += size
         self.total_states = start
+
+        # Сохраняем индекс барорефлекса для быстрого доступа
+        self.baroreflex_index = self.organ_list.index(self.baroreflex)
 
     def get_initial_state(self):
         y0 = []
@@ -114,9 +130,10 @@ class WholeBodyModel:
         V_blood = y[s[3]]
         V_gitract = y[s[4]]
         V_brain = y[s[5]]
-        P_sa = y[s[6]][0]
-        P_sv = y[s[7]][0]
-        P_pv = y[s[8]][0]
+        V_baroreflex = y[s[self.baroreflex_index]]   # <-- НОВОЕ
+        P_sa = y[s[7]][0]   # индексы сдвинулись: теперь sys_art на 7
+        P_sv = y[s[8]][0]
+        P_pv = y[s[9]][0]
 
         Vb = V_blood[0]
         C_blood = V_blood[1:]
@@ -128,8 +145,16 @@ class WholeBodyModel:
 
         P_pa = V_lungs[0]
 
+        # ----- Барорефлекс (вычисляем до сердца) -----
+        baroreflex_inputs = {'P_sa': P_sa}
+        d_baroreflex = self.baroreflex.get_derivatives(t, V_baroreflex, baroreflex_inputs)
+        baroreflex_out = self.baroreflex.get_outputs(V_baroreflex)
+        HR = baroreflex_out['HR']
+        hr_factor = HR / self.baroreflex.HR_base 
+
         # Сердце
-        heart_inputs = {'P_sa': P_sa, 'P_sv': P_sv, 'P_pa': P_pa, 'P_pv': P_pv}
+        heart_inputs = {'P_sa': P_sa, 'P_sv': P_sv, 'P_pa': P_pa, 'P_pv': P_pv,
+                        'hr_factor': hr_factor}
         d_heart = self.heart.get_derivatives(t, V_heart, heart_inputs)
         heart_out = self.heart.get_outputs(V_heart)
 
@@ -169,8 +194,15 @@ class WholeBodyModel:
         if 'ammonia' in idx:   dC_blood_arr[idx['ammonia']]   += liver_out.get('dC_ammonia',0)
         if 'albumin' in idx:   dC_blood_arr[idx['albumin']]   += liver_out.get('dC_albumin',0)
         if 'tox' in idx:       dC_blood_arr[idx['tox']]       += dC_kidney
-        # Исправлено: убран двойной учёт воды из ЖКТ (absorption_water уже входит через венозный возврат)
-        dV_total = dV_kidney   # только диурез
+
+        # Общий баланс жидкости крови:
+        # поступление из ЖКТ (абсорбция) + внутривенная инфузия
+        # минус диурез и неощутимые потери
+        dV_total = (gitract_out['absorption_water']
+                    + self.fluid_intake_rate
+                    - kidney_effects['urine_output']
+                    - self.insensible_loss_rate)
+
         blood_inputs = {'dV': dV_total, 'dC': dC_blood_arr}
         d_blood = self.blood.get_derivatives(t, V_blood, blood_inputs)
 
@@ -188,12 +220,13 @@ class WholeBodyModel:
         Q_ven_out = heart_out['Q_sv_to_ra']
         d_sys_ven = self.sys_ven.get_derivatives(t, np.array([P_sv]), {'Q_in': Q_ven_in, 'Q_out': Q_ven_out})
 
-        # Лёгочные вены – исправлено: используем эффективное сопротивление из lungs_out
+        # Лёгочные вены
         Q_from_lungs = (V_lungs[1] - P_pv) / lungs_out['R2_eff']
         Q_pul_ven_out = heart_out['Q_pv_to_la']
         d_pul_ven = self.pul_ven.get_derivatives(t, np.array([P_pv]), {'Q_in': Q_from_lungs, 'Q_out': Q_pul_ven_out})
 
-        dydt = np.concatenate([d_heart, d_lungs, d_liver, d_blood, d_gitract, d_brain, d_sys_art, d_sys_ven, d_pul_ven])
+        dydt = np.concatenate([d_heart, d_lungs, d_liver, d_blood, d_gitract, d_brain,
+                               d_baroreflex, d_sys_art, d_sys_ven, d_pul_ven])
         return dydt
 
     def compute_outputs(self, t, y):
@@ -204,16 +237,25 @@ class WholeBodyModel:
         V_blood = y[s[3]]
         V_gitract = y[s[4]]
         V_brain = y[s[5]]
-        P_sa = y[s[6]][0]
-        P_sv = y[s[7]][0]
-        P_pv = y[s[8]][0]
+        V_baroreflex = y[s[self.baroreflex_index]]
+        P_sa = y[s[7]][0]
+        P_sv = y[s[8]][0]
+        P_pv = y[s[9]][0]
         P_pa = V_lungs[0]
 
         Vb = V_blood[0]
         C_blood = V_blood[1:]
         conc = dict(zip(self.substance_names, C_blood))
 
-        heart_inputs = {'P_sa': P_sa, 'P_sv': P_sv, 'P_pa': P_pa, 'P_pv': P_pv}
+        # Барорефлекс (для согласованности)
+        baroreflex_inputs = {'P_sa': P_sa}
+        self.baroreflex.get_derivatives(t, V_baroreflex, baroreflex_inputs)
+        baroreflex_out = self.baroreflex.get_outputs(V_baroreflex)
+        HR = baroreflex_out['HR']
+        hr_factor = HR / self.baroreflex.HR_base
+
+        heart_inputs = {'P_sa': P_sa, 'P_sv': P_sv, 'P_pa': P_pa, 'P_pv': P_pv,
+                        'hr_factor': hr_factor}
         self.heart.get_derivatives(t, V_heart, heart_inputs)
         heart_out = self.heart.get_outputs(V_heart)
 
@@ -272,7 +314,9 @@ class WholeBodyModel:
             'metabolic_inhibition': brain_out.get('metabolic_inhibition',1.0),
             'liver_functional': liver_out.get('functional',1.0),
             'R1_lungs': lungs_out.get('R1_eff', self.lungs.R1_base),
-            'R2_lungs': lungs_out.get('R2_eff', self.lungs.R2_base)
+            'R2_lungs': lungs_out.get('R2_eff', self.lungs.R2_base),
+            'HR': HR,
+            'HR_target': baroreflex_out['HR_target']
         }
         return outputs
 
