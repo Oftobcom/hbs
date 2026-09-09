@@ -551,16 +551,17 @@ def plot_shunt_effect_analysis(results_dict):
             mask = (data['t'] >= t_start) & np.isfinite(data['GFR'])
             if np.any(mask):
                 t_steady = data['t'][mask]
-                gfr = data['GFR'][mask]
+                gfr = data['GFR'][mask] / 60.0 # <-- /60 если GFR_base у тебя в мл/мин
+                # или если GFR_base уже в мл/с, то просто gfr без деления
                 step = max(1, len(t_steady) // 500)
-                ax.plot(t_steady[::step], gfr[::step], color=colors.get(name, 'gray'), 
-                       lw=2, label=name)
+                ax.plot(t_steady[::step], gfr[::step], color=colors.get(name, 'gray'), lw=2, label=name)
+
     ax.set_xlabel('Время (с)')
     ax.set_ylabel('СКФ (мл/с)')
     ax.set_title('Функция почек')
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(0.5, 2.5)
+    ax.set_ylim(0, 3.0) # <-- было 0.5-2.5, стало 0-3.0 чтобы видеть падение до 0
     
     # 6. Радарная диаграмма
     ax_polar = fig.add_subplot(2, 3, 6, projection='polar')

@@ -45,7 +45,7 @@ class BloodPool(OrganModel):
         else:
             dC_input = np.asarray(dC_input)
             if dC_input.shape[0]!= self.num_substances:
-                raise ValueError(...)
+                raise ValueError(f"dC_input must have length {self.num_substances}")
             # Правильный баланс с разбавлением
             if V > 1e-6:
                 dC = dC_input - C * dV / V # было dM_dt + diluition, стало одной строкой

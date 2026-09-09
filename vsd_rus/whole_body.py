@@ -369,6 +369,7 @@ class WholeBodyModel:
             'Q_effective_pulmonary': Qp,
             'Q_liver_out': liver_out['Q_liver_out'],
             'Q_renal': kidney_effects['Q_renal'],
+            'urine_output': kidney_effects['urine_output'],
             'Q_gitract_out': gitract_out['Q_out'],
             'absorption_water': gitract_out['absorption_water'],
             'Q_brain': brain_out['Q_br'],
