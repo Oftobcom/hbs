@@ -103,11 +103,33 @@ def simulate_scenario(vsd_resistance, flow_dependent_lungs, label, color,
         lungs_params={'flow_dependent_resistance': flow_dependent_lungs,
                       'flow_sensitivity': 0.08},
         heart_params=heart_params,
-        R_sys_peripheral=1.0,
+        R_sys_peripheral=None, # посчитается под MAP 85
+        target_MAP=85.0, target_CO=83.0,
         C_sys_art=2.0,
         C_sys_ven=12.0,
         C_pul_ven=5.0
     )
+
+    # проверка критерия - СРЕДНЕЕ за 1 кардиоцикл, а не мгновенное в t=0
+    y0 = model.get_initial_state()
+    T_cycle = 60.0 / model.heart.hr_base  # 0.857с при HR=70
+    t_samples = np.linspace(0, T_cycle, 25) # 25 точек за цикл
+    P_sa_vals = []
+    Q_aortic_vals = []
+    for ti in t_samples:
+        out_i = model.compute_outputs(ti, y0)
+        P_sa_vals.append(out_i['P_sa'])
+        Q_aortic_vals.append(out_i['Q_aortic'])
+    
+    P_sa_mean = np.mean(P_sa_vals)
+    # CO - среднее по циклу, а не пиковое
+    CO_mean = np.mean(Q_aortic_vals)  # или np.trapz(Q)/T для ударного объема
+    # или ударный объем * ЧСС
+    # SV = np.trapz(Q_aortic_vals, t_samples)
+    # CO_mean = SV * (60/T_cycle)
+
+    R_total_mean = P_sa_mean / max(CO_mean, 1e-6)
+    print(f"  [CHECK] R_total={R_total_mean:.2f} MAP={P_sa_mean:.0f} CO={CO_mean:.0f} (цель 85±5 и 80±10)")
     
     print(f"  Симуляция {label}...", end=" ", flush=True)
     sol = model.simulate(t_span, t_eval, method='RK45', rtol=1e-5, atol=1e-7)

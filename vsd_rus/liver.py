@@ -9,7 +9,7 @@ class Liver(OrganModel):
     Состояние: [P_hv, C_bilirubin, C_ammonia, C_albumin, резерв]
     """
     def __init__(self,
-                 R_ha=0.5, R_pv_base=0.3, R_hv_base=0.2, C=5.0, P_hv0=5.0,
+                 R_ha=17.0, R_pv_base=0.25, R_hv_base=0.12, C=5.0, P_hv0=8.0,
                  albumin_prod_base=0.1,
                  bilirubin_clearance_base=0.2,
                  ammonia_clearance_base=0.15,
@@ -54,12 +54,15 @@ class Liver(OrganModel):
         V_blood = inputs.get('V_blood', 5000.0)
 
         # Гемодинамика – здоровая
-        P_mes = (P_sa + P_sv) / 2
-        Q_ha = (P_sa - P_hv) / self.R_ha
-        Q_pv = (P_mes - P_hv) / self.R_pv_base
+        P_portal_in = inputs.get('P_portal', 8.0) # приходит из whole_body, если нет - 8
+        P_mes = P_portal_in + 2.0  # 10 мм, небольшое падение до портальной вены
+        # или если хочешь без входа:
+        # P_mes = 10.0
+        Q_ha = (P_sa - P_hv) / self.R_ha          # (90-8)/17=4.8
+        Q_pv = (P_mes - P_hv) / self.R_pv_base    # (10-8)/0.25=8
         Q_out = (P_hv - P_sv) / self.R_hv_base
         dP_hv = (Q_ha + Q_pv - Q_out) / self.C
-        P_portal = P_mes
+        P_portal = P_mes        
 
         # Метаболизм – здоровый
         uptake_bil = 0.1 * (C_bil_blood - C_bil)

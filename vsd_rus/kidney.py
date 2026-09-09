@@ -14,10 +14,8 @@ class KidneyHemodynamic(OrganModel):
                  autoreg_slope=0.025,         # крутизна сигмоиды
                  toxin_clearance_frac=0.2,
                  volume_reabsorption_frac=0.99,
-                 renal_resistance=0.02):
-        # GFR_base делится на 2, т.к. это общая СКФ для двух почек,
-        # а в _compute_gfr мы будем умножать на 2 для получения общей
-        self.GFR_base = GFR_base / 2.0
+                 renal_resistance=3.75):
+        self.GFR_base = GFR_base
         self.P_autoreg = P_autoreg
         self.autoreg_amplitude = autoreg_amplitude
         self.autoreg_slope = autoreg_slope
@@ -39,18 +37,16 @@ class KidneyHemodynamic(OrganModel):
         return self._current_outputs.copy()
 
     def _compute_gfr(self, P_art):
-        """
-        Вычисляет СКФ с учётом ауторегуляции.
-        Используется сигмоида через гиперболический тангенс:
-            reg = 1 + amplitude * tanh(slope * (P_art - P_autoreg))
-        Обеспечивает плавное насыщение и reg=1 при P_art = P_autoreg.
-        """
+        # Низкое давление - линейный рост с плавным включением
+        low = P_art / 80.0  # 0 -> 0, 80 -> 1
+        # Высокое давление - сигмоида как в варианте 1
         delta = P_art - self.P_autoreg
-        reg = 1.0 + self.autoreg_amplitude * np.tanh(self.autoreg_slope * delta)
-        # Ограничение для безопасности (физиологические пределы)
-        reg = np.clip(reg, 0.4, 1.6)
-        # Возвращаем общую СКФ (для двух почек)
-        return 2 * self.GFR_base * reg
+        high = 1.0 + self.autoreg_amplitude * np.tanh(self.autoreg_slope * delta)
+        # Склейка через логистику в районе 80
+        w = 0.5 * (1 + np.tanh((P_art - 80)/5))  # 0 при P<<80, 1 при P>>80
+        factor = (1-w)*low + w*high
+        factor = np.clip(factor, 0.0, 2.2)  # разрешаем 0 - анурию
+        return self.GFR_base * factor
 
     def compute_effects(self, P_sa, P_sv, C_tox, V_blood):
         """
@@ -67,10 +63,11 @@ class KidneyHemodynamic(OrganModel):
         urine_output = GFR * (1 - self.volume_reabsorption_frac)
         dV_blood = -urine_output
 
-        self._current_outputs = {'Q_renal': Q_renal, 'GFR': GFR}
+        self._current_outputs = {'Q_renal': Q_renal, 'GFR': GFR, 'urine_output': urine_output}
         return {
             'dC_tox': dC_tox,
             'dV_blood': dV_blood,
             'Q_renal': Q_renal,
-            'GFR': GFR
+            'GFR': GFR,
+            'urine_output': urine_output
         }

@@ -8,11 +8,13 @@ class Lungs2Chamber(OrganModel):
     Для ДМЖП можно увеличивать сопротивления при длительном повышении кровотока.
     """
     def __init__(self,
-                 R1=0.5, R2=0.5,
-                 C1=2.0, C2=3.0,
-                 shunt_fraction=0.02,
-                 flow_dependent_resistance=False,
-                 flow_sensitivity=0.05):
+                R1=0.06, R2=0.04,  # суммарно 0.1 -> падение 80*0.1=8 мм, P_pa=14-16 реалистично
+                C1=4.0, C2=8.0,   # легочные сосуды более податливые чем системные
+                shunt_fraction=0.02,
+                flow_dependent_resistance=False,
+                flow_sensitivity=0.15  # было 0.05 - слишком мало для хронического ДМЖП взрослого
+                ):
+
         self.R1_base = R1
         self.R2_base = R2
         self.C1 = C1
@@ -26,7 +28,7 @@ class Lungs2Chamber(OrganModel):
         return 2
 
     def get_initial_state(self):
-        return np.array([15.0, 10.0])
+        return np.array([16.0, 11.2])
 
     def _effective_resistances(self, Q_pulm):
         if not self.flow_dependent_resistance:

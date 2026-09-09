@@ -51,10 +51,11 @@ class KidneyHemodynamic(OrganModel):
         urine_output = GFR * (1 - self.volume_reabsorption_frac)
         dV_blood = -urine_output
 
-        self._current_outputs = {'Q_renal': Q_renal, 'GFR': GFR}
+        self._current_outputs = {'Q_renal': Q_renal, 'GFR': GFR, 'urine_output': urine_output}
         return {
             'dC_tox': dC_tox,
             'dV_blood': dV_blood,
             'Q_renal': Q_renal,
-            'GFR': GFR
+            'GFR': GFR,
+            'urine_output': urine_output
         }

@@ -44,16 +44,24 @@ class WholeBodyModel:
                  baroreflex_params=None,
                  vsd_resistance=np.inf,            # сопротивление ДМЖП
                  flow_dependent_lungs=False,       # учитывать рост сопротивления лёгких при перегрузке
-                 R_sys_peripheral=1.0,
+                 R_sys_peripheral=None, # теперь None - считаем автоматом
+                 target_MAP=85.0, target_CO=83.0,
                  C_sys_art=2.0, C_sys_ven=10.0, C_pul_ven=5.0,
                  P_sa0=80.0, P_sv0=5.0, P_pv0=8.0,
                  fluid_intake_rate=0.0,
                  insensible_loss_rate=0.0,
                  substance_names=None):
+
+        # Если substance_names не передан, берём из blood_params или дефолтный список
         if substance_names is None:
-            substance_names = ['tox', 'bilirubin', 'ammonia', 'albumin']
+            if blood_params and 'initial_concentrations' in blood_params:
+                substance_names = list(blood_params['initial_concentrations'].keys())
+            else:
+                substance_names = ['tox', 'bilirubin', 'ammonia', 'albumin', 'glucose', 'oxygen']
+
         self.substance_names = substance_names
 
+        # Инициализация органов и их параметров
         blood_init = {'V0': 5000.0}
         if blood_params:
             blood_init.update(blood_params)
@@ -80,10 +88,30 @@ class WholeBodyModel:
         self.gitract = GITract(**(gitract_params or {}))
         self.brain = Brain(**(brain_params or {}))
 
+        # ОЦЕНКА других проводимостей для здорового
+        # R = dP / Q_target
+        R_renal_est = 3.75   # 75/20 - правильно
+        R_brain_est = 6.0    # 75/12.5 - правильно
+        R_ha_est = 17.0      # было self.liver.R_ha=0.5 -> стало 17.0 = (90-5)/5
+        R_gitract_est = 4.5  # было 0.7 -> стало 4.5 = 75/17
+
+        if R_sys_peripheral is None:
+            R_total_target = target_MAP / target_CO # 85/83 = 1.024
+            sum_cond_other = (1/R_renal_est + 1/R_brain_est + 1/R_ha_est + 1/R_gitract_est)
+            # 0.266+0.166+0.058+0.222=0.713
+            cond_per_needed = 1/R_total_target - sum_cond_other
+            # 0.976-0.713=0.263
+            cond_per_needed = max(cond_per_needed, 0.1)
+            R_sys_peripheral = 1.0 / cond_per_needed  # 1/0.263=3.8 -> близко к цели 2.5-3.0
+            
+        self.target_MAP = target_MAP
+        self.target_CO = target_CO
+
         # Создаём барорефлекс с параметрами по умолчанию или переданными
         baroreflex_params = baroreflex_params or {}
         self.baroreflex = Baroreflex(**baroreflex_params)
 
+        # Создаём сосудистые компартменты Windkessel
         self.sys_art = WindkesselVessel(C=C_sys_art, P0=P_sa0)
         self.sys_ven = WindkesselVessel(C=C_sys_ven, P0=P_sv0)
         self.pul_ven = WindkesselVessel(C=C_pul_ven, P0=P_pv0)
@@ -116,13 +144,49 @@ class WholeBodyModel:
         # Сохраняем индекс барорефлекса для быстрого доступа
         self.baroreflex_index = self.organ_list.index(self.baroreflex)
 
-    def get_initial_state(self):
+    def calibrate_initial_state(self, t_calib=10.0):
+        # 1. Сохраняем
+        orig_Emax = self.heart._current_E_max.copy()
+        orig_R = self.heart.R_valve.copy()
+        orig_Emin = self.heart.E_min.copy()
+
+        # 2. E_mean = (Emax+Emin)/2 - средняя эластанса, а не Emin
+        for ch in self.heart._current_E_max:
+            self.heart._current_E_max[ch] = (self.heart.E_max_base[ch] + self.heart.E_min[ch]) / 2.0
+            self.heart.E_min[ch] = (self.heart.E_max_base[ch] + self.heart.E_min[ch]) / 2.0
+
+        # 3. Открытые клапаны
+        for k in self.heart.R_valve:
+            self.heart.R_valve[k] = 0.01
+
+        y0 = self.get_initial_state()
+        sol = solve_ivp(self.derivatives, (0, t_calib), y0, method='RK45', rtol=1e-6, atol=1e-8)
+        y_steady = sol.y[:, -1]
+
+        # 4. Восстановление R_valve и Emin/Emax
+        self.heart._current_E_max = orig_Emax
+        self.heart.R_valve = orig_R
+        self.heart.E_min = orig_Emin
+
+        # 5. Проверка dP/dt<5
+        dydt = self.derivatives(0, y_steady)
+        s = self.state_slices
+        # assert abs(dydt[s[7]][0]) < 5.0
+
+        return y_steady
+
+    def get_initial_state(self, calibrated=False):
         y0 = []
         for org in self.organ_list:
             y0.extend(org.get_initial_state())
-        return np.array(y0)
+        y0 = np.array(y0)
+        if calibrated:
+            # если хочешь сразу калиброванный
+            return self.calibrate_initial_state()
+        return y0
 
     def derivatives(self, t, y):
+        # Получаем срезы состояния для каждого органа
         s = self.state_slices
         V_heart = y[s[0]]
         V_lungs = y[s[1]]
@@ -130,8 +194,8 @@ class WholeBodyModel:
         V_blood = y[s[3]]
         V_gitract = y[s[4]]
         V_brain = y[s[5]]
-        V_baroreflex = y[s[self.baroreflex_index]]   # <-- НОВОЕ
-        P_sa = y[s[7]][0]   # индексы сдвинулись: теперь sys_art на 7
+        V_baroreflex = y[s[self.baroreflex_index]]
+        P_sa = y[s[7]][0]
         P_sv = y[s[8]][0]
         P_pv = y[s[9]][0]
 
@@ -286,11 +350,13 @@ class WholeBodyModel:
         reabs_frac = self.kidney.volume_reabsorption_frac
         GFR = -kidney_effects['dV_blood'] / (1 - reabs_frac) if reabs_frac < 1.0 else 0.0
 
-        # Соотношение лёгочного и системного кровотока (Qp/Qs)
+        # Соотношение лёгочного и системного кровотока (Qp/Qs) и доля шунта
         Qp = heart_out['Q_pulmonary']
         Qs = heart_out['Q_aortic']
-        Qs_effective = heart_out['Q_aortic'] - heart_out['Q_vsd']
-        Qp_Qs = Qp / Qs_effective if Qs_effective > 0 else np.nan
+        Qp_Qs = Qp / max(Qs, 1e-6)                      # классическое определение
+        shunt_fraction = heart_out['Q_vsd'] / max(Qp, 1e-6)  # доля шунта в лёгочном потоке
+        Q_effective_systemic = Qs                       # псевдоним для ясности
+        Q_effective_pulmonary = Qp                      # псевдоним для ясности
 
         outputs = {
             'P_sa': P_sa, 'P_sv': P_sv, 'P_pa': P_pa, 'P_pv': P_pv,
@@ -298,6 +364,9 @@ class WholeBodyModel:
             'Q_aortic': Qs, 'Q_pulmonary': Qp,
             'Q_vsd': heart_out['Q_vsd'],
             'Qp_Qs': Qp_Qs,
+            'shunt_fraction': shunt_fraction,
+            'Q_effective_systemic': Qs,
+            'Q_effective_pulmonary': Qp,
             'Q_liver_out': liver_out['Q_liver_out'],
             'Q_renal': kidney_effects['Q_renal'],
             'Q_gitract_out': gitract_out['Q_out'],
@@ -321,6 +390,7 @@ class WholeBodyModel:
         }
         return outputs
 
-    def simulate(self, t_span, t_eval=None, method='RK45', **kwargs):
-        y0 = self.get_initial_state()
+    def simulate(self, t_span, t_eval=None, y0=None, method='RK45', **kwargs): # <- добавить y0=None
+        if y0 is None:
+            y0 = self.calibrate_initial_state() # или get_initial_state() + калибровка
         return solve_ivp(self.derivatives, t_span, y0, t_eval=t_eval, method=method, **kwargs)

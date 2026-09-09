@@ -25,3 +25,12 @@ class OrganModel(ABC):
     def get_outputs(self, state_slice: np.ndarray) -> dict:
         """Возвращает выходные переменные для связи с другими органами."""
         pass
+
+    def compute_effects(self, *args, **kwargs) -> dict:
+        """
+        Опциональный метод для органов с прямым эффектом на кровь/жидкость.
+        По умолчанию возвращает пустой словарь, чтобы whole_body не падал
+        с KeyError если орган его не реализует.
+        Реализуют: Kidney (urine_output, Q_renal), Liver (Q_ha), etc.
+        """
+        return {}

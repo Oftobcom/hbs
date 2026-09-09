@@ -8,13 +8,13 @@ class Brain(OrganModel):
     Гемодинамика и метаболизм, без патологического ингибирования.
     """
     def __init__(self,
-                 R_base=0.8,
-                 C=2.0,
-                 autoreg_gain=0.8,
+                 R_base=3.5,
+                 C=4.0,
+                 autoreg_gain=0.3,
                  P_autoreg=80.0,
                  O2_extraction=0.4,
                  glucose_extraction=0.1,
-                 P0=60.0):
+                 P0=47.5):
         self.R_base = R_base
         self.C = C
         self.autoreg_gain = autoreg_gain
@@ -31,13 +31,10 @@ class Brain(OrganModel):
         return np.array([self.P0])
 
     def _autoregulation_resistance(self, P_sa):
-        # Параметры ограничений (можно вынести в __init__)
-        R_min = 0.5 * self.R_base
-        R_max = 2.0 * self.R_base
         # Нормированное отклонение
         x = (P_sa - self.P_autoreg) / self.P_autoreg
         # Регуляция через tanh с коэффициентом усиления
-        gain = self.autoreg_gain  # рекомендуемое значение 0.8–1.0
+        gain = self.autoreg_gain
         reg = 1.0 + gain * np.tanh(x)
         # Ограничение (на всякий случай)
         reg = np.clip(reg, 0.5, 2.0)
