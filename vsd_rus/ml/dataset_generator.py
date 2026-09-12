@@ -122,16 +122,16 @@ def _sample_vsd_loguniform_vec(u_arr: np.ndarray,
 class SimConfig:
     """Параметры симуляции, фильтрации и шума."""
 
-    def __init__(self, quick: bool = False):
+    def __init__(self, quick: bool = True):
         if quick:
             self.t_end = 180.0
-            self.n_samples_t = 4000
+            self.n_samples_t = 2000
             self.t_start_stationary = 120.0
             self.stationary_window = 30.0
             self.stationary_rel_tol = 0.025
         else:
             self.t_end = 400.0
-            self.n_samples_t = 9000
+            self.n_samples_t = 8000 # 9000
             self.t_start_stationary = 300.0
             self.stationary_window = 50.0
             self.stationary_rel_tol = 0.015
@@ -166,7 +166,7 @@ class SimConfig:
         self.noise_keys = ("Qp_Qs", "P_pa", "EDV_LV", "EDV_RV")
 
         self.random_seed = 42
-        self.chunk_size = 500
+        self.chunk_size = 100
 
 
 # =============================================================================
@@ -698,7 +698,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Stage 2: dataset generator v5"
     )
-    parser.add_argument("--n-samples", type=int, default=15000)
+    parser.add_argument("--n-samples", type=int, default=1000)
     parser.add_argument("--n-jobs", type=int, default=8)
     parser.add_argument("--quick", action="store_true",
                         help="smoke-test: 36 точек, стратифицированно по log R_vsd")
@@ -706,7 +706,7 @@ def main() -> None:
                         help="не использовать готовые чанки (пересчитать всё)")
     parser.add_argument("--output", type=str, default=None,
                         help="итоговый parquet (по умолчанию results/stage2_dataset_<fp>_<n>.parquet)")
-    parser.add_argument("--chunk-size", type=int, default=500)
+    parser.add_argument("--chunk-size", type=int, default=100)
     parser.add_argument("--n-samples-t", type=int, default=None,
                         help="переопределить число точек t_eval (по умолчанию cfg)")
     args = parser.parse_args()
@@ -715,6 +715,7 @@ def main() -> None:
 
     cfg = SimConfig(quick=args.quick)
     cfg.chunk_size = args.chunk_size
+    # cfg = SimConfig(quick=True)
     if args.n_samples_t is not None:
         cfg.n_samples_t = args.n_samples_t
         cfg.scale_n_samples_t_with_t_end = False  # ручное значение — не масштабируем

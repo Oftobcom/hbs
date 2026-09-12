@@ -1,0 +1,75 @@
+{
+  "fingerprint": "194815f7",
+  "vary_params": [
+    "d_vsd",
+    "E_max_lv",
+    "E_max_rv",
+    "R_sys",
+    "flow_sensitivity",
+    "C_sys_art"
+  ],
+  "param_bounds": {
+    "d_vsd": [
+      3.0,
+      18.0
+    ],
+    "E_max_lv": [
+      1.5,
+      3.5
+    ],
+    "E_max_rv": [
+      0.5,
+      1.5
+    ],
+    "R_sys": [
+      0.8,
+      1.6
+    ],
+    "flow_sensitivity": [
+      0.02,
+      0.15
+    ],
+    "C_sys_art": [
+      1.2,
+      3.0
+    ]
+  },
+  "fixed_theta": {
+    "HR_base": 70.0,
+    "V0_blood": 5000.0
+  },
+  "log_params": [
+    "d_vsd"
+  ],
+  "sim_config": {
+    "t_end": 180.0,
+    "n_samples_t": 2000,
+    "t_start_stationary": 120.0,
+    "stationary_window": 30.0,
+    "stationary_rel_tol": 0.025,
+    "adaptive_t_end": true,
+    "t_end_max": 600.0,
+    "C_sys_ven_const": 12.0,
+    "scale_n_samples_t_with_t_end": true,
+    "n_cycles_avg": 10,
+    "P_sa_blowup": 300.0,
+    "Qp_Qs_min": 0.05,
+    "Qp_Qs_max": 10.0,
+    "thr_phtn_moderate": 25.0,
+    "thr_phtn_severe": 40.0,
+    "thr_sys_htn": 140.0,
+    "thr_sys_hypo": 70.0,
+    "thr_large_shunt": 2.0,
+    "thr_dilated_lv": 250.0,
+    "thr_dilated_rv": 150.0,
+    "noise_frac": 0.05,
+    "noise_keys": [
+      "Qp_Qs",
+      "P_pa",
+      "EDV_LV",
+      "EDV_RV"
+    ],
+    "random_seed": 42,
+    "chunk_size": 100
+  }
+}
