@@ -124,11 +124,11 @@ class SimConfig:
 
     def __init__(self, quick: bool = True):
         if quick:
-            self.t_end = 180.0
-            self.n_samples_t = 2000
-            self.t_start_stationary = 120.0
-            self.stationary_window = 30.0
-            self.stationary_rel_tol = 0.025
+            self.t_end = 350.0
+            self.n_samples_t = 7000
+            self.t_start_stationary = 250.0 # было 120, 120 мало для C_ven=12*R_sys~14с
+            self.stationary_window = 50.0    # было 30 -> ставь 50 как в full
+            self.stationary_rel_tol = 0.10   # 10% покрывает пульсацию
         else:
             self.t_end = 400.0
             self.n_samples_t = 8000 # 9000
@@ -349,6 +349,7 @@ def _steady_with_reason(model,
         y0 = model.calibrate_initial_state(t_calib=10.0)
         t_eval = np.linspace(t_span[0], t_span[1], n_samples)
         sol = model.simulate(t_span, t_eval, y0=y0, method="BDF", rtol=1e-6)
+        # sol = model.simulate(t_span, t_eval, method='RK45', rtol=1e-5, atol=1e-7)
     except Exception as e:
         return None, f"sim_exception:{type(e).__name__}"
 

@@ -1,0 +1,50 @@
+{
+  "config_fingerprint": "194815f7",
+  "n_total": 36,
+  "n_ok": 0,
+  "R_vsd_range_actual": [
+    0.012193263222069806,
+    15.802469135802468
+  ],
+  "R_vsd_range_planned": [
+    0.5,
+    15.0
+  ],
+  "log_params": [
+    "d_vsd"
+  ],
+  "t_end": 180.0,
+  "t_end_max": 600.0,
+  "adaptive_t_end": true,
+  "C_sys_ven_const": 12.0,
+  "scale_n_samples_t": true,
+  "status_counts": {
+    "reject": 36
+  },
+  "reason_counts": {
+    "stationary_rel_std_0.063": 3,
+    "stationary_rel_std_0.057": 3,
+    "stationary_rel_std_0.052": 2,
+    "stationary_rel_std_0.058": 2,
+    "stationary_rel_std_0.071": 2,
+    "stationary_rel_std_0.067": 2,
+    "stationary_rel_std_0.054": 2,
+    "stationary_rel_std_0.080": 2,
+    "stationary_rel_std_0.061": 2,
+    "stationary_rel_std_0.050": 2,
+    "stationary_rel_std_0.053": 1,
+    "stationary_rel_std_0.074": 1,
+    "stationary_rel_std_0.069": 1,
+    "stationary_rel_std_0.064": 1,
+    "stationary_rel_std_0.082": 1,
+    "stationary_rel_std_0.073": 1,
+    "stationary_rel_std_0.070": 1,
+    "stationary_rel_std_0.049": 1,
+    "stationary_rel_std_0.068": 1,
+    "stationary_rel_std_0.055": 1,
+    "stationary_rel_std_0.089": 1,
+    "stationary_rel_std_0.077": 1,
+    "stationary_rel_std_0.065": 1,
+    "stationary_rel_std_0.086": 1
+  }
+}

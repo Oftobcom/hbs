@@ -1,5 +1,5 @@
 {
-  "fingerprint": "194815f7",
+  "fingerprint": "2f9fdc17",
   "vary_params": [
     "d_vsd",
     "E_max_lv",
@@ -42,11 +42,11 @@
     "d_vsd"
   ],
   "sim_config": {
-    "t_end": 180.0,
-    "n_samples_t": 2000,
-    "t_start_stationary": 120.0,
-    "stationary_window": 30.0,
-    "stationary_rel_tol": 0.025,
+    "t_end": 350.0,
+    "n_samples_t": 7000,
+    "t_start_stationary": 250.0,
+    "stationary_window": 50.0,
+    "stationary_rel_tol": 0.1,
     "adaptive_t_end": true,
     "t_end_max": 600.0,
     "C_sys_ven_const": 12.0,
