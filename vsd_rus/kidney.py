@@ -54,7 +54,7 @@ class KidneyHemodynamic(OrganModel):
         """
         R_eff = self.renal_resistance
         Q_renal = (P_sa - P_sv) / R_eff
-        GFR = self._compute_gfr(P_sa)
+        GFR = self._compute_gfr(P_sa) / 60.0   # мл/мин -> мл/с
 
         toxin_filtered = GFR * C_tox
         toxin_excreted = self.toxin_clearance_frac * toxin_filtered

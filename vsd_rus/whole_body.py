@@ -227,10 +227,19 @@ class WholeBodyModel:
         d_lungs = self.lungs.get_derivatives(t, V_lungs, lungs_inputs)
         lungs_out = self.lungs.get_outputs(V_lungs)
 
-        # Печень
+        # ЖКТ берет P_portal из состояния печени V_liver[5]
+        P_portal_state = V_liver[5] if len(V_liver)>5 else 8.0
+        gitract_inputs = {'P_sa': P_sa, 'P_sv': P_sv,
+                        'P_portal': P_portal_state,
+                        'intake_water': 0.0, 'intake_nutrients': 0.0}
+        d_gitract = self.gitract.get_derivatives(t, V_gitract, gitract_inputs)
+        gitract_out = self.gitract.get_outputs(V_gitract)
+
+        # Печень берет Q_gut_out из ЖКТ
         liver_inputs = {'P_sa': P_sa, 'P_sv': P_sv,
                         'C_bilirubin_blood': C_bil, 'C_ammonia_blood': C_amm,
-                        'C_albumin_blood': C_alb, 'V_blood': Vb}
+                        'C_albumin_blood': C_alb, 'V_blood': Vb,
+                        'Q_gut_out': gitract_out['Q_out']}
         d_liver = self.liver.get_derivatives(t, V_liver, liver_inputs)
         liver_out = self.liver.get_outputs(V_liver)
 
@@ -238,13 +247,6 @@ class WholeBodyModel:
         kidney_effects = self.kidney.compute_effects(P_sa, P_sv, C_tox, Vb)
         dV_kidney = kidney_effects['dV_blood']
         dC_kidney = kidney_effects['dC_tox']
-
-        # ЖКТ
-        gitract_inputs = {'P_sa': P_sa, 'P_sv': P_sv,
-                          'P_portal': liver_out.get('P_portal', P_sv),
-                          'intake_water': 0.0, 'intake_nutrients': 0.0}
-        d_gitract = self.gitract.get_derivatives(t, V_gitract, gitract_inputs)
-        gitract_out = self.gitract.get_outputs(V_gitract)
 
         # Мозг
         brain_inputs = {'P_sa': P_sa, 'P_sv': P_sv, 'C_ammonia': C_amm}
@@ -280,7 +282,7 @@ class WholeBodyModel:
         d_sys_art = self.sys_art.get_derivatives(t, np.array([P_sa]), {'Q_in': heart_out['Q_aortic'], 'Q_out': Q_art_out})
 
         # Системные вены
-        Q_ven_in = Q_peripheral + liver_out['Q_liver_out'] + Q_renal + gitract_out['Q_out'] + Q_brain
+        Q_ven_in = Q_peripheral + liver_out['Q_liver_out'] + Q_renal + Q_brain
         Q_ven_out = heart_out['Q_sv_to_ra']
         d_sys_ven = self.sys_ven.get_derivatives(t, np.array([P_sv]), {'Q_in': Q_ven_in, 'Q_out': Q_ven_out})
 
@@ -327,28 +329,35 @@ class WholeBodyModel:
         self.lungs.get_derivatives(t, V_lungs, lungs_inputs)
         lungs_out = self.lungs.get_outputs(V_lungs)
 
+        # ЖКТ берет P_portal из состояния печени
+        P_portal_state = V_liver[5] if len(V_liver)>5 else liver_out.get('P_portal', P_sv) if 'liver_out' in locals() else 8.0
+        # проще: V_liver[5] if len>5 else 8.0 как в derivatives
+        P_portal_state = V_liver[5] if len(V_liver)>5 else 8.0
+        gitract_inputs = {'P_sa': P_sa, 'P_sv': P_sv,
+                        'P_portal': P_portal_state,
+                        'intake_water':0,'intake_nutrients':0}
+        self.gitract.get_derivatives(t, V_gitract, gitract_inputs)
+        gitract_out = self.gitract.get_outputs(V_gitract)
+
+        # Печень берет Q_gut_out
         liver_inputs = {'P_sa': P_sa, 'P_sv': P_sv,
                         'C_bilirubin_blood': conc.get('bilirubin',0),
                         'C_ammonia_blood': conc.get('ammonia',0),
                         'C_albumin_blood': conc.get('albumin',0),
-                        'V_blood': Vb}
+                        'V_blood': Vb,
+                        'Q_gut_out': gitract_out['Q_out']}
         self.liver.get_derivatives(t, V_liver, liver_inputs)
         liver_out = self.liver.get_outputs(V_liver)
 
         kidney_effects = self.kidney.compute_effects(P_sa, P_sv, conc.get('tox',0), Vb)
 
-        gitract_inputs = {'P_sa': P_sa, 'P_sv': P_sv,
-                          'P_portal': liver_out.get('P_portal', P_sv),
-                          'intake_water':0,'intake_nutrients':0}
-        self.gitract.get_derivatives(t, V_gitract, gitract_inputs)
-        gitract_out = self.gitract.get_outputs(V_gitract)
-
         brain_inputs = {'P_sa': P_sa, 'P_sv': P_sv, 'C_ammonia': conc.get('ammonia',0)}
         self.brain.get_derivatives(t, V_brain, brain_inputs)
         brain_out = self.brain.get_outputs(V_brain)
 
-        reabs_frac = self.kidney.volume_reabsorption_frac
-        GFR = -kidney_effects['dV_blood'] / (1 - reabs_frac) if reabs_frac < 1.0 else 0.0
+        # reabs_frac = self.kidney.volume_reabsorption_frac
+        # GFR = -kidney_effects['dV_blood'] / (1 - reabs_frac) if reabs_frac < 1.0 else 0.0
+        GFR = kidney_effects['GFR']
 
         # Соотношение лёгочного и системного кровотока (Qp/Qs) и доля шунта
         Qp = heart_out['Q_pulmonary']
@@ -392,6 +401,7 @@ class WholeBodyModel:
         return outputs
 
     def simulate(self, t_span, t_eval=None, y0=None, method='RK45', **kwargs): # <- добавить y0=None
+    # def simulate(self, t_span, t_eval=None, y0=None, method='BDF', **kwargs):
         if y0 is None:
             y0 = self.calibrate_initial_state() # или get_initial_state() + калибровка
         return solve_ivp(self.derivatives, t_span, y0, t_eval=t_eval, method=method, **kwargs)

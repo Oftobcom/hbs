@@ -111,7 +111,8 @@ def simulate_scenario(vsd_resistance, flow_dependent_lungs, label, color,
     )
 
     # проверка критерия - СРЕДНЕЕ за 1 кардиоцикл, а не мгновенное в t=0
-    y0 = model.get_initial_state()
+    # y0 = model.get_initial_state()
+    y0 = model.calibrate_initial_state(t_calib=10)
     T_cycle = 60.0 / model.heart.hr_base  # 0.857с при HR=70
     t_samples = np.linspace(0, T_cycle, 25) # 25 точек за цикл
     P_sa_vals = []
@@ -133,6 +134,7 @@ def simulate_scenario(vsd_resistance, flow_dependent_lungs, label, color,
     
     print(f"  Симуляция {label}...", end=" ", flush=True)
     sol = model.simulate(t_span, t_eval, method='RK45', rtol=1e-5, atol=1e-7)
+    # sol = model.simulate(t_span, t_eval, method='BDF', rtol=1e-6)
     print(f"завершена за {len(sol.t)} шагов")
     
     # Сбор выходных переменных
