@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ml/dataset_generator_v5.py
+ml/dataset_generator.py
 
 Stage 2: генерация датасета (θ, X_clean, X_noisy) для суррогата и инверсии.
 
 Запуск:
     # smoke-тест (стратифицированно по log R_vsd)
-    python -m ml.dataset_generator_v5 --quick
+    python -m ml.dataset_generator --quick
 
     # полный прогон
-    python -m ml.dataset_generator_v5 --n-samples 15000 --n-jobs 8
+    python -m ml.dataset_generator --n-samples 15000 --n-jobs 8
 
     # продолжить прерванный прогон (готовые чанки пропускаются)
-    python -m ml.dataset_generator_v5 --n-samples 15000 --n-jobs 8
+    python -m ml.dataset_generator --n-samples 15000 --n-jobs 8
 
     # принудительно пересчитать всё
-    python -m ml.dataset_generator_v5 --n-samples 15000 --no-resume
+    python -m ml.dataset_generator --n-samples 15000 --no-resume
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ VARY_PARAMS: list[str] = [
 ]
 
 PARAM_BOUNDS: dict[str, tuple[float, float]] = {
-    "d_vsd":            (3.0,  18.0),   # мм
+    "d_vsd":            (3.0,  7.11),   # мм
     "E_max_lv":         (1.5,   3.5),
     "E_max_rv":         (0.5,   1.5),
     "R_sys":            (0.8,   1.6),
@@ -125,34 +125,46 @@ class SimConfig:
     def __init__(self, quick: bool = True):
         if quick:
             self.t_end = 350.0
-            self.n_samples_t = 7000
-            self.t_start_stationary = 250.0 # было 120, 120 мало для C_ven=12*R_sys~14с
-            self.stationary_window = 50.0    # было 30 -> ставь 50 как в full
-            self.stationary_rel_tol = 0.10   # 10% покрывает пульсацию
+            self.n_samples_t = 3000
+            self.t_start_stationary = 250.0
+            self.stationary_window = 50.0
+            # 10% покрывает естественную пульсацию P_sa в Windkessel
+            self.stationary_rel_tol = 0.10
         else:
             self.t_end = 400.0
-            self.n_samples_t = 8000 # 9000
+            self.n_samples_t = 8000
             self.t_start_stationary = 300.0
             self.stationary_window = 50.0
-            self.stationary_rel_tol = 0.015
+            self.stationary_rel_tol = 0.10
 
-        # FIX 5 (v5): адаптивное удлинение t_end
+        # адаптивное удлинение t_end
         self.adaptive_t_end = True
         self.t_end_max = 600.0
-        # FIX 5 (v5): C_sys_ven зафиксирован в build_model (whole_body.py)
+        # C_sys_ven зафиксирован в build_model (whole_body.py)
         self.C_sys_ven_const = 12.0
 
-        # FIX 8 (v5): держать dt ≈ const при удлинении t_end
+        # держать dt ≈ const при удлинении t_end
         self.scale_n_samples_t_with_t_end = True
 
         self.n_cycles_avg = 10
 
-        # FIX 2 (v5): технический фильтр по Qp_Qs
+        # Технический фильтр по Qp_Qs
         self.P_sa_blowup = 300.0
         self.Qp_Qs_min = 0.05
-        self.Qp_Qs_max = 10.0
-
-        # Физиологические пороги — только для флагов
+        # Hard-порог оставлен как sanity против численных артефактов,
+        # но ослаблен с 20 до 50. Точки 20 < Qp_Qs < 50 → ok + flag_is_extreme_shunt.
+        self.Qp_Qs_max_hard = 50.0
+        # Системный коллапс — hard reject (кардиогенный шок, не оставляем даже с флагом).
+        self.Q_aortic_min = 25.0          # мл/с; норма ~80
+        # Мягкий флаг «хвост распределения» (Qp_Qs > 5).
+        self.Qp_Qs_extreme_lo = 5.0
+        self.Qp_Qs_extreme_hi = 50.0      # = Qp_Qs_max_hard
+        # Fix B: клинический верх для Stage 3. Точки Qp_Qs > 4
+        # помечаются флагом is_beyond_clinical_range, но сохраняются в датасет.
+        self.Qp_Qs_clinical_max = 4.0
+        # ---------------------------------------------------------------------
+        # Физиологические пороги — только для флагов, НЕ для отбраковки
+        # ---------------------------------------------------------------------
         self.thr_phtn_moderate = 25.0
         self.thr_phtn_severe = 40.0
         self.thr_sys_htn = 140.0
@@ -166,7 +178,7 @@ class SimConfig:
         self.noise_keys = ("Qp_Qs", "P_pa", "EDV_LV", "EDV_RV")
 
         self.random_seed = 42
-        self.chunk_size = 100
+        self.chunk_size = 500
 
 
 # =============================================================================
@@ -221,7 +233,11 @@ def config_fingerprint(cfg: SimConfig) -> str:
         "noise_keys": list(cfg.noise_keys),
         "P_sa_blowup": cfg.P_sa_blowup,
         "Qp_Qs_min": cfg.Qp_Qs_min,
-        "Qp_Qs_max": cfg.Qp_Qs_max,
+        "Qp_Qs_max_hard": cfg.Qp_Qs_max_hard,
+        "Q_aortic_min": cfg.Q_aortic_min,
+        "Qp_Qs_extreme_lo": cfg.Qp_Qs_extreme_lo,
+        "Qp_Qs_extreme_hi": cfg.Qp_Qs_extreme_hi,
+        "Qp_Qs_clinical_max": cfg.Qp_Qs_clinical_max,
         "chunk_size": cfg.chunk_size,
     }
     s = json.dumps(payload, sort_keys=True)
@@ -259,8 +275,16 @@ def make_theta(vary_row: np.ndarray) -> dict[str, float]:
 # =============================================================================
 
 def is_numerically_valid(X: dict[str, float], cfg: SimConfig) -> tuple[bool, str]:
-    """Жёсткий технический фильтр. Единственный, который отбрасывает."""
-    for k in ("P_sa", "P_pa", "EDV_LV", "EDV_RV", "Qp_Qs"):
+    """
+    Жёсткий технический фильтр. Единственный, который отбрасывает.
+
+    Политика после Fix B:
+      - Q_aortic < Q_aortic_min       → reject (кардиогенный шок, нефизично)
+      - Qp_Qs > Qp_Qs_max_hard (50)   → reject (численный артефакт)
+      - Qp_Qs в (20, 50]              → ok, но flag_is_extreme_shunt
+      - Qp_Qs в (4, 20]               → ok + flag_is_beyond_clinical_range
+    """
+    for k in ("P_sa", "P_pa", "EDV_LV", "EDV_RV", "Qp_Qs", "Q_aortic"):
         v = X.get(k, np.nan)
         if not np.isfinite(v):
             return False, f"non_finite:{k}"
@@ -268,11 +292,19 @@ def is_numerically_valid(X: dict[str, float], cfg: SimConfig) -> tuple[bool, str
         return False, "negative_volume"
     if X["P_sa"] <= 0 or X["P_sa"] > cfg.P_sa_blowup:
         return False, "blowup_P_sa"
-    # FIX 2 (v5): sanity по Qp_Qs
+
+    # HARD: слишком маленький Qp/Qs (право-левый «сверх-Эйзенменгер», артефакт)
     if X["Qp_Qs"] <= cfg.Qp_Qs_min:
         return False, "Qp_Qs_too_small"
-    if X["Qp_Qs"] > cfg.Qp_Qs_max:
-        return False, "Qp_Qs_too_large"
+
+    # HARD: численный артефакт (защита от Q_aortic ≈ 20 при Qp = 2000)
+    if X["Qp_Qs"] > cfg.Qp_Qs_max_hard:
+        return False, "Qp_Qs_numerical_artifact"
+
+    # HARD: системный коллапс — не оставляем даже с флагом
+    if X["Q_aortic"] < cfg.Q_aortic_min:
+        return False, "systemic_collapse"
+
     return True, "ok"
 
 
@@ -283,7 +315,7 @@ def classify_physiological(X: dict[str, float], cfg: SimConfig) -> dict[str, boo
     """
     Qp_Qs = X["Qp_Qs"]
     flags: dict[str, bool] = {
-        # FIX 7 (v5): явные флаги направления сброса
+        # Явные флаги направления сброса
         "is_left_to_right_shunt":  Qp_Qs > 1.0,
         "is_right_to_left_shunt":  Qp_Qs < 1.0,
         "is_pulmonary_htn":        X["P_pa"] > cfg.thr_phtn_moderate,
@@ -293,8 +325,13 @@ def classify_physiological(X: dict[str, float], cfg: SimConfig) -> dict[str, boo
         "is_large_shunt":          Qp_Qs > cfg.thr_large_shunt,
         "is_dilated_lv":           X["EDV_LV"] > cfg.thr_dilated_lv,
         "is_dilated_rv":           X["EDV_RV"] > cfg.thr_dilated_rv,
+        # Мягкий флаг «хвост распределения»
+        "is_extreme_shunt":        Qp_Qs > cfg.Qp_Qs_extreme_lo,
+        # Точка близка к системному коллапсу, но прошла фильтр
+        "is_systemic_collapse_near": X["Q_aortic"] < 2.0 * cfg.Q_aortic_min,
+        "is_beyond_clinical_range": Qp_Qs > cfg.Qp_Qs_clinical_max,
     }
-    # FIX 7 (v5): Эйзенменгер = право-левый сброс + тяжёлая ЛГ
+    # Эйзенменгер = право-левый сброс + тяжёлая ЛГ
     flags["is_eisenmenger_like"] = (
         flags["is_right_to_left_shunt"] and flags["is_severe_phtn"]
     )
@@ -303,6 +340,7 @@ def classify_physiological(X: dict[str, float], cfg: SimConfig) -> dict[str, boo
         flags["is_systemic_hypo"], flags["is_large_shunt"],
         flags["is_dilated_lv"], flags["is_dilated_rv"],
         flags["is_eisenmenger_like"],
+        flags["is_extreme_shunt"],
     ])
     flags["is_healthy_range"] = not any_pathology
     return flags
@@ -393,9 +431,7 @@ def _steady_with_reason(model,
     X["EDV_LV"] = float(np.max(data["V_lv"][window]))
     X["EDV_RV"] = float(np.max(data["V_rv"][window]))
 
-    # FIX 6 (v5): CO = Q_aortic (мл/с), плюс явный вариант в л/мин.
-    # Модель оперирует мл/с, поэтому CO в мл/с = Q_aortic.
-    # CO_L_min = Q_aortic * 60 / 1000 — на случай клинической интерпретации.
+    # CO = Q_aortic (мл/с), плюс вариант в л/мин
     X["CO"] = X["Q_aortic"]                              # мл/с
     X["CO_L_min"] = X["Q_aortic"] * 60.0 / 1000.0        # л/мин
 
@@ -408,7 +444,7 @@ def _steady_with_reason(model,
 
 def _effective_t_end(theta: dict[str, float], cfg: SimConfig) -> float:
     """
-    FIX 5 (v5): удлиняем t_end для "медленных" θ.
+    Удлиняем t_end для "медленных" θ.
     Доминирующая постоянная времени: max(C_sys_art, C_sys_ven_const) * R_sys.
     Reference: C_art=2.0, C_ven=12.0, R_sys=1.2 → tau_ref = 14.4 c.
     """
@@ -425,7 +461,7 @@ def _effective_t_end(theta: dict[str, float], cfg: SimConfig) -> float:
 
 def _effective_n_samples_t(t_end_eff: float, cfg: SimConfig) -> int:
     """
-    FIX 8 (v5): держим dt ≈ const. Если t_end вырос в 1.3x, то
+    Держим dt ≈ const. Если t_end вырос в 1.3x, то
     n_samples_t тоже растёт в 1.3x — точность не падает.
     """
     if not cfg.scale_n_samples_t_with_t_end:
@@ -465,7 +501,7 @@ def simulate_one(idx: int, param_row: np.ndarray, cfg: SimConfig) -> dict[str, A
         record["reason"] = f"build_exception:{type(e).__name__}"
         return record
 
-    # FIX 3: получаем reason-код
+    # Получаем reason-код
     X_clean, reason = _steady_with_reason(
         model, (0.0, t_end_eff), n_samples_t_eff,
         cfg.t_start_stationary, cfg,
@@ -476,7 +512,7 @@ def simulate_one(idx: int, param_row: np.ndarray, cfg: SimConfig) -> dict[str, A
         record["reason"] = reason
         return record
 
-    # FIX 2: технический фильтр — единственный, который отбрасывает
+    # Единственный фильтр, который отбрасывает
     ok_num, reason_num = is_numerically_valid(X_clean, cfg)
     if not ok_num:
         record["status"] = "reject"
@@ -523,7 +559,7 @@ def generate_chunked(n_samples: int,
 
     for start in range(0, n_samples, cfg.chunk_size):
         end = min(start + cfg.chunk_size, n_samples)
-        # FIX 1: fingerprint входит в имя чанка
+        # Fingerprint входит в имя чанка
         chunk_path = out_dir / f"stage2_chunk_{fp}_{start:06d}_{end:06d}.parquet"
 
         if resume and chunk_path.exists():
@@ -565,7 +601,7 @@ def generate_chunked(n_samples: int,
 
 
 # =============================================================================
-# 13. Диагностика (гистограмма R_vsd)
+# 13. Диагностика (гистограмма R_vsd + хвосты)
 # =============================================================================
 
 def _text_log_histogram(values: np.ndarray, n_bins: int = 10) -> str:
@@ -624,7 +660,18 @@ def report_diagnostics(df: pd.DataFrame, cfg: SimConfig,
         print("\n[Stage2] Доли флагов среди валидных:")
         for c in flag_cols:
             frac = float(ok_df[c].mean())
-            print(f"          {c:30s} {frac * 100:5.1f}%")
+            print(f"          {c:34s} {frac * 100:5.1f}%")
+
+        # FIX 2: явный вывод хвостов
+        if "flag_is_extreme_shunt" in ok_df.columns:
+            n_extreme = int(ok_df["flag_is_extreme_shunt"].sum())
+            print(f"\n[Stage2] Хвост: {n_extreme} из {n_ok} валидных "
+                  f"с Qp_Qs > {cfg.Qp_Qs_extreme_lo}")
+
+        if "flag_is_healthy_range" in ok_df.columns:
+            n_healthy = int(ok_df["flag_is_healthy_range"].sum())
+            print(f"[Stage2] Здоровых (is_healthy_range): "
+                  f"{n_healthy} из {n_ok}")
 
         cols = [c for c in df.columns if c.startswith("X_clean_")]
         print("\n[Stage2] X_clean (только ok):")
@@ -643,6 +690,12 @@ def report_diagnostics(df: pd.DataFrame, cfg: SimConfig,
         "adaptive_t_end": cfg.adaptive_t_end,
         "C_sys_ven_const": cfg.C_sys_ven_const,
         "scale_n_samples_t": cfg.scale_n_samples_t_with_t_end,
+        # FIX 2: пороги попадают в отчёт
+        "Qp_Qs_max_hard": cfg.Qp_Qs_max_hard,
+        "Q_aortic_min": cfg.Q_aortic_min,
+        "Qp_Qs_extreme_lo": cfg.Qp_Qs_extreme_lo,
+        "Qp_Qs_extreme_hi": cfg.Qp_Qs_extreme_hi,
+        "Qp_Qs_clinical_max": cfg.Qp_Qs_clinical_max,
         "status_counts": df["status"].value_counts().to_dict(),
         "reason_counts": df.loc[df["status"] != "ok", "reason"]
                             .value_counts().to_dict(),
@@ -697,7 +750,7 @@ def make_quick_stratified_samples(n_bins: int = 6, per_bin: int = 6) -> np.ndarr
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Stage 2: dataset generator v5"
+        description="Stage 2: dataset generator"
     )
     parser.add_argument("--n-samples", type=int, default=1000)
     parser.add_argument("--n-jobs", type=int, default=8)
@@ -707,7 +760,7 @@ def main() -> None:
                         help="не использовать готовые чанки (пересчитать всё)")
     parser.add_argument("--output", type=str, default=None,
                         help="итоговый parquet (по умолчанию results/stage2_dataset_<fp>_<n>.parquet)")
-    parser.add_argument("--chunk-size", type=int, default=100)
+    parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--n-samples-t", type=int, default=None,
                         help="переопределить число точек t_eval (по умолчанию cfg)")
     args = parser.parse_args()
@@ -716,7 +769,6 @@ def main() -> None:
 
     cfg = SimConfig(quick=args.quick)
     cfg.chunk_size = args.chunk_size
-    # cfg = SimConfig(quick=True)
     if args.n_samples_t is not None:
         cfg.n_samples_t = args.n_samples_t
         cfg.scale_n_samples_t_with_t_end = False  # ручное значение — не масштабируем
@@ -743,7 +795,7 @@ def main() -> None:
     )
 
     print("=" * 70)
-    print("Stage 2 — генерация датасета (θ → X_clean / X_noisy)  [v5]")
+    print("Stage 2 — генерация датасета (θ → X_clean / X_noisy)")
     print("=" * 70)
     print(f"fingerprint : {fp}")
     print(f"VARY_PARAMS : {VARY_PARAMS}")
@@ -754,6 +806,10 @@ def main() -> None:
     print(f"n_samples_t : {cfg.n_samples_t} "
           f"(scale_with_t_end={cfg.scale_n_samples_t_with_t_end})")
     print(f"chunk_size  : {cfg.chunk_size}")
+    print(f"stat tol    : {cfg.stationary_rel_tol}")
+    print(f"Qp_Qs hard  : ({cfg.Qp_Qs_min}, {cfg.Qp_Qs_max_hard}]")
+    print(f"Qp_Qs clin  : {cfg.Qp_Qs_clinical_max} (порог Stage 3)")
+    print(f"Q_aortic min: {cfg.Q_aortic_min} мл/с")
     print(f"quick       : {args.quick}")
 
     r_min = d_vsd_to_R_vsd(PARAM_BOUNDS["d_vsd"][1])

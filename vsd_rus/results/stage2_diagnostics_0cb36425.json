@@ -1,0 +1,50 @@
+{
+  "config_fingerprint": "0cb36425",
+  "n_total": 36,
+  "n_ok": 1,
+  "R_vsd_range_actual": [
+    0.5008775503011582,
+    15.802469135802468
+  ],
+  "R_vsd_range_planned": [
+    0.5,
+    15.0
+  ],
+  "log_params": [
+    "d_vsd"
+  ],
+  "t_end": 350.0,
+  "t_end_max": 600.0,
+  "adaptive_t_end": true,
+  "C_sys_ven_const": 12.0,
+  "scale_n_samples_t": true,
+  "Qp_Qs_max_hard": 50.0,
+  "Q_aortic_min": 25.0,
+  "Qp_Qs_extreme_lo": 5.0,
+  "Qp_Qs_extreme_hi": 50.0,
+  "Qp_Qs_clinical_max": 4.0,
+  "status_counts": {
+    "reject": 35,
+    "ok": 1
+  },
+  "reason_counts": {
+    "Qp_Qs_numerical_artifact": 32,
+    "systemic_collapse": 3
+  },
+  "flag_fractions": {
+    "flag_is_left_to_right_shunt": 1.0,
+    "flag_is_right_to_left_shunt": 0.0,
+    "flag_is_pulmonary_htn": 0.0,
+    "flag_is_severe_phtn": 0.0,
+    "flag_is_systemic_htn": 0.0,
+    "flag_is_systemic_hypo": 1.0,
+    "flag_is_large_shunt": 0.0,
+    "flag_is_dilated_lv": 0.0,
+    "flag_is_dilated_rv": 0.0,
+    "flag_is_extreme_shunt": 0.0,
+    "flag_is_systemic_collapse_near": 1.0,
+    "flag_is_beyond_clinical_range": 0.0,
+    "flag_is_eisenmenger_like": 0.0,
+    "flag_is_healthy_range": 0.0
+  }
+}
