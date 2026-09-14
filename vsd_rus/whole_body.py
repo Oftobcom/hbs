@@ -238,6 +238,11 @@ class WholeBodyModel:
         d_heart = self.heart.get_derivatives(t, V_heart, heart_inputs)
         heart_out = self.heart.get_outputs(V_heart)
 
+        P_la = heart_out['P_la']
+        P_lv = heart_out['P_lv']
+        P_ra = heart_out['P_ra']
+        P_rv = heart_out['P_rv']
+
         # Лёгкие
         lungs_inputs = {'Q_pulmonary': heart_out['Q_pulmonary'], 'P_pv': P_pv}
         d_lungs = self.lungs.get_derivatives(t, V_lungs, lungs_inputs)
@@ -353,6 +358,11 @@ class WholeBodyModel:
         self.heart.get_derivatives(t, V_heart, heart_inputs)
         heart_out = self.heart.get_outputs(V_heart)
 
+        P_la = heart_out['P_la']
+        P_lv = heart_out['P_lv']
+        P_ra = heart_out['P_ra']
+        P_rv = heart_out['P_rv']
+
         lungs_inputs = {'Q_pulmonary': heart_out['Q_pulmonary'], 'P_pv': P_pv}
         self.lungs.get_derivatives(t, V_lungs, lungs_inputs)
         lungs_out = self.lungs.get_outputs(V_lungs)
@@ -405,6 +415,7 @@ class WholeBodyModel:
             'V_la': V_heart[0], 'V_lv': V_heart[1], 'V_ra': V_heart[2], 'V_rv': V_heart[3],
             'Q_aortic': Qs, 'Q_pulmonary': Qp,
             'Q_vsd': heart_out['Q_vsd'],
+            'P_lv': P_lv, 'P_rv': P_rv, 'P_la': P_la, 'P_ra': P_ra,
             'Qp_Qs': Qp_Qs,
             'shunt_fraction_LR': shunt_fraction_LR,           # было 'shunt_fraction'
             'shunt_fraction_R2L': gas_ex['shunt_fraction_R2L'],  # из gas_ex

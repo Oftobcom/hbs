@@ -148,7 +148,12 @@ class Heart4Chambers(OrganModel):
             'Q_pv_to_la': Q_pv_to_la,
             'Q_vsd': Q_vsd,
             'Q_mitral': Q_mitral,
-            'Q_tricuspid': Q_tricuspid
+            'Q_tricuspid': Q_tricuspid,
+            # --- давления в камерах (для PV-петель и диагностики) ---
+            'P_la': P_la,
+            'P_lv': P_lv,
+            'P_ra': P_ra,
+            'P_rv': P_rv,
         }
 
         dV_la = Q_pv_to_la - Q_mitral
