@@ -49,7 +49,9 @@ def safe_savgol_filter(data, window_length, polyorder):
         return data
 
 def simulate_scenario(vsd_resistance, flow_dependent_lungs, label, color, 
-                      t_span=(0, 300), t_eval=None, description=""):
+                      t_span=(0, 300), t_eval=None, description="",
+                      pressure_remodel=False,
+                      pressure_sensitivity=0.04):
     """
     Запускает симуляцию для заданного сопротивления ДМЖП.
     
@@ -71,7 +73,8 @@ def simulate_scenario(vsd_resistance, flow_dependent_lungs, label, color,
         Описание сценария
     """
     if t_eval is None:
-        t_eval = np.linspace(t_span[0], t_span[1], 8000)
+        n_pts = 8000 if t_span[1] <= 400 else 20000
+        t_eval = np.linspace(t_span[0], t_span[1], n_pts)
     
     # Начальные концентрации веществ
     initial_conc = {
@@ -80,9 +83,10 @@ def simulate_scenario(vsd_resistance, flow_dependent_lungs, label, color,
         'ammonia': 0.3,
         'albumin': 4.5,
         'glucose': 5.0,
-        'oxygen': 0.15
+        'oxygen': 0.15,
+        'co2':    0.52,    # смешанная венозная CO2, мл/мл
     }
-    
+
     blood_params = {
         'initial_concentrations': initial_conc,
         'V0': 5000.0
@@ -96,14 +100,23 @@ def simulate_scenario(vsd_resistance, flow_dependent_lungs, label, color,
     
     # Создание модели
     model = WholeBodyModel(
-        baroreflex_params={'P_set': 90, 'HR_base': 70, 'gain': 0.01, 'tau': 2.0},
+        baroreflex_params={'P_set': 90, 
+                           'HR_base': 75 if vsd_resistance != np.inf else 70,
+                           'gain': 0.01, 'tau': 2.0},
         blood_params=blood_params,
         vsd_resistance=vsd_resistance,
         flow_dependent_lungs=flow_dependent_lungs,
-        lungs_params={'flow_dependent_resistance': flow_dependent_lungs,
-                      'flow_sensitivity': 0.08},
+        lungs_params={
+            'flow_dependent_resistance': flow_dependent_lungs,
+            'flow_sensitivity': 0.15,
+            'pressure_remodel': pressure_remodel,
+            'P_pa_threshold': 25.0,
+            'pressure_sensitivity': pressure_sensitivity,
+            'R_remodel_max': 5.0,
+            'tau_remodel': 200.0,
+        },
         heart_params=heart_params,
-        R_sys_peripheral=None, # посчитается под MAP 85
+        R_sys_peripheral=None,
         target_MAP=85.0, target_CO=83.0,
         C_sys_art=2.0,
         C_sys_ven=12.0,
@@ -133,8 +146,8 @@ def simulate_scenario(vsd_resistance, flow_dependent_lungs, label, color,
     print(f"  [CHECK] R_total={R_total_mean:.2f} MAP={P_sa_mean:.0f} CO={CO_mean:.0f} (цель 85±5 и 80±10)")
     
     print(f"  Симуляция {label}...", end=" ", flush=True)
-    sol = model.simulate(t_span, t_eval, method='RK45', rtol=1e-5, atol=1e-7)
-    # sol = model.simulate(t_span, t_eval, method='BDF', rtol=1e-6)
+    # sol = model.simulate(t_span, t_eval, method='RK45', rtol=1e-5, atol=1e-7)
+    sol = model.simulate(t_span, t_eval, method='BDF', rtol=1e-6)
     print(f"завершена за {len(sol.t)} шагов")
     
     # Сбор выходных переменных
@@ -165,11 +178,6 @@ def simulate_scenario(vsd_resistance, flow_dependent_lungs, label, color,
                 else:
                     # Если нет валидных значений, заполняем нулями
                     data[key] = np.zeros_like(data[key])
-            
-            # Для Qp_Qs, если есть нули, заменяем их на 1 (норма)
-            if key == 'Qp_Qs':
-                data[key] = np.where(data[key] == 0, 1.0, data[key])
-                data[key] = np.clip(data[key], 0.5, 3.0)  # Ограничиваем разумными пределами
     
     return data, color, label
 
@@ -211,11 +219,14 @@ def plot_enhanced_comparison(results_dict):
     """Улучшенная визуализация сравнения"""
     
     # Определяем цвета и метки
-    colors = {'Здоровый': '#2ecc71', 'Малый ДМЖП (R=5.0)': '#f39c12', 
-              'Большой ДМЖП (R=1.0)': '#e74c3c'}
-    labels = {'Здоровый': 'Здоровый', 'Малый ДМЖП (R=5.0)': 'Малый ДМЖП (R=5.0)', 
-              'Большой ДМЖП (R=1.0)': 'Большой ДМЖП (R=1.0)'}
-    
+    colors = {
+        'Здоровый': '#2ecc71',
+        'Малый ДМЖП (R=5.0)': '#f39c12',
+        'Большой ДМЖП (R=1.0)': '#e74c3c',
+        'Эйзенменгер (R=0.7)': '#8e44ad',
+    }
+    labels = {k: k for k in colors}   # если подписи совпадают с ключами
+
     # Создаём фигуру с сеткой 3x3
     fig = plt.figure(figsize=(18, 12))
     gs = fig.add_gridspec(3, 3, hspace=0.35, wspace=0.3)
@@ -373,22 +384,22 @@ def plot_enhanced_comparison(results_dict):
     ax7.grid(True, alpha=0.3)
     ax7.set_ylim(0, 100)
     
-    # 8. Потребление кислорода мозгом
+    # 8. SaO2
     ax8 = fig.add_subplot(gs[2, 1])
     for name, (data, _, _) in results_dict.items():
-        if 'O2_consumption' in data and len(data['t']) > 0:
+        if 'SaO2' in data:
             t = data['t'][:5000]
-            o2 = data['O2_consumption'][:5000]
-            mask = np.isfinite(o2)
+            sao2 = data['SaO2'][:5000]
+            mask = np.isfinite(sao2)
             if np.any(mask):
-                ax8.plot(t[mask], o2[mask], color=colors[name], lw=1.5, label=labels[name])
-    ax8.set_ylabel('Потребление O₂ (у.е./с)')
+                ax8.plot(t[mask], sao2[mask] * 100, color=colors[name], lw=1.5, label=labels[name])
+    ax8.set_ylabel('SaO₂ (%)')
     ax8.set_xlabel('Время (с)')
-    ax8.set_title('Метаболизм мозга')
-    ax8.legend(loc='upper right', fontsize=7)
-    ax8.grid(True, alpha=0.3)
-    ax8.set_ylim(0, 30)
-    
+    ax8.set_title('Артериальная сатурация O₂')
+    ax8.axhline(y=90, color='orange', linestyle=':', alpha=0.5, label='Гипоксемия < 90%')
+    ax8.legend(loc='lower right', fontsize=7)
+    ax8.set_ylim(60, 100)
+
     # 9. Сводная статистика
     ax9 = fig.add_subplot(gs[2, 2])
     ax9.axis('tight')
@@ -546,28 +557,36 @@ def plot_shunt_effect_analysis(results_dict):
     ax.grid(True, alpha=0.3)
     ax.set_ylim(4800, 5200)
     
-    # 5. Функция почек
+    # 5. Фракция право-левого шунта (R→L)
     ax = axes[1, 1]
+    ymax = 0.0
     for name, (data, _, _) in results_dict.items():
-        if 'GFR' in data:
-            mask = (data['t'] >= t_start) & np.isfinite(data['GFR'])
+        if 'shunt_fraction_R2L' in data:
+            mask = (data['t'] >= t_start) & np.isfinite(data['shunt_fraction_R2L'])
             if np.any(mask):
                 t_steady = data['t'][mask]
-                gfr = data['GFR'][mask] / 60.0 # <-- /60 если GFR_base у тебя в мл/мин
-                # или если GFR_base уже в мл/с, то просто gfr без деления
+                sf = data['shunt_fraction_R2L'][mask]
                 step = max(1, len(t_steady) // 500)
-                ax.plot(t_steady[::step], gfr[::step], color=colors.get(name, 'gray'), lw=2, label=name)
-
+                sf_pct = sf[::step] * 100
+                ax.plot(t_steady[::step], sf_pct,
+                        color=colors.get(name, 'gray'), lw=2, label=name)
+                # Адаптивный верхний предел: максимум по всем сценариям
+                ymax = max(ymax, float(np.max(sf_pct)))
     ax.set_xlabel('Время (с)')
-    ax.set_ylabel('СКФ (мл/с)')
-    ax.set_title('Функция почек')
-    ax.legend(fontsize=8)
+    ax.set_ylabel('Доля R→L шунта, %')
+    ax.set_title('Фракция право-левого шунта')
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, 3.0) # <-- было 0.5-2.5, стало 0-3.0 чтобы видеть падение до 0
-    
+    ax.axhline(y=10, color='orange', linestyle=':', alpha=0.5,
+               label='Клинически значимый R→L')
+    ax.legend(fontsize=8)
+    # Если R→L нет совсем (ymax ≈ 0) — показываем диапазон 0–10 %,
+    # чтобы линия на нуле читалась чётко; иначе — с запасом 20 %.
+    ax.set_ylim(0, max(10.0, ymax * 1.2))
+
     # 6. Радарная диаграмма
+    fig.delaxes(axes[1, 2])
     ax_polar = fig.add_subplot(2, 3, 6, projection='polar')
-    categories = ['P_sa', 'Q_aortic', 'V_blood', 'GFR', 'Q_brain']
+    categories = ['P_sa', 'Q_aortic', 'V_blood', 'GFR', 'SaO2', 'Q_brain']
     angles = np.linspace(0, 2*np.pi, len(categories), endpoint=False).tolist()
     angles += angles[:1]
     
@@ -700,7 +719,20 @@ def print_detailed_report(results_dict):
             if np.any(mask_gfr):
                 gfr = np.mean(data['GFR'][mask_gfr])
                 print(f"  • СКФ: {gfr:.2f} мл/с")
-    
+
+        if 'SaO2' in data:
+            mask_sao2 = mask & np.isfinite(data['SaO2'])
+            if np.any(mask_sao2):
+                sao2 = np.mean(data['SaO2'][mask_sao2]) * 100
+                print(f"  • SaO₂: {sao2:.1f}%")
+
+        if 'shunt_fraction_R2L' in data:
+            mask_sh = mask & np.isfinite(data['shunt_fraction_R2L'])
+            if np.any(mask_sh):
+                sh = np.mean(data['shunt_fraction_R2L'][mask_sh])
+                if sh > 0.01:
+                    print(f"  • Доля R→L шунта: {sh*100:.1f}%")
+            
     # Сравнительный анализ
     print("\n" + "="*100)
     print("СРАВНИТЕЛЬНЫЙ АНАЛИЗ")
@@ -781,7 +813,16 @@ def main():
             'flow_dependent_lungs': True,
             'color': '#e74c3c',
             'description': 'Большой дефект, значительный лево-правый шунт'
-        }
+        },
+        'Эйзенменгер (R=0.7)': {
+            'vsd_resistance': 0.7,
+            'flow_dependent_lungs': True,
+            'pressure_remodel': True,
+            'pressure_sensitivity': 0.06,
+            't_span': (0, 3000),
+            'color': '#8e44ad',
+            'description': 'Хроническое ремоделирование → R→L шунт',
+        },
     }
     
     # Запуск симуляций
@@ -797,8 +838,10 @@ def main():
             flow_dependent_lungs=params['flow_dependent_lungs'],
             label=name,
             color=params['color'],
-            t_span=(0, 300),
-            description=params['description']
+            t_span=params.get('t_span', (0, 300)),
+            description=params['description'],
+            pressure_remodel=params.get('pressure_remodel', False),
+            pressure_sensitivity=params.get('pressure_sensitivity', 0.06),
         )
         results[name] = (data, color, label)
         

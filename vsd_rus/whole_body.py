@@ -10,6 +10,7 @@ from blood import BloodPool
 from gitract import GITract
 from brain import Brain
 from baroreflex import Baroreflex
+from gas_exchange import GasExchange
 
 class WindkesselVessel(OrganModel):
     """Двухэлементная модель Windkessel для сосудистого компартмента."""
@@ -42,6 +43,7 @@ class WholeBodyModel:
                  gitract_params=None,
                  brain_params=None,
                  baroreflex_params=None,
+                 gas_exchange_params=None,
                  vsd_resistance=np.inf,            # сопротивление ДМЖП
                  flow_dependent_lungs=False,       # учитывать рост сопротивления лёгких при перегрузке
                  R_sys_peripheral=None, # теперь None - считаем автоматом
@@ -57,18 +59,25 @@ class WholeBodyModel:
             if blood_params and 'initial_concentrations' in blood_params:
                 substance_names = list(blood_params['initial_concentrations'].keys())
             else:
-                substance_names = ['tox', 'bilirubin', 'ammonia', 'albumin', 'glucose', 'oxygen']
+                substance_names = ['tox', 'bilirubin', 'ammonia', 'albumin', 'glucose', 'oxygen', 'co2']
 
         self.substance_names = substance_names
+        self._substance_idx = {name: i for i, name in enumerate(substance_names)}
 
         # Инициализация органов и их параметров
         blood_init = {'V0': 5000.0}
         if blood_params:
             blood_init.update(blood_params)
-        initial_concentrations = blood_init.get('initial_concentrations', {})
+        initial_concentrations = dict(blood_init.get('initial_concentrations', {}))
+
+        DEFAULT_CONC = {
+            'tox': 0.0, 'bilirubin': 0.5, 'ammonia': 0.3,
+            'albumin': 4.5, 'glucose': 5.0,
+            'oxygen': 0.15, 'co2': 0.52,
+        }
         for name in substance_names:
             if name not in initial_concentrations:
-                initial_concentrations[name] = 0.0
+                initial_concentrations[name] = DEFAULT_CONC.get(name, 0.0)
 
         # Передаём сопротивление ДМЖП в сердце
         heart_params = heart_params or {}
@@ -120,12 +129,14 @@ class WholeBodyModel:
         self.fluid_intake_rate = fluid_intake_rate
         self.insensible_loss_rate = insensible_loss_rate
 
+        self.gas_exchange = GasExchange(**(gas_exchange_params or {}))
+
         # Порядок органов определяет структуру вектора состояния
         self.organ_list = [
             self.heart,   # 4
             self.lungs,   # 2
             self.liver,   # 5
-            self.blood,   # 1+4 =5
+            self.blood,   # 1 + num_substances
             self.gitract, # 2
             self.brain,   # 1
             self.baroreflex,  # 1
@@ -133,16 +144,26 @@ class WholeBodyModel:
             self.sys_ven, # 1
             self.pul_ven  # 1
         ]
+
+        # Имена органов в том же порядке, что и organ_list
+        ORGAN_NAMES = [
+            'heart', 'lungs', 'liver', 'blood', 'gitract',
+            'brain', 'baroreflex', 'sys_art', 'sys_ven', 'pul_ven',
+        ]
+        assert len(ORGAN_NAMES) == len(self.organ_list), \
+            "organ_list и ORGAN_NAMES рассинхронизированы"
+
+        # Строим срезы состояния и именованный индекс в одном цикле
         self.state_slices = []
+        self.idx = {}
         start = 0
-        for org in self.organ_list:
+        for name, org in zip(ORGAN_NAMES, self.organ_list):
             size = org.get_state_size()
-            self.state_slices.append(slice(start, start+size))
+            slc = slice(start, start + size)
+            self.state_slices.append(slc)
+            self.idx[name] = slc
             start += size
         self.total_states = start
-
-        # Сохраняем индекс барорефлекса для быстрого доступа
-        self.baroreflex_index = self.organ_list.index(self.baroreflex)
 
     def calibrate_initial_state(self, t_calib=10.0):
         # 1. Сохраняем
@@ -160,18 +181,14 @@ class WholeBodyModel:
             self.heart.R_valve[k] = 0.01
 
         y0 = self.get_initial_state()
-        sol = solve_ivp(self.derivatives, (0, t_calib), y0, method='RK45', rtol=1e-6, atol=1e-8)
+        # sol = solve_ivp(self.derivatives, (0, t_calib), y0, method='RK45', rtol=1e-6, atol=1e-8)
+        sol = solve_ivp(self.derivatives, (0, t_calib), y0, method='BDF', rtol=1e-6)
         y_steady = sol.y[:, -1]
 
         # 4. Восстановление R_valve и Emin/Emax
         self.heart._current_E_max = orig_Emax
         self.heart.R_valve = orig_R
         self.heart.E_min = orig_Emin
-
-        # 5. Проверка dP/dt<5
-        dydt = self.derivatives(0, y_steady)
-        s = self.state_slices
-        # assert abs(dydt[s[7]][0]) < 5.0
 
         return y_steady
 
@@ -186,19 +203,18 @@ class WholeBodyModel:
         return y0
 
     def derivatives(self, t, y):
-        # Получаем срезы состояния для каждого органа
-        s = self.state_slices
-        V_heart = y[s[0]]
-        V_lungs = y[s[1]]
-        V_liver = y[s[2]]
-        V_blood = y[s[3]]
-        V_gitract = y[s[4]]
-        V_brain = y[s[5]]
-        V_baroreflex = y[s[self.baroreflex_index]]
-        P_sa = y[s[7]][0]
-        P_sv = y[s[8]][0]
-        P_pv = y[s[9]][0]
-
+        # Распаковка состояния по именованным срезам
+        sl = self.idx
+        V_heart      = y[sl['heart']]
+        V_lungs      = y[sl['lungs']]
+        V_liver      = y[sl['liver']]
+        V_blood      = y[sl['blood']]
+        V_gitract    = y[sl['gitract']]
+        V_brain      = y[sl['brain']]
+        V_baroreflex = y[sl['baroreflex']]
+        P_sa         = y[sl['sys_art']][0]
+        P_sv         = y[sl['sys_ven']][0]
+        P_pv         = y[sl['pul_ven']][0]
         Vb = V_blood[0]
         C_blood = V_blood[1:]
         conc = dict(zip(self.substance_names, C_blood))
@@ -245,7 +261,6 @@ class WholeBodyModel:
 
         # Почки
         kidney_effects = self.kidney.compute_effects(P_sa, P_sv, C_tox, Vb)
-        dV_kidney = kidney_effects['dV_blood']
         dC_kidney = kidney_effects['dC_tox']
 
         # Мозг
@@ -255,11 +270,24 @@ class WholeBodyModel:
 
         # Кровь
         dC_blood_arr = np.zeros(len(self.substance_names))
-        idx = {name:i for i,name in enumerate(self.substance_names)}
-        if 'bilirubin' in idx: dC_blood_arr[idx['bilirubin']] += liver_out.get('dC_bilirubin',0)
-        if 'ammonia' in idx:   dC_blood_arr[idx['ammonia']]   += liver_out.get('dC_ammonia',0)
-        if 'albumin' in idx:   dC_blood_arr[idx['albumin']]   += liver_out.get('dC_albumin',0)
-        if 'tox' in idx:       dC_blood_arr[idx['tox']]       += dC_kidney
+        idx = self._substance_idx
+
+        # Вклады печени
+        if 'bilirubin' in idx: dC_blood_arr[idx['bilirubin']] += liver_out.get('dC_bilirubin', 0)
+        if 'ammonia'   in idx: dC_blood_arr[idx['ammonia']]   += liver_out.get('dC_ammonia',   0)
+        if 'albumin'   in idx: dC_blood_arr[idx['albumin']]   += liver_out.get('dC_albumin',   0)
+        if 'tox'       in idx: dC_blood_arr[idx['tox']]       += dC_kidney
+
+        # Вклады газообмена (после idx определён!)
+        gas_ex = self.gas_exchange.compute_effects(
+            C_v_O2  = conc.get('oxygen', 0.15),
+            C_v_CO2 = conc.get('co2',    0.52),
+            Q_p     = heart_out['Q_pulmonary'],
+            Q_shunt = heart_out['Q_vsd'],
+            V_blood = Vb,
+        )
+        if 'oxygen' in idx: dC_blood_arr[idx['oxygen']] += gas_ex['dC_O2']
+        if 'co2'    in idx: dC_blood_arr[idx['co2']]    += gas_ex['dC_CO2']
 
         # Общий баланс жидкости крови:
         # поступление из ЖКТ (абсорбция) + внутривенная инфузия
@@ -296,19 +324,19 @@ class WholeBodyModel:
         return dydt
 
     def compute_outputs(self, t, y):
-        s = self.state_slices
-        V_heart = y[s[0]]
-        V_lungs = y[s[1]]
-        V_liver = y[s[2]]
-        V_blood = y[s[3]]
-        V_gitract = y[s[4]]
-        V_brain = y[s[5]]
-        V_baroreflex = y[s[self.baroreflex_index]]
-        P_sa = y[s[7]][0]
-        P_sv = y[s[8]][0]
-        P_pv = y[s[9]][0]
+        sl = self.idx
+        V_heart      = y[sl['heart']]
+        V_lungs      = y[sl['lungs']]
+        V_liver      = y[sl['liver']]
+        V_blood      = y[sl['blood']]
+        V_gitract    = y[sl['gitract']]
+        V_brain      = y[sl['brain']]
+        V_baroreflex = y[sl['baroreflex']]
+        P_sa         = y[sl['sys_art']][0]
+        P_sv         = y[sl['sys_ven']][0]
+        P_pv         = y[sl['pul_ven']][0]
         P_pa = V_lungs[0]
-
+        
         Vb = V_blood[0]
         C_blood = V_blood[1:]
         conc = dict(zip(self.substance_names, C_blood))
@@ -330,8 +358,6 @@ class WholeBodyModel:
         lungs_out = self.lungs.get_outputs(V_lungs)
 
         # ЖКТ берет P_portal из состояния печени
-        P_portal_state = V_liver[5] if len(V_liver)>5 else liver_out.get('P_portal', P_sv) if 'liver_out' in locals() else 8.0
-        # проще: V_liver[5] if len>5 else 8.0 как в derivatives
         P_portal_state = V_liver[5] if len(V_liver)>5 else 8.0
         gitract_inputs = {'P_sa': P_sa, 'P_sv': P_sv,
                         'P_portal': P_portal_state,
@@ -355,17 +381,24 @@ class WholeBodyModel:
         self.brain.get_derivatives(t, V_brain, brain_inputs)
         brain_out = self.brain.get_outputs(V_brain)
 
-        # reabs_frac = self.kidney.volume_reabsorption_frac
-        # GFR = -kidney_effects['dV_blood'] / (1 - reabs_frac) if reabs_frac < 1.0 else 0.0
+        # Газообмен (для compute_outputs)
+        gas_ex = self.gas_exchange.compute_effects(
+            C_v_O2  = conc.get('oxygen', 0.15),
+            C_v_CO2 = conc.get('co2',    0.52),
+            Q_p     = heart_out['Q_pulmonary'],
+            Q_shunt = heart_out['Q_vsd'],
+            V_blood = Vb,
+        )
+
         GFR = kidney_effects['GFR']
 
         # Соотношение лёгочного и системного кровотока (Qp/Qs) и доля шунта
         Qp = heart_out['Q_pulmonary']
         Qs = heart_out['Q_aortic']
         Qp_Qs = Qp / max(Qs, 1e-6)                      # классическое определение
-        shunt_fraction = heart_out['Q_vsd'] / max(Qp, 1e-6)  # доля шунта в лёгочном потоке
-        Q_effective_systemic = Qs                       # псевдоним для ясности
-        Q_effective_pulmonary = Qp                      # псевдоним для ясности
+        shunt_fraction_LR = max(heart_out['Q_vsd'], 0.0) / max(Qp, 1e-6)  # L→R доля в Qp
+        # Q_effective_systemic = Qs                       # псевдоним для ясности
+        # Q_effective_pulmonary = Qp                      # псевдоним для ясности
 
         outputs = {
             'P_sa': P_sa, 'P_sv': P_sv, 'P_pa': P_pa, 'P_pv': P_pv,
@@ -373,9 +406,8 @@ class WholeBodyModel:
             'Q_aortic': Qs, 'Q_pulmonary': Qp,
             'Q_vsd': heart_out['Q_vsd'],
             'Qp_Qs': Qp_Qs,
-            'shunt_fraction': shunt_fraction,
-            'Q_effective_systemic': Qs,
-            'Q_effective_pulmonary': Qp,
+            'shunt_fraction_LR': shunt_fraction_LR,           # было 'shunt_fraction'
+            'shunt_fraction_R2L': gas_ex['shunt_fraction_R2L'],  # из gas_ex
             'Q_liver_out': liver_out['Q_liver_out'],
             'Q_renal': kidney_effects['Q_renal'],
             'urine_output': kidney_effects['urine_output'],
@@ -390,18 +422,27 @@ class WholeBodyModel:
             'C_ammonia_blood': conc.get('ammonia',0),
             'C_albumin_blood': conc.get('albumin',0),
             'C_tox_blood': conc.get('tox',0),
-            'oxygenation_index': lungs_out.get('oxygenation_index',1.0),
+            # 'oxygenation_index': lungs_out.get('oxygenation_index',1.0),
+            'oxygenation_index': gas_ex['SaO2'],   # алиас для обратной совместимости
             'metabolic_inhibition': brain_out.get('metabolic_inhibition',1.0),
             'liver_functional': liver_out.get('functional',1.0),
             'R1_lungs': lungs_out.get('R1_eff', self.lungs.R1_base),
             'R2_lungs': lungs_out.get('R2_eff', self.lungs.R2_base),
             'HR': HR,
-            'HR_target': baroreflex_out['HR_target']
+            'HR_target': baroreflex_out['HR_target'],
+            'SaO2':               gas_ex['SaO2'],
+            'C_a_O2':             gas_ex['C_a_O2'],
+            'C_v_O2':             gas_ex['C_v_O2'],
+            'P_a_O2':             gas_ex['P_a_O2'],
+            'P_v_O2':             gas_ex['P_v_O2'],
+            'P_v_CO2':            gas_ex['P_v_CO2'],
+            'O2_uptake':          gas_ex['O2_uptake'],
+            'CO2_removal':        gas_ex['CO2_removal'],
         }
         return outputs
 
-    def simulate(self, t_span, t_eval=None, y0=None, method='RK45', **kwargs): # <- добавить y0=None
-    # def simulate(self, t_span, t_eval=None, y0=None, method='BDF', **kwargs):
+    # def simulate(self, t_span, t_eval=None, y0=None, method='RK45', **kwargs):
+    def simulate(self, t_span, t_eval=None, y0=None, method='BDF', **kwargs):
         if y0 is None:
-            y0 = self.calibrate_initial_state() # или get_initial_state() + калибровка
+            y0 = self.calibrate_initial_state()
         return solve_ivp(self.derivatives, t_span, y0, t_eval=t_eval, method=method, **kwargs)
