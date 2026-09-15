@@ -16,21 +16,79 @@ from gas_exchange import GasExchange
 from peripheral_tissues import PeripheralTissues
 
 class WindkesselVessel(OrganModel):
-    """Двухэлементная модель Windkessel для сосудистого компартмента."""
-    def __init__(self, C, P0):
+    """
+    Двухэлементная модель Windkessel.
+
+    Два режима работы (выбирается через mode):
+      mode='P'  — состояние это давление P, dP/dt = (Qin − Qout)/C.
+                  Используется для артерий и лёгочных вен.
+      mode='V'  — состояние это объём V, dV/dt = Qin − Qout.
+                  Давление выводится: P = P0 + (V − V0)/C.
+                  Используется для системных вен — «буфера» крови.
+    """
+    def __init__(self, C, P0, mode='P', V0=None,
+                 target_fraction=None, tau_target=300.0):
         self.C = C
         self.P0 = P0
+        self.mode = mode
+        # V0 = объём при P = P0. Для mode='V' это стартовое V.
+        # Если не задан — считаем V0 = C * P0 (согласованность).
+        self.V0 = float(V0) if V0 is not None else C * P0
+
+        # --- Масс-баланс (только для mode='V') ---
+        # Если target_fraction задан, то V_sv медленно релаксирует
+        # к target_fraction · V_blood. Иначе — чистый Windkessel.
+        self.target_fraction = float(target_fraction) if target_fraction is not None else None
+        self.tau_target = float(tau_target)
+
         self._current_outputs = {}
-    def get_state_size(self): return 1
-    def get_initial_state(self): return np.array([self.P0])
+
+    def get_state_size(self):
+        return 1
+
+    def get_initial_state(self):
+        if self.mode == 'P':
+            return np.array([self.P0])
+        else:  # mode == 'V'
+            return np.array([self.V0])
+
     def get_derivatives(self, t, state, inputs):
-        P = state[0]
         Q_in = inputs.get('Q_in', 0.0)
         Q_out = inputs.get('Q_out', 0.0)
-        dP = (Q_in - Q_out) / self.C
-        self._current_outputs = {'P': P}
-        return np.array([dP])
-    def get_outputs(self, state): return self._current_outputs.copy()
+
+        if self.mode == 'P':
+            P = state[0]
+            dP = (Q_in - Q_out) / self.C
+            self._current_outputs = {'P': P}
+            return np.array([dP])
+        else:  # mode == 'V'
+            V = state[0]
+            dV = Q_in - Q_out
+
+            # --- Масс-баланс: медленная релаксация к целевой доле V_blood ---
+            # Если target_fraction задан, добавляем член, который тянет
+            # V_sv к target_fraction · V_blood. Релаксация медленная
+            # (tau_target), чтобы не ломать быструю гемодинамику.
+            if self.target_fraction is not None:
+                V_blood = inputs.get('V_blood', None)
+                if V_blood is not None:
+                    V_target = self.target_fraction * float(V_blood)
+                    dV += (V_target - V) / self.tau_target
+
+            # --- Мягкий пол: не позволяем V уйти ниже 50% от V0 ---
+            if V < 0.5 * self.V0 and dV < 0:
+                softness = (V - 0.5 * self.V0) / (0.5 * self.V0)
+                softness = float(np.clip(softness, 0.0, 1.0))
+                dV *= softness
+
+            # P выводится из V
+            P = self.P0 + (V - self.V0) / self.C
+            P = max(P, 0.0)
+            self._current_outputs = {'P': P, 'V': V}
+            return np.array([dV])
+        
+    def get_outputs(self, state):
+        return self._current_outputs.copy()
 
 class WholeBodyModel:
     """
@@ -51,18 +109,12 @@ class WholeBodyModel:
         flow_dependent_lungs=False,
         R_sys_peripheral=None,
         target_MAP=85.0, target_CO=83.0,
-        C_sys_art=2.0, P_sa0=80.0,
-        C_sys_ven=15.0, P_sv0=5.0, 
-        C_pul_ven=8.0, P_pv0=8.0,
+        C_sys_art=1.5, C_sys_ven=30.0, C_pul_ven=15.0,
+        P_sa0=85.0, P_sv0=12.0, P_pv0=12.0,
         fluid_intake_rate=0.0,
         insensible_loss_rate=0.0,
         peripheral_params=None,
         substance_names=None):
-
-        # self.sys_art = WindkesselVessel(C=C_sys_art, P0=P_sa0)
-        # self.sys_ven = WindkesselVessel(C=C_sys_ven, P0=P_sv0)
-        # self.pul_ven = WindkesselVessel(C=C_pul_ven, P0=P_pv0)
-
 
         # Если substance_names не передан, берём из blood_params или дефолтный список
         if substance_names is None:
@@ -78,7 +130,7 @@ class WholeBodyModel:
         self._substance_idx = {name: i for i, name in enumerate(substance_names)}
 
         # Инициализация органов и их параметров
-        blood_init = {'V0': 5000.0}
+        blood_init = {'V0': 5800.0}
         if blood_params:
             blood_init.update(blood_params)
         initial_concentrations = dict(blood_init.get('initial_concentrations', {}))
@@ -139,11 +191,29 @@ class WholeBodyModel:
         self.baroreflex = Baroreflex(**baroreflex_params)
 
         # Создаём сосудистые компартменты Windkessel
-        self.sys_art = WindkesselVessel(C=C_sys_art, P0=P_sa0)
-        self.sys_ven = WindkesselVessel(C=C_sys_ven, P0=P_sv0)
-        self.pul_ven = WindkesselVessel(C=C_pul_ven, P0=P_pv0)
-        self.R_sys_peripheral = R_sys_peripheral
+        # sys_art и pul_ven работают в P-mode (давление как состояние)
+        self.sys_art = WindkesselVessel(C=C_sys_art, P0=P_sa0, mode='P')
+        self.pul_ven = WindkesselVessel(C=C_pul_ven, P0=P_pv0, mode='P')
 
+        # sys_ven — БУФЕР объёма. Работает в V-mode.
+        # Стартовый объём = 50% всей крови (типичная доля для вен).
+        # C_sys_ven пересчитывается так, чтобы при V_sv = 0.5·V_blood
+        # и P_sv = P_sv0 выполнялось V_sv0 = C · (P_sv0 + const).
+        #
+        # Проще: задать V_sv0 напрямую и вычислить C из условия
+        # P_sv = P0 при V_sv = V0.
+        SYS_VEN_FRACTION = 0.5                  # 50% крови в системных венах
+        V_sv0 = SYS_VEN_FRACTION * blood_init['V0']
+        # Ёмкость вен: ~400 мл/мм рт.ст. — реалистично для взрослого
+        C_sys_ven_eff = 400.0
+
+        self.sys_ven = WindkesselVessel(
+            C=C_sys_ven_eff, P0=P_sv0, mode='V', V0=V_sv0,
+            target_fraction=SYS_VEN_FRACTION,
+            tau_target=300.0,                   # 5 мин на релаксацию
+        )
+
+        self.R_sys_peripheral = R_sys_peripheral
         self.fluid_intake_rate = fluid_intake_rate
         self.insensible_loss_rate = insensible_loss_rate
 
@@ -278,8 +348,12 @@ class WholeBodyModel:
         V_periph     = y[sl['peripheral']]
         V_baroreflex = y[sl['baroreflex']]
         P_sa         = y[sl['sys_art']][0]
-        P_sv         = y[sl['sys_ven']][0]
+        V_sv         = y[sl['sys_ven']][0]      # объём системных вен (V-mode)
         P_pv         = y[sl['pul_ven']][0]
+        # Извлекаем P_sv из V_sv (линейная зависимость)
+        P_sv = self.sys_ven.P0 + (V_sv - self.sys_ven.V0) / self.sys_ven.C
+        P_sv = max(P_sv, 0.0)
+
         Vb           = V_blood[0]
         C_blood      = V_blood[1:]
         conc         = dict(zip(self.substance_names, C_blood))
@@ -385,7 +459,9 @@ class WholeBodyModel:
             'V_blood': V_blood, 'V_gitract': V_gitract, 'V_brain': V_brain,
             'V_periph': V_periph, 'V_baroreflex': V_baroreflex,
             'P_sa': P_sa, 'P_sv': P_sv, 'P_pv': P_pv, 'P_pa': P_pa,
-            'Vb': Vb, 'C_blood': C_blood, 'conc': conc,
+            'V_sv': V_sv, 'Vb': Vb, 'C_blood': C_blood, 'conc': conc,
+            'V_sv_target': self.sys_ven.target_fraction * Vb if self.sys_ven.target_fraction else V_sv,
+            'V_sv_fraction': V_sv / max(Vb, 1e-6) if Vb > 0 else 0.0,
             # Барорефлекс
             'HR': HR, 'hr_factor': hr_factor, 'baroreflex_out': baroreflex_out,
             'baro_activation': baroreflex_out['baro_activation'],
@@ -420,10 +496,12 @@ class WholeBodyModel:
         )
 
         # --- Системные вены ---
+        # В V-mode состояние = V_sv, а не P_sv.
+        # Передаём V_blood, чтобы sys_ven мог тянуть V_sv к target_fraction·V_blood.
         d_sys_ven = self.sys_ven.get_derivatives(
-            t, np.array([f['P_sv']]),
-            {'Q_in': f['Q_ven_in'], 'Q_out': f['Q_ven_out']},
-        )
+            t, np.array([f['V_sv']]),
+            {'Q_in': f['Q_ven_in'], 'Q_out': f['Q_ven_out'], 'V_blood': f['Vb']},
+        )       
 
         # --- Лёгочные вены ---
         Q_from_lungs = (f['V_lungs'][1] - f['P_pv']) / f['lungs_out']['R2_eff']
@@ -451,6 +529,8 @@ class WholeBodyModel:
         return {
             'P_sa': f['P_sa'], 'P_sv': f['P_sv'], 'P_pa': f['P_pa'], 'P_pv': f['P_pv'],
             'V_la': f['V_heart'][0], 'V_lv': f['V_heart'][1],
+            'V_sv': f['V_sv'], 'V_sv_target': f['V_sv_target'],
+            'V_sv_fraction': f['V_sv_fraction'],
             'V_ra': f['V_heart'][2], 'V_rv': f['V_heart'][3],
             'Q_aortic': Qs, 'Q_pulmonary': Qp,
             'Q_vsd': heart_out['Q_vsd'],

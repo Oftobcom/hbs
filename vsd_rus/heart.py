@@ -8,19 +8,24 @@ class Heart4Chambers(OrganModel):
     Поддерживает дефект межжелудочковой перегородки (VSD) через параметр R_vsd.
     """
     def __init__(self,
-                 hr=70,
-                 E_max_la=0.25, E_min_la=0.20,
-                 E_max_lv=3.5,  E_min_lv=0.06,
-                 E_max_ra=0.20, E_min_ra=0.08,
-                 E_max_rv=0.8,  E_min_rv=0.03,
-                 V0_la=25, V0_lv=10, V0_ra=8, V0_rv=15,
-                 R_mitral=0.05, R_aortic=0.15,
-                 R_tricuspid=0.05, R_pulmonary=0.06,
-                 R_venous=0.10, 
-                 # R_venous=0.05, # для тестов с низким венозным сопротивлением
-                 R_vsd=np.inf,          # сопротивление дефекта (бесконечность = нет шунта)
-                 hr_min=30, hr_max=130,
-                 k_valve=20.0):
+                    hr=70,
+                    #  E_max_la=0.25, E_min_la=0.20,
+                    E_max_la=0.25, E_min_la=0.08,  # комплаенс ЛП 5→12.5 мл/мм
+                    E_max_lv=3.5,  E_min_lv=0.06,
+                    #  E_max_ra=0.20, E_min_ra=0.08,
+                    E_max_ra=0.20, E_min_ra=0.04,
+                    E_max_rv=0.8,  E_min_rv=0.03,
+                    #  V0_la=15, V0_lv=10, V0_ra=8, V0_rv=15,
+                    V0_la=10, V0_lv=10, V0_ra=5, V0_rv=10,
+                    #  R_mitral=0.02, R_aortic=0.15,
+                    R_mitral=0.03, R_aortic=0.10,   # митральный в 1.6× меньше
+                    #  R_tricuspid=0.05, R_pulmonary=0.06,
+                    R_tricuspid=0.03, R_pulmonary=0.05,
+                    #  R_venous=0.10, 
+                    R_venous=0.05, # для тестов с низким венозным сопротивлением
+                    R_vsd=np.inf,          # сопротивление дефекта (бесконечность = нет шунта)
+                    hr_min=30, hr_max=130,
+                    k_valve=20.0):
         self.hr_base = hr
         self.hr_min = hr_min
         self.hr_max = hr_max

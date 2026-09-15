@@ -18,8 +18,9 @@ if str(ROOT) not in sys.path:
 
 from peripheral_tissues import PeripheralTissues
 from liver import Liver
+from whole_body import WholeBodyModel
 
-for cls in (PeripheralTissues, Liver):
+for cls in (PeripheralTissues, Liver, WholeBodyModel):
     obj = cls()
     attrs = {k: v for k, v in vars(obj).items() if not k.startswith('_')}
     print(f"\n{cls.__name__}:")

@@ -45,16 +45,15 @@ class PeripheralTissues(OrganModel):
 
         # --- Метаболическая ауторегуляция ---
         O2_norm: float = 0.15,          # нормальная локальная O2
-        # k_O2_autoreg: float = 0.5,      # чувствительность к гипоксии
-        # R_min_factor: float = 0.85,      # максимальная вазодилатация
-        # tau_autoreg: float = 3.0,       # с, постоянная времени R_eff
-        k_O2_autoreg: float = 1.5,      # чувствительность к гипоксии
-        R_min_factor: float = 0.5,      # максимальная вазодилатация
+        k_O2_autoreg: float = 0.5,      # чувствительность к гипоксии
+        R_min_factor: float = 0.85,      # максимальная вазодилатация
+        # k_O2_autoreg: float = 1.5,      # чувствительность к гипоксии
+        # R_min_factor: float = 0.5,      # максимальная вазодилатация
         tau_autoreg: float = 3.0,       # с, постоянная времени R_eff
 
         # --- Миогенная ауторегуляция ---
-        # k_P_myogenic: float = 0.002,    # чувствительность к P_sa
-        k_P_myogenic: float = 0.005,    # чувствительность к P_sa
+        k_P_myogenic: float = 0.002,    # чувствительность к P_sa
+        # k_P_myogenic: float = 0.005,    # чувствительность к P_sa
         P_sa_norm: float = 90.0,        # норм. P_sa
         R_max_factor: float = 2.5,      # максимальная вазоконстрикция
         P_myogenic_deadband: float = 10.0,

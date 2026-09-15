@@ -7,7 +7,8 @@ class Baroreflex(OrganModel):
     Модель барорефлекторной регуляции частоты сердечных сокращений.
     Состояние: [HR_current] — текущая ЧСС (уд/мин).
     """
-    def __init__(self, P_set=90.0, HR_base=70.0, gain=0.005, tau=2.0, k_inotropy=0.95):
+    # def __init__(self, P_set=90.0, HR_base=70.0, gain=0.002, tau=2.0, k_inotropy=1.5):
+    def __init__(self, P_set=80.0, HR_base=70.0, gain=0.002, tau=2.0, k_inotropy=0.5):
         """
         Параметры:
             P_set   – заданное давление (мм рт. ст.), при котором ЧСС = HR_base

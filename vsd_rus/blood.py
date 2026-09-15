@@ -35,6 +35,10 @@ class BloodPool(OrganModel):
 
     def get_derivatives(self, t: float, state_slice: np.ndarray,
                         inputs: Dict[str, Any]) -> np.ndarray:
+        # V = полный объём крови в организме.
+        # Его динамика = fluid_intake + absorption − urine − insensible.
+        # Разница между V и суммой объёмов компартментов = "неявный"
+        # объём (капилляры, мелкие сосуды, интерстиций) — константа.        
         V = state_slice[0]
         C = state_slice[1:]
         dV = inputs.get('dV', 0.0)
@@ -53,9 +57,10 @@ class BloodPool(OrganModel):
                 dC = dC_input
 
         # Защита от отрицательного объема
-        if V < 2000 and dV < 0: # было 1500, лучше 2000-3000 для взрослого
-            dV = max(dV, 0.0)
-
+        # Мягкий пол: при V < 2000 мл и dV < 0 гасим отток
+        V_min = 2000.0
+        if V < V_min and dV < 0:
+            dV = 0.0
         return np.concatenate(([dV], dC))
 
     def get_outputs(self, state_slice: np.ndarray) -> Dict[str, float]:
