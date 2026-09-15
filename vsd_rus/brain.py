@@ -8,7 +8,7 @@ class Brain(OrganModel):
     Гемодинамика и метаболизм, без патологического ингибирования.
     """
     def __init__(self,
-                 R_base=3.5,
+                 R_base=7,
                  C=4.0,
                  autoreg_gain=0.3,
                  P_autoreg=80.0,
@@ -46,7 +46,8 @@ class Brain(OrganModel):
         P_sv = inputs.get('P_sv', 5.0)
 
         R_eff = self._autoregulation_resistance(P_sa)
-        Q_br = (P_sa - P_br) / R_eff
+        # Q_br = (P_sa - P_br) / R_eff
+        Q_br = max((P_sa - P_br) / R_eff, 0.0)
         Q_out = (P_br - P_sv) / R_eff
         dP_br = (Q_br - Q_out) / self.C
 

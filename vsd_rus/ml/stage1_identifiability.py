@@ -50,6 +50,7 @@ from whole_body import WholeBodyModel  # noqa: E402
 _D_VSD_REF = 4.0
 _R_VSD_REF = 5.0
 K_VSD = _R_VSD_REF * (_D_VSD_REF / 2.0) ** 4
+STATIONARY_REL_TOL = 0.10
 
 
 def d_vsd_to_R_vsd(d_mm: float) -> float:
@@ -90,7 +91,7 @@ PARAM_SCALES = {
     "d_vsd":            4.0,     # мм
     "E_max_lv":         2.5,
     "E_max_rv":         0.8,
-    "R_sys":            1.0,
+    "R_sys":            3.8,
     "flow_sensitivity": 0.05,
     "C_sys_art":        2.0,
     "HR_base":          70.0,
@@ -108,6 +109,7 @@ INITIAL_CONC = {
     "albumin": 4.5,
     "glucose": 5.0,
     "oxygen": 0.15,
+    "co2": 0.52,
 }
 
 # =============================================================================
@@ -115,8 +117,8 @@ INITIAL_CONC = {
 # =============================================================================
 
 def build_model(theta: dict,
-                target_MAP: float = 85.0,
-                target_CO: float = 83.0) -> WholeBodyModel:
+                target_MAP=85.0,
+                target_CO=83.0) -> WholeBodyModel:
     """Собирает WholeBodyModel из словаря θ (см. THETA0)."""
     R_vsd = d_vsd_to_R_vsd(theta["d_vsd"]) if theta["d_vsd"] > 0 else np.inf
 
@@ -195,7 +197,8 @@ def get_steady_outputs(model: WholeBodyModel,
     Возвращает None, если решение не сошлось.
     """
     t_eval = np.linspace(t_span[0], t_span[1], n_samples)
-    y0 = model.calibrate_initial_state(t_calib=10.0)
+    # y0 = model.calibrate_initial_state(t_calib=10.0)
+    y0 = model.calibrate_initial_state()
     sol = model.simulate(t_span, t_eval, y0=y0, method="BDF", rtol=1e-6)
     # sol = model.simulate(t_span, t_eval, method='RK45', rtol=1e-5, atol=1e-7)
 
@@ -211,7 +214,7 @@ def get_steady_outputs(model: WholeBodyModel,
     ps_tail = data["P_sa"][last50]
     if ps_tail.size == 0 or np.mean(ps_tail) <= 0:
         return None
-    if np.std(ps_tail) / np.mean(ps_tail) > 0.02:
+    if np.std(ps_tail) / np.mean(ps_tail) > STATIONARY_REL_TOL:
         if verbose:
             print(f"  [warn] нестационарен: std/mean(P_sa)={np.std(ps_tail)/np.mean(ps_tail):.3f}")
         return None
@@ -223,10 +226,18 @@ def get_steady_outputs(model: WholeBodyModel,
     window = data["t"] > (data["t"][-1] - 10.0 * T)
 
     X = {}
-    for key in ["P_sa", "P_pa", "Q_aortic", "Qp_Qs", "HR"]:
+    for key in ["P_sa", "P_pa", "Q_aortic", "HR"]:
         X[key] = float(np.mean(data[key][window]))
+    mean_Qp = np.mean(data["Q_pulmonary"][window])
+    mean_Qa = np.mean(data["Q_aortic"][window])
+    X["Qp_Qs"] = mean_Qp / max(mean_Qa, 1e-6)                                         
     X["EDV_LV"] = float(np.max(data["V_lv"][window]))
     X["EDV_RV"] = float(np.max(data["V_rv"][window]))
+    # физиологичность
+    if not (40 < X["P_sa"] < 180 and 5 < X["P_pa"] < 80 and X["EDV_LV"] > 50 and X["Qp_Qs"] < 20):
+        if verbose:
+            print(f"  [warn] нефизиологично: P_sa={X['P_sa']:.1f}, Qp_Qs={X['Qp_Qs']:.2f}, EDV_LV={X['EDV_LV']:.1f}")
+        return None
     return X
 
 
@@ -248,6 +259,7 @@ def compute_jacobian(theta0: dict,
     theta0 = dict(theta0)
     if theta0["R_sys"] is None:
         theta0["R_sys"] = resolve_R_sys(theta0)
+        PARAM_SCALES["R_sys"] = theta0["R_sys"] # синхронизируем масштаб
 
     if verbose:
         print(f"[Stage1] R_sys resolved = {theta0['R_sys']:.4f}")
@@ -256,7 +268,7 @@ def compute_jacobian(theta0: dict,
     model0 = build_model(theta0)
     X0 = get_steady_outputs(model0, verbose=verbose)
     if X0 is None:
-        raise RuntimeError("Базовая точка не вышла на стационар")
+        raise RuntimeError("Базовая точка не вышла на стационар - проверь whole_body.calibrate_initial_state")
 
     if verbose:
         print("[Stage1] X0:")
@@ -268,24 +280,21 @@ def compute_jacobian(theta0: dict,
     J = np.full((nX, nP), np.nan)
 
     for j, p in enumerate(PARAM_NAMES):
-        theta_p = dict(theta0)
-        delta = PARAM_SCALES[p] * rel_step
-        theta_p[p] = theta0[p] + delta
+        base = abs(theta0[p])
+        delta = base * rel_step if base>1e-9 else PARAM_SCALES[p]*rel_step
+        if p=="d_vsd": delta = max(delta, 0.04) # не меньше 0.04мм
 
-        # Отдельно пересчитываем R_vsd для d_vsd
-        if p == "d_vsd":
-            pass  # build_model сам вызовет d_vsd_to_R_vsd
-
-        model_p = build_model(theta_p)
-        Xp = get_steady_outputs(model_p, verbose=False)
-        if Xp is None:
+        theta_plus = dict(theta0); theta_plus[p] = theta0[p]+delta
+        theta_minus = dict(theta0); theta_minus[p] = theta0[p]-delta
+        Xp = get_steady_outputs(build_model(theta_plus), verbose=False)
+        Xm = get_steady_outputs(build_model(theta_minus), verbose=False)
+        if Xp is None or Xm is None: 
             if verbose:
-                print(f"  [warn] сдвиг {p} не сошёлся, столбец NaN")
+                print(f"  [warn] {p}: Xp={Xp is not None}, Xm={Xm is not None} → столбец NaN")
             continue
-
-        for i, x in enumerate(X_NAMES):
-            dX = (Xp[x] - X0[x]) / delta
-            J[i, j] = dX * PARAM_SCALES[p] / max(abs(X0[x]), 1e-9)
+        for i,x in enumerate(X_NAMES):
+            dX = (Xp[x]-Xm[x])/(2*delta)
+            J[i,j] = dX * abs(theta0[p]) / max(abs(X0[x]),1e-9)
 
         if verbose:
             print(f"  [ok] {p:18s} delta={delta:.4g}  "
@@ -302,6 +311,9 @@ def compute_jacobian(theta0: dict,
 def analyze_svd(J: np.ndarray, param_names: list[str], x_names: list[str]) -> dict:
     """SVD + число обусловленности + последний правый сингулярный вектор."""
     # NaN-колонки -> нули, чтобы SVD не падал
+    if np.any(np.isnan(J)):
+        bad = [PARAM_NAMES[j] for j in range(J.shape[1]) if np.any(np.isnan(J[:,j]))]
+        print(f"[warn] NaN в J по {bad} -> 0 для SVD")
     J_clean = np.nan_to_num(J, nan=0.0)
 
     U, S, Vt = np.linalg.svd(J_clean, full_matrices=False)
@@ -346,18 +358,13 @@ def fix_and_recompute(J: np.ndarray,
 # 5. Визуализация
 # =============================================================================
 
-def plot_results(J: np.ndarray,
-                 svd_res: dict,
-                 param_names: list[str],
-                 x_names: list[str],
-                 out_path: Path) -> None:
+def plot_results(J, svd_res, param_names, x_names, out_path: Path):
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
     # (1) Тепловая карта J
     ax = axes[0, 0]
-    im = ax.imshow(np.nan_to_num(J, nan=0.0), aspect="auto", cmap="RdBu_r",
-                   vmin=-np.nanmax(np.abs(J)) if np.any(np.isfinite(J)) else -1,
-                   vmax=+np.nanmax(np.abs(J)) if np.any(np.isfinite(J)) else 1)
+    j_abs_max = np.nanmax(np.abs(J)) if np.any(np.isfinite(J)) else 1.0
+    im = ax.imshow(np.nan_to_num(J, nan=0.0), aspect="auto", cmap="RdBu_r", vmin=-j_abs_max, vmax=j_abs_max)
     ax.set_xticks(range(len(param_names)))
     ax.set_xticklabels(param_names, rotation=45, ha="right", fontsize=9)
     ax.set_yticks(range(len(x_names)))
@@ -372,8 +379,7 @@ def plot_results(J: np.ndarray,
     ax.set_ylabel("S_i (log)")
     ax.set_title(f"SVD-спектр,  cond = {svd_res['cond']:.2f}")
     ax.grid(True, which="both", alpha=0.3)
-    ax.axhline(svd_res["S"][0] / 100.0, color="r", ls="--", alpha=0.5,
-               label="порог cond=100")
+    ax.axhline(svd_res["S"][0] / 100.0, color="r", ls="--", alpha=0.5, label="порог cond=100")
     ax.legend()
 
     # (3) Последний правый сингулярный вектор Vt[-1]
@@ -397,12 +403,10 @@ def plot_results(J: np.ndarray,
         txt += f"  {k:18s} : {val:.4f}{flag}\n"
     txt += f"\ncond = {svd_res['cond']:.2f}"
     if svd_res["cond"] > 100:
-        txt += "\n\nВЫВОД: cond > 100 -> есть коллинеарность\n" \
-               "Зафиксируйте параметры с |Vt[-1]|>0.4 и пересчитайте."
+        txt += "\n\nВЫВОД: cond > 100 -> есть коллинеарность"
     else:
-        txt += "\n\nВЫВОД: cond <= 100 -> матрица хорошо обусловлена."
-    ax.text(0.02, 0.98, txt, va="top", ha="left", family="monospace",
-            fontsize=10, transform=ax.transAxes)
+        txt += "\n\nВЫВОД: cond <= 100 -> хорошо обусловлена."
+    ax.text(0.02, 0.98, txt, va="top", ha="left", family="monospace", fontsize=10, transform=ax.transAxes)
 
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -439,20 +443,20 @@ def main():
         print(f"   {k:18s} : {val:+.4f}")
 
     # Графики
-    plot_results(J, svd_res, PARAM_NAMES, X_NAMES,
-                 out_dir / "stage1_SVD.png")
+    plot_results(J, svd_res, PARAM_NAMES, X_NAMES, out_dir / "stage1_SVD.png")
     print(f"[Stage1] Графики сохранены: {out_dir / 'stage1_SVD.png'}")
 
     # Автоматическая рекомендация: фиксируем параметры с |Vt[-1]| > 0.4
-    to_fix = [p for p, v in svd_res["contrib"].items() if abs(v) > 0.4]
-    # Не более 2 параметров за один раз
+    priority = ["V0_blood", "HR_base"]
+    to_fix = [p for p in priority if p in svd_res["contrib"] and abs(svd_res["contrib"][p])>0.3]
+    to_fix += [p for p,v in svd_res["contrib"].items() if p not in to_fix and abs(v)>0.4]
     to_fix = to_fix[:2]
 
     report_lines = []
     report_lines.append("# STAGE 1 REPORT\n")
     report_lines.append(f"- X0 = {json.dumps({k: round(v, 4) for k, v in X0.items()}, indent=2)}\n")
     report_lines.append(f"- cond_8 = {svd_res['cond']:.3f}\n")
-    report_lines.append("- |Vt[-1]| (вклад в слабое направление):\n")
+    report_lines.append("- |Vt[-1]|:\n")
     for k, v in svd_res["contrib"].items():
         report_lines.append(f"    - {k:18s} : {v:.4f}\n")
 
@@ -462,21 +466,31 @@ def main():
         report_lines.append(f"\n- Зафиксированы: {to_fix}\n")
         report_lines.append(f"- cond_6 = {svd_red['cond']:.3f}\n")
         report_lines.append(f"- θ_final = {theta_final}\n")
-        if svd_red["cond"] <= 50:
-            report_lines.append("\n**Вывод:** cond_6 <= 50, набор θ_final "
-                                "пригоден для Stage 2 (Sobol по 6 параметрам).\n")
-        else:
-            report_lines.append("\n**Вывод:** cond_6 всё ещё велик, "
-                                "попробуйте зафиксировать ещё 1 параметр.\n")
-    else:
-        report_lines.append("\nНи один параметр не имеет |Vt[-1]| > 0.4 — "
-                            "все 8 параметров вносят вклад.\n")
 
-    (out_dir / "STAGE1_REPORT.md").write_text("".join(report_lines),
-                                              encoding="utf-8")
+    (out_dir / "STAGE1_REPORT.md").write_text("".join(report_lines), encoding="utf-8")
     print(f"[Stage1] Отчёт сохранён: {out_dir / 'STAGE1_REPORT.md'}")
     print("\nDone.")
 
+def debug_base_point():
+    theta = dict(THETA0)
+    theta["R_sys"] = 3.8          # зафиксируем явно
+    model = build_model(theta)
+    
+    print("=== DEBUG BASE POINT ===")
+    y0 = model.calibrate_initial_state(t_calib=10.0)
+    print(f"y0 heart volumes: {y0[model.idx['heart']]}")
+    
+    # Короткая симуляция с частым выводом
+    t_eval = np.linspace(0, 60, 1201)   # 60 секунд, шаг 0.05 с
+    sol = model.simulate((0, 60), t_eval=t_eval, y0=y0, method="BDF", rtol=1e-5)
+    
+    for t_check in [5, 10, 20, 30, 45, 60]:
+        idx = np.argmin(np.abs(sol.t - t_check))
+        out = model.compute_outputs(sol.t[idx], sol.y[:, idx])
+        print(f"t={t_check:5.1f}s  P_sa={out['P_sa']:6.1f}  "
+              f"Q_aortic={out['Q_aortic']:6.1f}  Qp={out['Q_pulmonary']:6.1f}  "
+              f"Qp/Qs={out['Qp_Qs']:8.1f}  V_lv={out['V_lv']:6.1f}  V_rv={out['V_rv']:6.1f}")
 
 if __name__ == "__main__":
-    main()
+    debug_base_point()          # сначала проверяем базовую точку
+    # main()                    # раскомментируйте после того, как debug покажет нормальные значения

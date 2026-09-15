@@ -8,12 +8,12 @@ class GITract(OrganModel):
     Портальная гемодинамика и всасывание.
     """
     def __init__(self,
-                 R_art=0.3, R_cap=0.2, R_venous=0.2,
+                 R_art=1.8, R_cap=1.2, R_venous=1.5,
                  C_art=2.0, C_cap=5.0,
                  k_absorption_water=0.1,
                  k_absorption_nutrients=0.05,
                  portal_pressure_sensitivity=0.02,
-                 P_art0=75.0, P_cap0=10.0):
+                 P_art0=60.0, P_cap0=20.0):
         self.R_art = R_art
         self.R_cap = R_cap
         self.R_venous = R_venous

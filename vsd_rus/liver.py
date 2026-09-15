@@ -14,6 +14,7 @@ class Liver(OrganModel):
                  albumin_prod_base=0.1,
                  bilirubin_clearance_base=0.2,
                  ammonia_clearance_base=0.15,
+                 lactate_clearance_base=0.05,
                  C_bilirubin0=0.0, C_ammonia0=0.0, C_albumin0=1.0):
         self.R_ha = R_ha
         self.R_pv_base = R_pv_base
@@ -25,6 +26,7 @@ class Liver(OrganModel):
         self.albumin_prod_base = albumin_prod_base
         self.bilirubin_clearance_base = bilirubin_clearance_base
         self.ammonia_clearance_base = ammonia_clearance_base
+        self.lactate_clearance_base = lactate_clearance_base
 
         self.C_bilirubin0 = C_bilirubin0
         self.C_ammonia0 = C_ammonia0
@@ -56,6 +58,7 @@ class Liver(OrganModel):
         C_bil_blood = inputs.get('C_bilirubin_blood', 0.0)
         C_amm_blood = inputs.get('C_ammonia_blood', 0.0)
         C_alb_blood = inputs.get('C_albumin_blood', 1.0)
+        C_lac_blood = inputs.get('C_lactate_blood', 0.10)
         V_blood = inputs.get('V_blood', 5000.0)
 
         # явная связь с ЖКТ - приходит из whole_body.py
@@ -86,13 +89,15 @@ class Liver(OrganModel):
         dC_bil_blood = -clearance_bil / V_blood
         dC_amm_blood = -clearance_amm / V_blood
         dC_alb_blood = +release_alb / V_blood
+        dC_lac_blood = -Q_ha / max(V_blood, 1e-6) * C_lac_blood * self.lactate_clearance_base * 2.0
 
         self._current_outputs = {
             'Q_liver_out': Q_out,
-            'P_portal': P_portal, # теперь из состояния, а не P_mes
+            'P_portal': P_portal,
             'dC_bilirubin': dC_bil_blood,
             'dC_ammonia': dC_amm_blood,
             'dC_albumin': dC_alb_blood,
+            'dC_lactate': dC_lac_blood,
             'Q_ha': Q_ha,
             'Q_pv': Q_pv,
             'Q_gut_out': Q_gut_out,
