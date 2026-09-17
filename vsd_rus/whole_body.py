@@ -109,7 +109,7 @@ class WholeBodyModel:
         flow_dependent_lungs=False,
         R_sys_peripheral=None,
         target_MAP=85.0, target_CO=83.0,
-        C_sys_art=1.5, C_sys_ven=30.0, C_pul_ven=15.0,
+        C_sys_art=1.5, C_pul_ven=15.0,
         P_sa0=85.0, P_sv0=12.0, P_pv0=12.0,
         fluid_intake_rate=0.0,
         insensible_loss_rate=0.0,
@@ -197,8 +197,6 @@ class WholeBodyModel:
 
         # sys_ven — БУФЕР объёма. Работает в V-mode.
         # Стартовый объём = 50% всей крови (типичная доля для вен).
-        # C_sys_ven пересчитывается так, чтобы при V_sv = 0.5·V_blood
-        # и P_sv = P_sv0 выполнялось V_sv0 = C · (P_sv0 + const).
         #
         # Проще: задать V_sv0 напрямую и вычислить C из условия
         # P_sv = P0 при V_sv = V0.
@@ -586,6 +584,8 @@ class WholeBodyModel:
             'f_O2_autoreg':         f['periph_out'].get('f_O2_autoreg', 1.0),
             'f_P_myogenic':         f['periph_out'].get('f_P_myogenic', 1.0),
             'dC_lactate_periph_to_blood': f['periph_out'].get('dC_lactate_blood', 0.0),
+            'Q_mitral':    heart_out['Q_mitral'],
+            'Q_tricuspid': heart_out['Q_tricuspid'],
         }
 
     # def simulate(self, t_span, t_eval=None, y0=None, method='RK45', **kwargs):

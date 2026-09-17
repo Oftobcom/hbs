@@ -9,20 +9,18 @@ class Heart4Chambers(OrganModel):
     """
     def __init__(self,
                     hr=70,
-                    #  E_max_la=0.25, E_min_la=0.20,
-                    E_max_la=0.25, E_min_la=0.08,  # комплаенс ЛП 5→12.5 мл/мм
-                    E_max_lv=3.5,  E_min_lv=0.06,
-                    #  E_max_ra=0.20, E_min_ra=0.08,
-                    E_max_ra=0.20, E_min_ra=0.04,
+                    E_max_la=0.25, E_min_la=0.10,   # было 0.08
+                    E_max_ra=0.20, E_min_ra=0.06,   # было 0.03
+                    E_max_lv=3.5,  E_min_lv=0.04,
                     E_max_rv=0.8,  E_min_rv=0.03,
-                    #  V0_la=15, V0_lv=10, V0_ra=8, V0_rv=15,
                     V0_la=10, V0_lv=10, V0_ra=5, V0_rv=10,
-                    #  R_mitral=0.02, R_aortic=0.15,
+                    # --- Конечно-диастолические объёмы (мл), физиология взрослого ---
+                    EDV_la=80.0, EDV_lv=120.0, EDV_ra=40.0, EDV_rv=120.0,
                     R_mitral=0.03, R_aortic=0.10,   # митральный в 1.6× меньше
-                    #  R_tricuspid=0.05, R_pulmonary=0.06,
                     R_tricuspid=0.03, R_pulmonary=0.05,
-                    #  R_venous=0.10, 
-                    R_venous=0.05, # для тестов с низким венозным сопротивлением
+                    # R_venous=0.10, 
+                    # R_venous=0.05, # для тестов с низким венозным сопротивлением
+                    R_venous=0.08,
                     R_vsd=np.inf,          # сопротивление дефекта (бесконечность = нет шунта)
                     hr_min=30, hr_max=130,
                     k_valve=20.0):
@@ -36,6 +34,7 @@ class Heart4Chambers(OrganModel):
         self.E_min = {'LA': E_min_la, 'LV': E_min_lv,
                       'RA': E_min_ra, 'RV': E_min_rv}
         self.V0 = {'LA': V0_la, 'LV': V0_lv, 'RA': V0_ra, 'RV': V0_rv}
+        self.EDV = {'LA': EDV_la, 'LV': EDV_lv, 'RA': EDV_ra, 'RV': EDV_rv}
         self.R_valve = {
             'mitral': R_mitral,
             'aortic': R_aortic,
@@ -55,14 +54,15 @@ class Heart4Chambers(OrganModel):
 
     # def get_initial_state(self, P_la=1.5, P_lv=7.5, P_ra=1.2, P_rv=3.15):
     # def get_initial_state(self, P_la=1.5, P_ra=1.5, P_lv=7.0, P_rv=3.0):
-    def get_initial_state(self, P_la=8.0, P_ra=5.0, P_lv=5.0, P_rv=2.5):
-        # стационар диастолы
-        V_la = self.V0['LA'] + P_la / self.E_min['LA']
-        V_lv = self.V0['LV'] + P_lv / self.E_min['LV']
-        V_ra = self.V0['RA'] + P_ra / self.E_min['RA']
-        V_rv = self.V0['RV'] + P_rv / self.E_min['RV']
-        return np.array([V_la, V_lv, V_ra, V_rv])
-    # дефолт даст [35, 143, 85, 115] -> клипни к [35,135,35,115] для численной стабильности
+    def get_initial_state(self) -> np.ndarray:
+        """
+        Начальное состояние — физиологические конечно-диастолические
+        объёмы (мл). Соответствующие давления в диастолу:
+            P_la ≈ 2.4, P_lv ≈ 6.6, P_ra ≈ 1.4, P_rv ≈ 3.3 мм рт. ст.
+        """
+        return np.array([
+            self.EDV['LA'], self.EDV['LV'], self.EDV['RA'], self.EDV['RV'],
+        ])
 
     def _update_parameters(self, inputs):
         hr_factor = inputs.get('hr_factor', 1.0)

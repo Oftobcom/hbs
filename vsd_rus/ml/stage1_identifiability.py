@@ -19,7 +19,6 @@ Stage 1 из ML_Tasks.txt: анализ идентифицируемости 8 �
 
 from __future__ import annotations
 
-import os
 import sys
 import json
 import warnings
@@ -76,14 +75,14 @@ PARAM_NAMES = [
 # Базовая точка "здорового взрослого", но с МАЛЫМ ДМЖП (d_vsd=4 мм),
 # чтобы dR_vsd/dd_vsd != 0.
 THETA0 = {
-    "d_vsd":            4.0,     # мм
+    "d_vsd":            0.0,     # мм
     "E_max_lv":         2.5,
     "E_max_rv":         0.8,
     "R_sys":            None,    # посчитается под MAP=85, CO=83
     "flow_sensitivity": 0.02,
-    "C_sys_art":        2.0,
+    "C_sys_art":        1.5,
     "HR_base":          70.0,
-    "V0_blood":         5000.0,
+    "V0_blood":         5800.0,
 }
 
 # Масштабы для относительного якобиана (характерные величины параметров)
@@ -93,9 +92,9 @@ PARAM_SCALES = {
     "E_max_rv":         0.8,
     "R_sys":            3.8,
     "flow_sensitivity": 0.05,
-    "C_sys_art":        2.0,
+    "C_sys_art":        1.5,
     "HR_base":          70.0,
-    "V0_blood":         5000.0,
+    "V0_blood":         5800.0,
 }
 
 # Наблюдаемые выходы (ЭхоКГ-подобные)
@@ -137,10 +136,11 @@ def build_model(theta: dict,
         "initial_concentrations": INITIAL_CONC,
     }
     baroreflex_params = {
-        "P_set":   90.0,
+        "P_set":   80.0,
         "HR_base": theta["HR_base"],
-        "gain":    0.01,
+        "gain":    0.002,
         "tau":     2.0,
+        "k_inotropy": 0.5
     }
 
     model = WholeBodyModel(
@@ -154,8 +154,6 @@ def build_model(theta: dict,
         target_MAP=target_MAP,
         target_CO=target_CO,
         C_sys_art=theta["C_sys_art"],
-        C_sys_ven=12.0,
-        C_pul_ven=5.0,
     )
     return model
 
@@ -192,14 +190,15 @@ def get_steady_outputs(model: WholeBodyModel,
                        t_start_stationary: float = 300.0,
                        verbose: bool = False) -> dict | None:
     """
-    Калибрует y0, интегрирует BDF, проверяет стационар
+    Калибрует y0, интегрирует, проверяет стационар
     и возвращает усреднённые за 10 циклов выходы.
     Возвращает None, если решение не сошлось.
     """
     t_eval = np.linspace(t_span[0], t_span[1], n_samples)
     # y0 = model.calibrate_initial_state(t_calib=10.0)
     y0 = model.calibrate_initial_state()
-    sol = model.simulate(t_span, t_eval, y0=y0, method="BDF", rtol=1e-6)
+    sol = model.simulate(t_span, t_eval, y0=y0, method="LSODA", rtol=1e-6)
+    # sol = model.simulate(t_span, t_eval, y0=y0, method="BDF", rtol=1e-6)
     # sol = model.simulate(t_span, t_eval, method='RK45', rtol=1e-5, atol=1e-7)
 
     if sol.y.shape[1] < 2 or not np.all(np.isfinite(sol.y[:, -1])):
@@ -257,9 +256,11 @@ def compute_jacobian(theta0: dict,
     """
     # Разрешаем R_sys один раз
     theta0 = dict(theta0)
+    # локальная копия масштабов, чтобы не мутировать глобальный PARAM_SCALES
+    scales = dict(PARAM_SCALES)
     if theta0["R_sys"] is None:
         theta0["R_sys"] = resolve_R_sys(theta0)
-        PARAM_SCALES["R_sys"] = theta0["R_sys"] # синхронизируем масштаб
+        scales["R_sys"] = theta0["R_sys"]  # синхронизируем масштаб для R_sys
 
     if verbose:
         print(f"[Stage1] R_sys resolved = {theta0['R_sys']:.4f}")
@@ -280,9 +281,8 @@ def compute_jacobian(theta0: dict,
     J = np.full((nX, nP), np.nan)
 
     for j, p in enumerate(PARAM_NAMES):
-        base = abs(theta0[p])
-        delta = base * rel_step if base>1e-9 else PARAM_SCALES[p]*rel_step
-        if p=="d_vsd": delta = max(delta, 0.04) # не меньше 0.04мм
+        delta = rel_step * scales[p]
+        if p == "d_vsd": delta = max(delta, 0.04)
 
         theta_plus = dict(theta0); theta_plus[p] = theta0[p]+delta
         theta_minus = dict(theta0); theta_minus[p] = theta0[p]-delta
@@ -294,7 +294,8 @@ def compute_jacobian(theta0: dict,
             continue
         for i,x in enumerate(X_NAMES):
             dX = (Xp[x]-Xm[x])/(2*delta)
-            J[i,j] = dX * abs(theta0[p]) / max(abs(X0[x]),1e-9)
+            s_j = scales[p]
+            J[i,j] = dX * s_j / max(abs(X0[x]), 1e-9)
 
         if verbose:
             print(f"  [ok] {p:18s} delta={delta:.4g}  "
@@ -312,7 +313,7 @@ def analyze_svd(J: np.ndarray, param_names: list[str], x_names: list[str]) -> di
     """SVD + число обусловленности + последний правый сингулярный вектор."""
     # NaN-колонки -> нули, чтобы SVD не падал
     if np.any(np.isnan(J)):
-        bad = [PARAM_NAMES[j] for j in range(J.shape[1]) if np.any(np.isnan(J[:,j]))]
+        bad = [param_names[j] for j in range(J.shape[1]) if np.any(np.isnan(J[:, j]))]
         print(f"[warn] NaN в J по {bad} -> 0 для SVD")
     J_clean = np.nan_to_num(J, nan=0.0)
 
@@ -448,9 +449,7 @@ def main():
 
     # Автоматическая рекомендация: фиксируем параметры с |Vt[-1]| > 0.4
     priority = ["V0_blood", "HR_base"]
-    to_fix = [p for p in priority if p in svd_res["contrib"] and abs(svd_res["contrib"][p])>0.3]
-    to_fix += [p for p,v in svd_res["contrib"].items() if p not in to_fix and abs(v)>0.4]
-    to_fix = to_fix[:2]
+    to_fix = list(priority)
 
     report_lines = []
     report_lines.append("# STAGE 1 REPORT\n")
@@ -473,24 +472,77 @@ def main():
 
 def debug_base_point():
     theta = dict(THETA0)
-    theta["R_sys"] = 3.8          # зафиксируем явно
+    theta["R_sys"] = None
+    theta["R_sys"] = resolve_R_sys(theta)
     model = build_model(theta)
-    
+
     print("=== DEBUG BASE POINT ===")
-    y0 = model.calibrate_initial_state(t_calib=10.0)
-    print(f"y0 heart volumes: {y0[model.idx['heart']]}")
-    
-    # Короткая симуляция с частым выводом
-    t_eval = np.linspace(0, 60, 1201)   # 60 секунд, шаг 0.05 с
-    sol = model.simulate((0, 60), t_eval=t_eval, y0=y0, method="BDF", rtol=1e-5)
-    
-    for t_check in [5, 10, 20, 30, 45, 60]:
-        idx = np.argmin(np.abs(sol.t - t_check))
-        out = model.compute_outputs(sol.t[idx], sol.y[:, idx])
-        print(f"t={t_check:5.1f}s  P_sa={out['P_sa']:6.1f}  "
-              f"Q_aortic={out['Q_aortic']:6.1f}  Qp={out['Q_pulmonary']:6.1f}  "
-              f"Qp/Qs={out['Qp_Qs']:8.1f}  V_lv={out['V_lv']:6.1f}  V_rv={out['V_rv']:6.1f}")
+    print(f"[Stage1] R_sys resolved = {theta['R_sys']:.3f}")
+
+    y0 = model.calibrate_initial_state(t_calib=300.0)
+    print(f"y0 heart: {y0[model.idx['heart']]}")
+    print(f"y0 V_blood = {y0[model.idx['blood']][0]:.0f}")
+
+    t_eval = np.linspace(0, 2000, 40001)
+    sol = model.simulate((0, 2000), t_eval=t_eval, y0=y0,
+                         method="LSODA", rtol=1e-6, atol=1e-8, max_step=0.05)
+
+    data = _collect_outputs(model, sol)
+
+    # --- Многооконная диагностика (из варианта 1) ---
+    print("\n--- Конвергенция по окнам ---")
+    for t_lo, t_hi in [(100, 300), (500, 700), (1000, 1200), (1700, 1900)]:
+        m = (data["t"] >= t_lo) & (data["t"] <= t_hi)
+        if not np.any(m):
+            continue
+        P_sa = data["P_sa"][m]
+        V_lv = data["V_lv"][m]
+        V_rv = data["V_rv"][m]
+        HR   = data["HR"][m]
+        print(f"[{t_lo:4d}-{t_hi:4d}]  "
+              f"P_sa={P_sa.mean():5.1f}±{P_sa.std():4.1f}  "
+              f"V_lv={V_lv.mean():5.1f}  "
+              f"V_rv={V_rv.mean():5.1f}  "
+              f"HR={HR.mean():4.1f}")
+
+    # --- Steady-state сводка (из варианта 2) ---
+    HR_mean = float(np.mean(data["HR"][data["t"] > 300]))
+    T = 60.0 / HR_mean
+    win = data["t"] > data["t"][-1] - 10 * T
+    Qp_mean = np.mean(data["Q_pulmonary"][win])
+    Qs_mean = np.mean(data["Q_aortic"][win])
+    P_sa_mean = np.mean(data["P_sa"][win])
+    P_pa_mean = np.mean(data["P_pa"][win])
+    EDV_LV = np.max(data["V_lv"][win])
+    EDV_RV = np.max(data["V_rv"][win])
+    print(f"\n--- Steady-state (t > {data['t'][-1]-10*T:.0f}, 10 циклов) ---")
+    print(f"P_sa={P_sa_mean:.1f}  P_pa={P_pa_mean:.1f}  "
+          f"Qa={Qs_mean:.1f}  Qp/Qs={Qp_mean/max(Qs_mean,1e-6):.2f}  "
+          f"EDV_LV={EDV_LV:.0f}  EDV_RV={EDV_RV:.0f}  V_blood={data['V_blood'][-1]:.0f}")
+
+    # --- Один кардиоцикл ---
+    t_end = data["t"][-1]
+    cycle = data["t"] > (t_end - T)
+    print(f"\n--- Один кардиоцикл (t={t_end-T:.1f}...{t_end:.1f}) ---")
+    for k in ("V_la", "V_lv", "V_ra", "V_rv",
+              "P_la", "P_lv", "P_ra", "P_rv",
+              "Q_mitral", "Q_tricuspid"):
+        if k not in data:
+            continue
+        arr = data[k][cycle]
+        print(f"  {k:12s}  min={arr.min():6.1f}  "
+              f"max={arr.max():6.1f}  mean={arr.mean():6.1f}")
+    print(f"P_pv={data['P_pv'][m].mean():.1f} Q_pv_to_la={data['Q_pv_to_la'][m].mean():.1f} Q_vsd={data['Q_vsd'][m].mean():.1f}")
+
+# if __name__ == "__main__":
+#     debug_base_point()          # сначала проверяем базовую точку
+#     # main()                    # раскомментируйте после того, как debug покажет нормальные значения
 
 if __name__ == "__main__":
-    debug_base_point()          # сначала проверяем базовую точку
-    # main()                    # раскомментируйте после того, как debug покажет нормальные значения
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "debug":
+        print("[Stage1] DEBUG MODE: проверка базовой точки")
+        debug_base_point()
+    else:
+        print("[Stage1] RUN MODE: анализ идентифицируемости")
+        main()
