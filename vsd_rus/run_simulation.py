@@ -24,7 +24,8 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from whole_body import WholeBodyModel
-
+from utils import (safe_savgol_filter, subsample, steady_mask,
+                   clean_nans, SUBSAMPLE_N_TARGET, STEADY_FRAC_DEFAULT)
 
 # =====================================================================
 # Константы и палитра
@@ -43,77 +44,36 @@ SCENARIO_ORDER = list(COLORS.keys())
 # Длительность симуляции и калибровки.
 # tau_remodel = 200 с (Эйзенменгер), tau_target = 300 с (mass-balance B),
 # поэтому t_end = 800 с даёт 2-3 времени релаксации.
-T_END = 800.0
-T_CALIB = 150.0
-DT_EVAL = 0.05
-# N_EVAL = int(T_END / DT_EVAL)  # 16 000 точек
-N_EVAL = 8000
-TAIL_FRAC = 0.75  # последние 25% симуляции для среднего
+#
+# T_CALIB — прогрев перед основной симуляцией. Должен покрывать
+# самую медленную релаксацию в модели:
+#   sys_ven (V-mode):  tau_target   = 300 с → 3τ = 900 с
+#   lungs.R_remodel:   tau_remodel  = 200 с → 3τ = 600 с
+#   peripheral.R_eff:  tau_autoreg  =   3 с → 3τ ≈   9 с
+#   baroreflex.HR:     tau          =   2 с → 3τ ≈   6 с
+# Поэтому T_CALIB = 900 с: 3τ для sys_ven (95 % сходимости)
+# и 4.5τ для lungs.R_remodel (99 %). Значение 150 с (старое)
+# оставляло sys_ven на полпути и портило y0.
 
+T_END   = 800.0
+T_CALIB = 900.0
+DT_EVAL = 0.03                 # шаг вывода, для 0,01 → ~80 точек/кардиоцикл при HR=70
+N_EVAL = int(T_END / DT_EVAL) + 1 # количество точек вывода
 
-# =====================================================================
-# Утилиты
-# =====================================================================
+# --- Баланс потребления O2 ---
+# Полное VO2 организма фиксировано и складывается из двух слагаемых:
+# TOTAL_VO2  = VO2_blood_side (gas_exchange) + VO2_periph (peripheral_tissues)
+TOTAL_VO2_BASE  = 4.2   # мл O2/с — полное потребление O2 всем телом (≈ 250 мл/мин)
+PERIPH_VO2_BASE = 1.5   # мл O2/с — доля, приходящаяся на PeripheralTissues
+GAS_EX_VO2_BASE = TOTAL_VO2_BASE - PERIPH_VO2_BASE   # = 2.7 мл O2/с
 
-def safe_savgol_filter(data, window_length, polyorder):
-    """Безопасная версия savgol_filter, обрабатывающая NaN и краевые случаи."""
-    from scipy.signal import savgol_filter
-
-    data_clean = np.where(np.isfinite(data), data, np.nan)
-    if np.any(np.isnan(data_clean)):
-        nan_mask = np.isnan(data_clean)
-        valid = np.where(~nan_mask)[0]
-        if len(valid) > 1:
-            data_clean[nan_mask] = np.interp(
-                np.flatnonzero(nan_mask), valid, data_clean[valid]
-            )
-        else:
-            return data
-
-    try:
-        if window_length > len(data_clean):
-            window_length = (len(data_clean) if len(data_clean) % 2 == 1
-                             else len(data_clean) - 1)
-        if window_length < 3:
-            return data_clean
-        if polyorder >= window_length:
-            polyorder = window_length - 1
-        if polyorder < 1:
-            return data_clean
-        return savgol_filter(data_clean, window_length, polyorder)
-    except Exception:
-        return data
-
-
-def subsample(data, key, n_target=5000):
-    """Прореживает временной ряд data[key] до ~n_target точек."""
-    step = max(1, len(data['t']) // n_target)
-    return data['t'][::step], data[key][::step]
-
-
-def steady_mask(data, frac=TAIL_FRAC):
-    """Маска последних (1 - frac) симуляции."""
-    t_start = frac * data['t'][-1]
-    return data['t'] >= t_start
-
-
-def clean_nans(data):
-    """Заменяет NaN/Inf в числовых полях линейной интерполяцией."""
-    for key in list(data.keys()):
-        if not isinstance(data[key], np.ndarray):
-            continue
-        arr = data[key]
-        if arr.ndim != 1 or arr.dtype.kind not in 'fc':
-            continue
-        bad = ~np.isfinite(arr)
-        if not np.any(bad):
-            continue
-        idx = np.arange(len(arr))
-        if np.any(~bad):
-            arr[bad] = np.interp(idx[bad], idx[~bad], arr[~bad])
-        else:
-            data[key] = np.zeros_like(arr)
-    return data
+# --- Прореживание рядов для графиков ---
+# Полное число точек вывода N_EVAL ≈ 26667. subsample() сжимает
+# ряд до ~N_PLOT_POINTS, чтобы matplotlib не тормозил и PDF не пух.
+# Значение фиксировано единым для всех панелей, чтобы разные кривые
+# на одном графике имели одинаковую длину.
+N_PLOT_POINTS       = 4000   # для plot_enhanced_comparison (мелкие панели, много сценариев)
+N_PLOT_POINTS_DETAIL = 1200  # для plot_shunt_effect_analysis (крупные панели)
 
 
 # =====================================================================
@@ -123,8 +83,6 @@ def clean_nans(data):
 def simulate_scenario(vsd_resistance,
                       flow_dependent_lungs,
                       label,
-                      color,
-                      description="",
                       pressure_remodel=False,
                       pressure_sensitivity=0.06,
                       t_span=(0.0, T_END),
@@ -132,7 +90,7 @@ def simulate_scenario(vsd_resistance,
     """
     Запускает симуляцию одного сценария.
 
-    Возвращает (data, color, label), где data — dict с временными рядами.
+    Возвращает data — dict с временными рядами (включая 't').
     """
     # --- Initial concentrations (включая лактат, добавленный whole_body) ---
     initial_conc = {
@@ -151,28 +109,25 @@ def simulate_scenario(vsd_resistance,
         'V0': 5800.0,                 # совпадает с дефолтом whole_body
     }
 
-    # HR_base = 70 везде; для VSD-сценариев можно чуть выше,
-    # но барорефлекс всё равно подстроит HR.
-    heart_params = {'hr': 70}
-    if vsd_resistance != np.inf:
-        heart_params['hr'] = 75
+    # HR_base — опорная ЧСС, от которой барорефлекс отсчитывает
+    # отклонение HR_target. Для VSD-сценариев берём чуть выше (75),
+    # здоровый — 70. Значение уходит и в heart.hr_base, и в
+    # baroreflex.HR_base, чтобы hr_factor = HR / HR_base был
+    # согласован между органами.
+    HR_base = 75 if vsd_resistance != np.inf else 70
+    heart_params = {
+        'hr':    HR_base,
+        'R_vsd': vsd_resistance,
+    }
 
     # --- Сборка модели. Не переопределяем C_sys_art / C_pul_ven / P_*0 ---
     # (используем дефолты whole_body: C_sys_art=1.5, C_pul_ven=15,
     #  P_sa0=85, P_sv0=12, P_pv0=12).
     model = WholeBodyModel(
-        baroreflex_params={
-            'P_set':   80.0,
-            'HR_base': 75 if vsd_resistance != np.inf else 70,
-            'gain':    0.002,           # мягкий, дефолт
-            'tau':     2.0,
-            'k_inotropy': 0.5,
-        },
+        baroreflex_params={'P_set': 80.0, 'HR_base': HR_base},
         blood_params=blood_params,
-        vsd_resistance=vsd_resistance,
         flow_dependent_lungs=flow_dependent_lungs,
         lungs_params={
-            'flow_dependent_resistance': flow_dependent_lungs,
             'flow_sensitivity':   0.15,
             'pressure_remodel':   pressure_remodel,
             'P_pa_threshold':     25.0,
@@ -181,13 +136,18 @@ def simulate_scenario(vsd_resistance,
             'tau_remodel':        200.0,
         },
         heart_params=heart_params,
+        # --- Явно: доля VO2, уходящая в периферию ---
+        peripheral_params={'VO2_base': PERIPH_VO2_BASE},
+        # --- Явно: остаток VO2 уходит в GasExchange ---
+        gas_exchange_params={'VO2_base': GAS_EX_VO2_BASE},
         R_sys_peripheral=None,      # калибровка из target_MAP / target_CO
         target_MAP=85.0, target_CO=83.0,
-        # C_sys_art, C_sys_ven, C_pul_ven, P_sa0, P_sv0, P_pv0 — НЕ передаём,
-        # чтобы использовать дефолты whole_body.
     )
 
     # --- Калибровка ---
+    print(f"  [VO2] periph={model.peripheral.VO2_base:.2f}  "
+          f"gas_ex={model.gas_exchange.VO2_base:.2f}  "
+          f"sum={model.peripheral.VO2_base + model.gas_exchange.VO2_base:.2f}")
     print(f"  Калибровка (t_calib={t_calib:.0f} с)...", end=" ", flush=True)
     y0 = model.calibrate_initial_state(t_calib=t_calib)
     print("готово")
@@ -199,8 +159,10 @@ def simulate_scenario(vsd_resistance,
           f"HR={out0['HR']:.1f}  V_blood={out0['V_blood']:.0f}")
 
     # --- Основная симуляция ---
-    t_eval = np.linspace(t_span[0], t_span[1], N_EVAL)
-    print(f"  Симуляция {label} (0..{t_span[1]:.0f} с, LSODA)...",
+    t_eval = np.arange(t_span[0], t_span[1] + 0.5 * DT_EVAL, DT_EVAL)
+    n_pts = t_eval.size
+    print(f"  Симуляция {label} (0..{t_span[1]:.0f} с, LSODA, "
+          f"dt_eval={DT_EVAL:g} с, {n_pts} точек вывода)...",
           end=" ", flush=True)
     sol = model.simulate(
         t_span, t_eval, y0=y0,
@@ -208,7 +170,8 @@ def simulate_scenario(vsd_resistance,
         rtol=1e-5, atol=1e-7,
         max_step=0.05,
     )
-    print(f"завершена за {len(sol.t)} шагов")
+    print(f"готово ({sol.t.size} точек вывода, "
+          f"{sol.nfev} вызовов RHS)")
 
     # --- Сборка выходов ---
     outputs = [model.compute_outputs(sol.t[i], sol.y[:, i])
@@ -216,12 +179,12 @@ def simulate_scenario(vsd_resistance,
     data = {key: np.array([out[key] for out in outputs])
             for key in outputs[0].keys()}
     data['t'] = sol.t
-    data['description'] = description
+    # data['description'] = np.array(str(description))
 
     # --- Очистка NaN/Inf ---
     data = clean_nans(data)
 
-    return data, color, label
+    return data
 
 
 # =====================================================================
@@ -245,21 +208,26 @@ def plot_enhanced_comparison(results_dict):
 
     # 1. Давления P_sa / P_pa
     ax = fig.add_subplot(gs[0, 0])
+    ys_axis = []                       # <-- накопитель всех y-значений
     for name, (data, _, _) in results_dict.items():
-        t, ps = subsample(data, 'P_sa')
-        _, pp = subsample(data, 'P_pa')
+        t, ps = subsample(data, 'P_sa', N_PLOT_POINTS)
+        _, pp = subsample(data, 'P_pa', N_PLOT_POINTS)
         m = np.isfinite(ps) & np.isfinite(pp)
         if not np.any(m):
             continue
         c = COLORS.get(name, 'gray')
         ax.plot(t[m], ps[m], color=c, lw=1.5, label=f"{name} (P_sa)")
         ax.plot(t[m], pp[m], color=c, lw=1.2, ls='--', alpha=0.7)
+        ys_axis.append(ps[m])
+        ys_axis.append(pp[m])
     ax.set_ylabel('Давление (мм рт. ст.)')
     ax.set_xlabel('Время (с)')
     ax.set_title('Системное (—) и лёгочное (- -) давление')
     ax.legend(loc='upper right', fontsize=7)
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, 200)
+    if ys_axis:
+        all_y = np.concatenate(ys_axis)
+        _auto_ylim(ax, all_y, all_y)
 
     # 2. Кровотоки Q_aortic / Q_pulmonary
     ax = fig.add_subplot(gs[0, 1])
@@ -317,6 +285,7 @@ def plot_enhanced_comparison(results_dict):
 
     # 5. Объёмы желудочков
     ax = fig.add_subplot(gs[1, 1])
+    ys_axis = []
     for name, (data, _, _) in results_dict.items():
         t, v_lv = subsample(data, 'V_lv')
         _, v_rv = subsample(data, 'V_rv')
@@ -326,11 +295,15 @@ def plot_enhanced_comparison(results_dict):
         c = COLORS.get(name, 'gray')
         ax.plot(t[m], v_lv[m], color=c, lw=1.2, alpha=0.8)
         ax.plot(t[m], v_rv[m], color=c, lw=1.2, ls='--', alpha=0.8)
+        ys_axis.append(v_lv[m])
+        ys_axis.append(v_rv[m])
     ax.set_ylabel('Объём (мл)')
     ax.set_xlabel('Время (с)')
     ax.set_title('Объёмы желудочков (— ЛЖ, - - ПЖ)')
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, 250)
+    if ys_axis:
+        all_y = np.concatenate(ys_axis)
+        _auto_ylim(ax, all_y, all_y)
 
     # 6. Объём крови
     ax = fig.add_subplot(gs[1, 2])
@@ -437,7 +410,7 @@ def plot_shunt_effect_analysis(results_dict):
     # 1. Динамика Qp/Qs
     ax = axes[0, 0]
     for name, (data, _, _) in results_dict.items():
-        t, q = subsample(data, 'Qp_Qs', 1500)
+        t, q = subsample(data, 'Qp_Qs', N_PLOT_POINTS_DETAIL)
         m = np.isfinite(q)
         if np.any(m):
             ax.plot(t[m], q[m], color=COLORS.get(name, 'gray'), lw=2, label=name)
@@ -503,7 +476,7 @@ def plot_shunt_effect_analysis(results_dict):
     # 4. Объём крови
     ax = axes[1, 0]
     for name, (data, _, _) in results_dict.items():
-        t, v = subsample(data, 'V_blood', 800)
+        t, v = subsample(data, 'V_blood', N_PLOT_POINTS_DETAIL)
         m = np.isfinite(v)
         if np.any(m):
             ax.plot(t[m], v[m], color=COLORS.get(name, 'gray'), lw=2, label=name)
@@ -519,7 +492,7 @@ def plot_shunt_effect_analysis(results_dict):
     for name, (data, _, _) in results_dict.items():
         if 'shunt_fraction_R2L' not in data:
             continue
-        t, sf = subsample(data, 'shunt_fraction_R2L', 800)
+        t, sf = subsample(data, 'shunt_fraction_R2L', N_PLOT_POINTS_DETAIL)
         m = np.isfinite(sf)
         if not np.any(m):
             continue
@@ -588,6 +561,14 @@ def print_detailed_report(results_dict):
     print("\n" + "=" * 100)
     print("ДЕТАЛЬНЫЙ ОТЧЁТ")
     print("=" * 100)
+    print("Формат: mean ± std по установившемуся окну "
+          f"(t > {STEADY_FRAC_DEFAULT:.2f}·t_end).")
+    print("  – mean — среднее значение метрики за окно;")
+    print("  – std  — стандартное отклонение за то же окно "
+          "(пульсовые колебания + остаточный дрейф).")
+    print("Единицы указаны рядом с каждой строкой; "
+          "SaO2 и shunt_fraction_R2L приведены в %.")
+    print("=" * 100)
 
     for name, (data, _, _) in results_dict.items():
         print(f"\n📊 {name}")
@@ -604,19 +585,6 @@ def print_detailed_report(results_dict):
             v = np.mean(data[key][mm]) * scale
             s = np.std(data[key][mm]) * scale
             return fmt.format(v) + f" ± {fmt.format(s)}"
-
-        # print(f"  • Системное АД (P_sa)        : {_ms('P_sa')} мм Hg")
-        # print(f"  • Лёгочное АД (P_pa)        : {_ms('P_pa')} мм Hg")
-        # print(f"  • Системный выброс (Q_aortic)    : {_ms('Q_aortic')} мл/с")
-        # print(f"  • Лёгочный кровоток (Q_pulmonary) : {_ms('Q_pulmonary')} мл/с")
-        # print(f"  • Соотношение Qp/Qs       : {_ms('Qp_Qs', fmt='{:.2f}')}")
-        # print(f"  • Q_vsd       : {_ms('Q_vsd', fmt='{:+.2f}')} мл/с")
-        # print(f"  • V_lv        : {_ms('V_lv')} мл")
-        # print(f"  • V_rv        : {_ms('V_rv')} мл")
-        # print(f"  • V_blood     : {_ms('V_blood', fmt='{:.0f}')} мл")
-        # print(f"  • SaO2        : {_ms('SaO2', scale=100.0, fmt='{:.1f}')} %")
-        # print(f"  • HR          : {_ms('HR')} уд/мин")
-        # print(f"  • GFR         : {_ms('GFR', fmt='{:.2f}')} мл/с")
 
         # ------------------------------------------------------------------
         # Детальный отчёт по установившемуся режиму
@@ -670,11 +638,24 @@ def main():
         },
         'Малый ДМЖП (R=5.0)': {
             'vsd_resistance': 5.0,
+            # Малый дефект: гемодинамически значимого L→R шунта нет,
+            # Qp/Qs остаётся около 1. Поэтому лёгкие не испытывают
+            # ни потоковой, ни барической нагрузки:
+            #   flow_dependent_lungs=False — shear-stress вазоконстрикция
+            #                                не активируется (Q≈норма);
+            #   pressure_remodel=False     — P_pa не превышает порог,
+            #                                ремоделирование не запускается.
+            # Это НЕ забытые флаги, а осознанный выбор: ремоделирование
+            # включается только для «Большого ДМЖП» и «Эйзенменгера».
             'flow_dependent_lungs': False,
             'pressure_remodel': False,
             'color': COLORS['Малый ДМЖП (R=5.0)'],
             'description': 'Малый дефект (d≈4 мм), незначительный L→R шунт',
         },
+        # Большой дефект: значимый L→R шунт (Qp/Qs > 1), лёгкие получают
+        # повышенный поток → активируется flow-зависимая вазоконстрикция.
+        # Ремоделирование пока НЕ включаем: этот сценарий моделирует
+        # острую/подострую фазу без структурных изменений сосудов.
         'Большой ДМЖП (R=1.0)': {
             'vsd_resistance': 1.0,
             'flow_dependent_lungs': True,
@@ -682,6 +663,10 @@ def main():
             'color': COLORS['Большой ДМЖП (R=1.0)'],
             'description': 'Большой дефект (d≈6 мм), выраженный L→R шунт',
         },
+        # Хроническая фаза: длительно повышенные Qp и P_pa → включаем
+        # оба механизма — flow-зависимое сопротивление и медленное
+        # структурное ремоделирование (pressure_remodel=True).
+        # Это и даёт в итоге R→L шунт.
         'Эйзенменгер (R=0.7)': {
             'vsd_resistance': 0.7,
             'flow_dependent_lungs': True,
@@ -699,18 +684,21 @@ def main():
         print(f"\n▶ Сценарий: {name}")
         print(f"   {params['description']}")
 
-        data, color, label = simulate_scenario(
+        data = simulate_scenario(
             vsd_resistance=params['vsd_resistance'],
             flow_dependent_lungs=params['flow_dependent_lungs'],
             label=name,
-            color=params['color'],
-            description=params['description'],
             pressure_remodel=params.get('pressure_remodel', False),
             pressure_sensitivity=params.get('pressure_sensitivity', 0.06),
         )
-        results[name] = (data, color, label)
+        results[name] = (data, params['color'], name)
 
-        filename = f"vsd_results_{name.replace(' ', '_').replace('(', '').replace(')', '')}.npz"
+        safe_name = (name
+                     .replace(' ', '_')
+                     .replace('(', '')
+                     .replace(')', '')
+                     .replace('=', '-'))
+        filename = f"vsd_results_{safe_name}.npz"
         np.savez(filename, **data)
         print(f"   💾 {filename}")
 

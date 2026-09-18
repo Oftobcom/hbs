@@ -1,0 +1,182 @@
+# Базовая физиология здорового взрослого.
+# Все давления — мм рт. ст., объёмы — мл, потоки — мл/с,
+# сопротивления — мм рт. ст.·с/мл, эластанс — мм рт. ст./мл.
+
+heart:
+  # --- ЧСС ---
+  hr: 70
+  hr_min: 30
+  hr_max: 130
+
+  # --- Эластанс предсердий ---
+  E_max_la: 0.25
+  E_min_la: 0.10
+  E_max_ra: 0.20
+  E_min_ra: 0.06
+
+  # --- Эластанс желудочков ---
+  E_max_lv: 3.5
+  E_min_lv: 0.06
+  E_max_rv: 0.8
+  E_min_rv: 0.03
+
+  # --- Мёртвые объёмы (unstressed) ---
+  V0_la: 10
+  V0_lv: 10
+  V0_ra: 5
+  V0_rv: 10
+
+  # --- Конечно-диастолические объёмы (начальное условие) ---
+  EDV_la: 40.0
+  EDV_lv: 120.0
+  EDV_ra: 40.0
+  EDV_rv: 120.0
+
+  # --- Сопротивления клапанов ---
+  R_mitral: 0.03
+  R_aortic: 0.10
+  R_tricuspid: 0.03
+  R_pulmonary: 0.05
+  R_venous: 0.08
+
+  # --- Клапанная кинетика ---
+  k_valve: 20.0
+
+lungs:
+  R1: 0.06
+  R2: 0.04
+  C1: 4.0
+  C2: 8.0
+  flow_dependent_resistance: true
+  flow_sensitivity: 0.15
+  # --- НОВЫЕ параметры recruitment (если уже в lungs.py) ---
+  recruitment_enabled: true
+  P_recruit_50: 20.0
+  n_recruit: 3.0
+  f_recruit_min: 0.55
+  # --- ремоделирование ---
+  pressure_remodel: false
+  P_pa_threshold: 25.0
+  pressure_sensitivity: 0.04
+  R_remodel_max: 5.0
+  tau_remodel: 200.0
+
+baroreflex:
+  P_set: 80.0
+  HR_base: 70.0
+  gain: 0.002
+  tau: 2.0
+  k_inotropy: 0.5
+
+blood:
+  V0: 5800.0
+  initial_concentrations:
+    tox: 0.0
+    bilirubin: 0.5
+    ammonia: 0.3
+    albumin: 4.5
+    glucose: 5.0
+    oxygen: 0.15
+    co2: 0.52
+    lactate: 0.10
+
+peripheral:
+  R_base: null          # null → auto-resolve под target_MAP/target_CO
+  C_tissue: 8.0
+  P_tissue0: 15.0
+  O2_norm: 0.15
+  k_O2_autoreg: 0.5
+  R_min_factor: 0.85
+  tau_autoreg: 3.0
+  k_P_myogenic: 0.002
+  P_sa_norm: 90.0
+  R_max_factor: 2.5
+  P_myogenic_deadband: 10.0
+  VO2_base: 1.5
+  V_tissue_eff: 400.0
+  C_a_O2_norm: 0.20
+  C_O2_lactate_threshold: 0.08
+  k_lactate_prod: 0.05
+  k_lactate_clear: 0.0
+  k_lactate_release: 0.05
+  C_lactate0: 0.10
+  C_O2_local0: 0.10
+
+liver:
+  R_ha: 17.0
+  R_pv_base: 0.25
+  R_hv_base: 0.12
+  C: 5.0
+  C_portal: 1.5
+  P_hv0: 8.0
+  P_portal0: 8.0
+  albumin_prod_base: 0.1
+  bilirubin_clearance_base: 0.2
+  ammonia_clearance_base: 0.15
+  lactate_clearance_base: 0.05
+
+kidney:
+  GFR_base: 120.0
+  P_autoreg: 95.0
+  autoreg_amplitude: 0.6
+  autoreg_slope: 0.025
+  toxin_clearance_frac: 0.2
+  volume_reabsorption_frac: 0.99
+  renal_resistance: 3.75
+
+brain:
+  R_base: 7.0
+  C: 4.0
+  autoreg_gain: 0.3
+  P_autoreg: 80.0
+  O2_extraction: 0.4
+  glucose_extraction: 0.1
+  P0: 47.5
+
+gitract:
+  R_art: 1.8
+  R_cap: 1.2
+  R_venous: 1.5
+  C_art: 2.0
+  C_cap: 5.0
+  k_absorption_water: 0.1
+  k_absorption_nutrients: 0.05
+  portal_pressure_sensitivity: 0.02
+  P_art0: 60.0
+  P_cap0: 20.0
+
+gas_exchange:
+  P_alv_O2: 100.0
+  P_alv_CO2: 40.0
+  Hb: 15.0
+  P50: 26.8
+  n_hill: 2.7
+  alpha_O2: 0.003
+  C_CO2_offset: 0.22
+  k_CO2_slope: 0.0065
+  VO2_base: 2.7
+  VCO2_base: 3.3
+  Q_norm: 83.0
+
+systemic:
+  target_MAP: 85.0
+  target_CO: 83.0
+  C_sys_art: 1.5
+  C_pul_ven: 15.0
+  P_sa0: 85.0
+  P_sv0: 12.0
+  P_pv0: 12.0
+  SYS_VEN_FRACTION: 0.5
+  C_sys_ven_eff: 400.0
+  tau_target: 300.0
+
+simulation:
+  method: LSODA
+  rtol: 1.0e-5
+  atol: 1.0e-6
+  max_step: 0.05
+  t_calib: 600.0
+  t_span: [0.0, 1800.0]
+  n_samples_t: 12001
+  t_start_stationary: 600.0
+  stationary_rel_tol: 0.10

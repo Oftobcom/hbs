@@ -1,0 +1,7 @@
+heart:
+  E_min_lv: 0.03      # желудочек жёстче (фиброз)
+  E_min_la: 0.15      # предсердие жёстче (гипертрофия)
+
+lungs:
+  P_pa_threshold: 20.0
+  pressure_remodel: true

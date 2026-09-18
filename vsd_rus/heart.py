@@ -9,18 +9,18 @@ class Heart4Chambers(OrganModel):
     """
     def __init__(self,
                     hr=70,
-                    E_max_la=0.25, E_min_la=0.10,   # было 0.08
-                    E_max_ra=0.20, E_min_ra=0.06,   # было 0.03
-                    E_max_lv=3.5,  E_min_lv=0.04,
-                    E_max_rv=0.8,  E_min_rv=0.03,
+                    E_max_la=0.25, E_min_la=0.09,   # было 0.08
+                    E_max_ra=0.20, E_min_ra=0.05,   # было 0.03
+                    E_max_lv=3.5,  E_min_lv=0.03,
+                    E_max_rv=0.8,  E_min_rv=0.02,
                     V0_la=10, V0_lv=10, V0_ra=5, V0_rv=10,
                     # --- Конечно-диастолические объёмы (мл), физиология взрослого ---
                     EDV_la=80.0, EDV_lv=120.0, EDV_ra=40.0, EDV_rv=120.0,
-                    R_mitral=0.03, R_aortic=0.10,   # митральный в 1.6× меньше
-                    R_tricuspid=0.03, R_pulmonary=0.05,
+                    R_mitral=0.02, R_aortic=0.10,   # митральный в 1.6× меньше
+                    R_tricuspid=0.02, R_pulmonary=0.05,
                     # R_venous=0.10, 
                     # R_venous=0.05, # для тестов с низким венозным сопротивлением
-                    R_venous=0.08,
+                    R_venous=0.09,
                     R_vsd=np.inf,          # сопротивление дефекта (бесконечность = нет шунта)
                     hr_min=30, hr_max=130,
                     k_valve=20.0):
@@ -85,39 +85,52 @@ class Heart4Chambers(OrganModel):
 
     def _elastance(self, t, chamber):
         tau = (t % self._current_T) / self._current_T
-        Emax = self._current_E_max[chamber] # с учетом inotropy_factor
+        Emax = self._current_E_max[chamber]
         Emin = self.E_min[chamber]
 
         if chamber in ('LA', 'RA'):
-            # Предсердие: 0.8-1.0 цикла, полный косинусный купол 0->1->0
+            # Предсердия — без изменений
             if 0.8 <= tau <= 1.0:
                 ph = (tau - 0.8) / 0.2
-                e = 0.5 * (1 - np.cos(2 * np.pi * ph)) # C1=0 на краях
+                e = 0.5 * (1 - np.cos(2 * np.pi * ph))
                 return Emin + (Emax - Emin) * e
-            else:
-                return Emin
+            return Emin
+
+        # --- Желудочки: асимметричный колокол ---
+        # t_peak = 0.35 (стандарт физиологии)
+        # t_end  = 0.50 (систола 50%, компромисс)
+        # beta   = 1.0 (Shim, стандарт)
+
+        T_PEAK = 0.33
+        T_END = 0.45
+        BETA = 1.1 # медленный старт релаксации, быстрый конец
+
+        if tau <= T_PEAK:
+            ph = tau / T_PEAK
+            e = 0.5 * (1 - np.cos(np.pi * ph))
+        elif tau <= T_END:
+            ph = (tau - T_PEAK) / (T_END - T_PEAK)
+            e = 0.5 * (1 + np.cos(np.pi * (ph ** BETA)))
         else:
-            # Желудочек: Stergiopulos - подъем 0-0.3, спад 0.3-0.45
-            if tau <= 0.3:
-                # изоволюмическое сокращение, медленный старт
-                ph = tau / 0.3
-                e = 0.5 * (1 - np.cos(np.pi * ph)) # 0->1
-                return Emin + (Emax - Emin) * e
-            elif tau <= 0.45:
-                # изоволюмическое расслабление 0.15 цикла ~ 130мс при HR=70
-                ph = (tau - 0.3) / 0.15
-                e = 0.5 * (1 + np.cos(np.pi * ph)) # 1->0, было 1->0.5 с багом
-                return Emin + (Emax - Emin) * e
-            else:
-                # диастола
-                return Emin
+            e = 0.0
+
+        return Emin + (Emax - Emin) * e
 
     def _pressure(self, chamber, V, t):
-        effective_volume = max(V - self.V0[chamber], 0.0)
-        # Не допускаем объём меньше 50% от мёртвого объёма V0
-        # V_clamped = max(V, 0.5 * self.V0[chamber])
-        # effective_volume = V_clamped - self.V0[chamber]
-        return self._elastance(t, chamber) * effective_volume
+        dV = max(V - self.V0[chamber], 0.0)
+        E = self._elastance(t, chamber)
+
+        if chamber in ('LA', 'RA'):
+            # Suga-Sagawa: активная + пассивная компонента
+            # LA жестче RA
+            A = 0.4 if chamber=='LA' else 0.3
+            k = 0.025 if chamber=='LA' else 0.02
+            exp_arg = float(np.clip(k * dV, 0.0, 8.0))
+            P_passive = A * (np.exp(exp_arg) - 1.0)
+            return E * dV + P_passive
+
+        # Желудочки — линейная (стандарт time-varying elastance)
+        return E * dV
     
     def _valve_flow(self, dP, R):
         """

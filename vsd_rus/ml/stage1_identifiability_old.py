@@ -38,7 +38,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from whole_body import WholeBodyModel  # noqa: E402
-from physio_config import load_physiology
+
 
 # =============================================================================
 # 0. Константы и маппинг параметров
@@ -49,6 +49,15 @@ from physio_config import load_physiology
 _D_VSD_REF = 4.0
 _R_VSD_REF = 5.0
 K_VSD = _R_VSD_REF * (_D_VSD_REF / 2.0) ** 4
+STATIONARY_REL_TOL = 0.10
+
+
+def d_vsd_to_R_vsd(d_mm: float) -> float:
+    """Диаметр ДМЖП (мм) -> гидродинамическое сопротивление (усл. ед.)."""
+    if d_mm <= 0:
+        return np.inf
+    r_mm = d_mm / 2.0
+    return K_VSD / (r_mm ** 4)
 
 
 # Порядок параметров фиксирован - он же порядок столбцов J
@@ -66,7 +75,7 @@ PARAM_NAMES = [
 # Базовая точка "здорового взрослого", но с МАЛЫМ ДМЖП (d_vsd=4 мм),
 # чтобы dR_vsd/dd_vsd != 0.
 THETA0 = {
-    "d_vsd":            4.0,     # мм
+    "d_vsd":            0.0,     # мм
     "E_max_lv":         2.5,
     "E_max_rv":         0.8,
     "R_sys":            None,    # посчитается под MAP=85, CO=83
@@ -91,90 +100,63 @@ PARAM_SCALES = {
 # Наблюдаемые выходы (ЭхоКГ-подобные)
 X_NAMES = ["P_sa", "P_pa", "Q_aortic", "Qp_Qs", "EDV_LV", "EDV_RV", "HR"]
 
-def d_vsd_to_R_vsd(d_mm: float) -> float:
-    """Диаметр ДМЖП (мм) -> гидродинамическое сопротивление (усл. ед.)."""
-    if d_mm <= 0:
-        return np.inf
-    r_mm = d_mm / 2.0
-    return K_VSD / (r_mm ** 4)
+# Начальные концентрации веществ (как в run_simulation.py)
+INITIAL_CONC = {
+    "tox": 0.0,
+    "bilirubin": 0.5,
+    "ammonia": 0.3,
+    "albumin": 4.5,
+    "glucose": 5.0,
+    "oxygen": 0.15,
+    "co2": 0.52,
+}
 
 # =============================================================================
 # 1. Построение модели из θ
 # =============================================================================
 
 def build_model(theta: dict,
-                target_MAP=None,
-                target_CO=None,
-                config_path=None,
-                config_overrides=None) -> WholeBodyModel:
-    cfg = load_physiology(config_path, config_overrides)
+                target_MAP=85.0,
+                target_CO=83.0) -> WholeBodyModel:
+    """Собирает WholeBodyModel из словаря θ (см. THETA0)."""
+    R_vsd = d_vsd_to_R_vsd(theta["d_vsd"]) if theta["d_vsd"] > 0 else np.inf
 
-    # θ перекрывает структурные параметры (для Stage 1/2)
-    heart_params = dict(cfg["heart"])
-    heart_params["E_max_lv"] = theta["E_max_lv"]
-    heart_params["E_max_rv"] = theta["E_max_rv"]
-    heart_params["hr"]       = theta["HR_base"]
-    heart_params["R_vsd"]    = (
-        d_vsd_to_R_vsd(theta["d_vsd"]) if theta["d_vsd"] > 0 else np.inf
-    )
-
-    lungs_params = dict(cfg["lungs"])
-    lungs_params["flow_sensitivity"] = theta["flow_sensitivity"]
-
+    heart_params = {
+        "E_max_lv": theta["E_max_lv"],
+        "E_max_rv": theta["E_max_rv"],
+        "hr":       theta["HR_base"],
+        "R_vsd":    R_vsd,
+    }
+    lungs_params = {
+        "flow_dependent_resistance": True,
+        "flow_sensitivity":         theta["flow_sensitivity"],
+    }
     blood_params = {
-        "V0": theta["V0_blood"],   # θ может переопределить
-        "initial_concentrations": cfg["blood"]["initial_concentrations"],
+        "V0": theta["V0_blood"],
+        "initial_concentrations": INITIAL_CONC,
+    }
+    baroreflex_params = {
+        "P_set":   80.0,
+        "HR_base": theta["HR_base"],
+        "gain":    0.002,
+        "tau":     2.0,
+        "k_inotropy": 0.5
     }
 
-    baroreflex_params = dict(cfg["baroreflex"])
-    baroreflex_params["HR_base"] = theta["HR_base"]
-
-    # --- 5. Остальные органы — из YAML без изменений ---
-    liver_params    = dict(cfg["liver"])
-    kidney_params   = dict(cfg["kidney"])
-    brain_params    = dict(cfg["brain"])
-    gitract_params  = dict(cfg["gitract"])
-    gas_exchange_params = dict(cfg["gas_exchange"])
-
-    # --- 6. Периферия: null в R_base означает "auto-resolve" ---
-    peripheral_params = dict(cfg["peripheral"])
-    if peripheral_params.get("R_base") is None:
-        peripheral_params.pop("R_base", None)   # не передаём None,
-                                                # whole_body сам подставит R_sys_peripheral
-
-    # --- 7. Системные константы из YAML ---
-    sys_cfg = cfg["systemic"]
-    if target_MAP is None:
-        target_MAP = sys_cfg["target_MAP"]
-    if target_CO is None:
-        target_CO = sys_cfg["target_CO"]
-
-    # --- 8. Сборка модели ---
     model = WholeBodyModel(
         heart_params=heart_params,
         lungs_params=lungs_params,
-        liver_params=liver_params,
-        kidney_params=kidney_params,
         blood_params=blood_params,
-        gitract_params=gitract_params,
-        brain_params=brain_params,
         baroreflex_params=baroreflex_params,
-        gas_exchange_params=gas_exchange_params,
-        peripheral_params=peripheral_params,
+        vsd_resistance=R_vsd,
         flow_dependent_lungs=True,
         R_sys_peripheral=theta["R_sys"],
         target_MAP=target_MAP,
         target_CO=target_CO,
         C_sys_art=theta["C_sys_art"],
-        C_pul_ven=sys_cfg["C_pul_ven"],
-        P_sa0=sys_cfg["P_sa0"],
-        P_sv0=sys_cfg["P_sv0"],
-        P_pv0=sys_cfg["P_pv0"],
-        SYS_VEN_FRACTION=sys_cfg["SYS_VEN_FRACTION"],   # <-- ДОБАВИТЬ
-        C_sys_ven_eff=sys_cfg["C_sys_ven_eff"],         # <-- ДОБАВИТЬ
-        tau_target=sys_cfg["tau_target"],               # <-- ДОБАВИТЬ
-    )    
+    )
     return model
+
 
 def resolve_R_sys(theta: dict) -> float:
     """Если R_sys=None, спросить у модели, какое значение она посчитала."""
@@ -203,34 +185,26 @@ def _collect_outputs(model: WholeBodyModel, sol) -> dict:
 
 
 def get_steady_outputs(model: WholeBodyModel,
-                       sim_cfg: dict | None = None,
+                       t_span=(0.0, 1200.0),
+                       n_samples: int = 12001,
+                       t_start_stationary: float = 600.0,
                        verbose: bool = False) -> dict | None:
     """
     Калибрует y0, интегрирует, проверяет стационар
     и возвращает усреднённые за 10 циклов выходы.
     Возвращает None, если решение не сошлось.
     """
-    if sim_cfg is None:
-        sim_cfg = {
-            'method': 'LSODA', 'rtol': 1e-5, 'atol': 1e-6, 'max_step': 0.05,
-            't_calib': 300.0, 't_span': (0.0, 1200.0),
-            'n_samples_t': 12001, 't_start_stationary': 600.0,
-            'stationary_rel_tol': 0.10,
-        }
-
-    t_span = tuple(sim_cfg["t_span"])
-    n_samples = int(sim_cfg["n_samples_t"])
-    t_start_stationary = float(sim_cfg["t_start_stationary"])
-
     t_eval = np.linspace(t_span[0], t_span[1], n_samples)
-    y0 = model.calibrate_initial_state(t_calib=float(sim_cfg["t_calib"]))
-    sol = model.simulate(
-        t_span, t_eval, y0=y0,
-        method=str(sim_cfg["method"]),
-        rtol=float(sim_cfg["rtol"]),
-        atol=float(sim_cfg["atol"]),
-        max_step=float(sim_cfg["max_step"]),
-    )
+    # y0 = model.calibrate_initial_state(t_calib=10.0)
+    y0 = model.calibrate_initial_state()
+    sol = model.simulate(t_span, t_eval, y0=y0, method="LSODA", rtol=1e-5, atol=1e-6, max_step=0.05)
+    # sol = model.simulate(t_span, t_eval, y0=y0, method="BDF", rtol=1e-5, atol=1e-6, max_step=0.05)
+    # sol = model.simulate(t_span, t_eval, method='RK45', rtol=1e-5, atol=1e-6, max_step=0.05)
+
+    if sol.y.shape[1] < 2 or not np.all(np.isfinite(sol.y[:, -1])):
+        if verbose:
+            print("  [warn] решение не конечно")
+        return None
 
     data = _collect_outputs(model, sol)
 
@@ -239,7 +213,7 @@ def get_steady_outputs(model: WholeBodyModel,
     ps_tail = data["P_sa"][last50]
     if ps_tail.size == 0 or np.mean(ps_tail) <= 0:
         return None
-    if np.std(ps_tail) / np.mean(ps_tail) > float(sim_cfg["stationary_rel_tol"]):
+    if np.std(ps_tail) / np.mean(ps_tail) > STATIONARY_REL_TOL:
         if verbose:
             print(f"  [warn] нестационарен: std/mean(P_sa)={np.std(ps_tail)/np.mean(ps_tail):.3f}")
         return None
@@ -272,9 +246,8 @@ def get_steady_outputs(model: WholeBodyModel,
 
 def compute_jacobian(theta0: dict,
                      rel_step: float = 0.01,
-                     sim_cfg: dict | None = None,
                      verbose: bool = True
-                     ) -> tuple[np.ndarray, dict, dict]:    
+                     ) -> tuple[np.ndarray, dict, dict]:
     """
     J_ij = (dX_i / X0_i) / (dtheta_j / scale_j)
 
@@ -294,7 +267,7 @@ def compute_jacobian(theta0: dict,
         print(f"[Stage1] R_vsd(d_vsd={theta0['d_vsd']}мм) = {d_vsd_to_R_vsd(theta0['d_vsd']):.4f}")
 
     model0 = build_model(theta0)
-    X0 = get_steady_outputs(model0, sim_cfg=sim_cfg, verbose=verbose)
+    X0 = get_steady_outputs(model0, verbose=verbose)
     if X0 is None:
         raise RuntimeError("Базовая точка не вышла на стационар - проверь whole_body.calibrate_initial_state")
 
@@ -313,8 +286,8 @@ def compute_jacobian(theta0: dict,
 
         theta_plus = dict(theta0); theta_plus[p] = theta0[p]+delta
         theta_minus = dict(theta0); theta_minus[p] = theta0[p]-delta
-        Xp = get_steady_outputs(build_model(theta_plus), sim_cfg=sim_cfg, verbose=False)
-        Xm = get_steady_outputs(build_model(theta_minus), sim_cfg=sim_cfg, verbose=False)
+        Xp = get_steady_outputs(build_model(theta_plus), verbose=False)
+        Xm = get_steady_outputs(build_model(theta_minus), verbose=False)
         if Xp is None or Xm is None: 
             if verbose:
                 print(f"  [warn] {p}: Xp={Xp is not None}, Xm={Xm is not None} → столбец NaN")
@@ -454,11 +427,8 @@ def main():
     print("Stage 1: анализ идентифицируемости WholeBodyModel")
     print("=" * 70)
 
-    cfg = load_physiology()
-    sim_cfg = cfg["simulation"]
-
     theta0 = dict(THETA0)
-    J, X0, theta0_resolved = compute_jacobian(theta0, rel_step=0.01, sim_cfg=sim_cfg, verbose=True)
+    J, X0, theta0_resolved = compute_jacobian(theta0, rel_step=0.01, verbose=True)
 
     # Сохраняем якобиан
     df_J = pd.DataFrame(J, index=X_NAMES, columns=PARAM_NAMES)
@@ -501,9 +471,6 @@ def main():
     print("\nDone.")
 
 def debug_base_point():
-    cfg = load_physiology()
-    sim_cfg = cfg["simulation"]
-
     theta = dict(THETA0)
     theta["R_sys"] = None
     theta["R_sys"] = resolve_R_sys(theta)
@@ -512,21 +479,13 @@ def debug_base_point():
     print("=== DEBUG BASE POINT ===")
     print(f"[Stage1] R_sys resolved = {theta['R_sys']:.3f}")
 
-    t_calib = float(sim_cfg["t_calib"]) # <-- из YAML
-    y0 = model.calibrate_initial_state(t_calib=t_calib)
+    y0 = model.calibrate_initial_state(t_calib=300.0)
     print(f"y0 heart: {y0[model.idx['heart']]}")
     print(f"y0 V_blood = {y0[model.idx['blood']][0]:.0f}")
 
-    t_span = tuple(sim_cfg["t_span"]) # <-- из YAML
-    n_samples = int(sim_cfg["n_samples_t"]) # <-- из YAML
-    t_eval = np.linspace(t_span[0], t_span[1], n_samples)
-    sol = model.simulate(
-        t_span, t_eval=t_eval, y0=y0,
-        method=str(sim_cfg["method"]),
-        rtol=float(sim_cfg["rtol"]),
-        atol=float(sim_cfg["atol"]),
-        max_step=float(sim_cfg["max_step"]),
-    )
+    t_eval = np.linspace(0, 1800, 12001)
+    sol = model.simulate((0, 1800), t_eval=t_eval, y0=y0,
+                         method="LSODA", rtol=1e-5, atol=1e-8, max_step=0.05)
 
     data = _collect_outputs(model, sol)
 
@@ -558,11 +517,8 @@ def debug_base_point():
     EDV_RV = np.max(data["V_rv"][win])
     print(f"\n--- Steady-state (t > {data['t'][-1]-10*T:.0f}, 10 циклов) ---")
     print(f"P_sa={P_sa_mean:.1f}  P_pa={P_pa_mean:.1f}  "
-        f"Qa={Qs_mean:.1f}  Qp/Qs={Qp_mean/max(Qs_mean,1e-6):.2f}  "
-        f"EDV_LV={EDV_LV:.0f}  EDV_RV={EDV_RV:.0f}  V_blood={data['V_blood'][-1]:.0f}")
-    print(f"P_pv={data['P_pv'][win].mean():.1f} "
-        f"Q_pv_to_la={data['Q_pv_to_la'][win].mean():.1f} "
-        f"Q_vsd={data['Q_vsd'][win].mean():.1f}")
+          f"Qa={Qs_mean:.1f}  Qp/Qs={Qp_mean/max(Qs_mean,1e-6):.2f}  "
+          f"EDV_LV={EDV_LV:.0f}  EDV_RV={EDV_RV:.0f}  V_blood={data['V_blood'][-1]:.0f}")
 
     # --- Один кардиоцикл ---
     t_end = data["t"][-1]
@@ -576,6 +532,7 @@ def debug_base_point():
         arr = data[k][cycle]
         print(f"  {k:12s}  min={arr.min():6.1f}  "
               f"max={arr.max():6.1f}  mean={arr.mean():6.1f}")
+    print(f"P_pv={data['P_pv'][m].mean():.1f} Q_pv_to_la={data['Q_pv_to_la'][m].mean():.1f} Q_vsd={data['Q_vsd'][m].mean():.1f}")
 
 # if __name__ == "__main__":
 #     debug_base_point()          # сначала проверяем базовую точку

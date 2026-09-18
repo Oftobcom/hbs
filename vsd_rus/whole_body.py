@@ -1,4 +1,5 @@
 # whole_body.py
+from pprint import pp
 import warnings
 
 import numpy as np
@@ -93,7 +94,6 @@ class WindkesselVessel(OrganModel):
 class WholeBodyModel:
     """
     Полная модель организма здорового человека или с ДМЖП.
-    Параметр vsd_resistance задаёт сопротивление дефекта (Ом).
     """
     def __init__(self,
         heart_params=None,
@@ -105,12 +105,14 @@ class WholeBodyModel:
         brain_params=None,
         baroreflex_params=None,
         gas_exchange_params=None,
-        vsd_resistance=np.inf,
         flow_dependent_lungs=False,
         R_sys_peripheral=None,
         target_MAP=85.0, target_CO=83.0,
         C_sys_art=1.5, C_pul_ven=15.0,
         P_sa0=85.0, P_sv0=12.0, P_pv0=12.0,
+        SYS_VEN_FRACTION=0.5,
+        C_sys_ven_eff=400.0,
+        tau_target=300.0,
         fluid_intake_rate=0.0,
         insensible_loss_rate=0.0,
         peripheral_params=None,
@@ -121,10 +123,8 @@ class WholeBodyModel:
             if blood_params and 'initial_concentrations' in blood_params:
                 substance_names = list(blood_params['initial_concentrations'].keys())
             else:
-                substance_names = ['tox', 'bilirubin', 'ammonia', 'albumin', 'glucose', 'oxygen', 'co2']
-
-        # Лактат
-        substance_names = list(substance_names) + ['lactate']
+                substance_names = ['tox', 'bilirubin', 'ammonia', 'albumin',
+                    'glucose', 'oxygen', 'co2', 'lactate',]
 
         self.substance_names = substance_names
         self._substance_idx = {name: i for i, name in enumerate(substance_names)}
@@ -144,16 +144,15 @@ class WholeBodyModel:
             if name not in initial_concentrations:
                 initial_concentrations[name] = DEFAULT_CONC.get(name, 0.0)
 
-        # Передаём сопротивление ДМЖП в сердце
-        heart_params = heart_params or {}
-        heart_params['R_vsd'] = vsd_resistance
+        heart_params = dict(heart_params or {})
+        if heart_params.get('R_vsd') is None:      # <-- ДОБАВИТЬ
+            heart_params['R_vsd'] = np.inf
         self.heart = Heart4Chambers(**heart_params)
 
-        lungs_params = lungs_params or {}
-        if flow_dependent_lungs:
-            lungs_params['flow_dependent_resistance'] = True
+        lungs_params = dict(lungs_params or {})
+        lungs_params['flow_dependent_resistance'] = bool(flow_dependent_lungs)
         self.lungs = Lungs2Chamber(**lungs_params)
-
+        
         self.liver = Liver(**(liver_params or {}))
         self.kidney = KidneyHemodynamic(**(kidney_params or {}))
         self.blood = BloodPool(substance_names=substance_names,
@@ -180,6 +179,8 @@ class WholeBodyModel:
         # R_base периферии должен совпасть с R_sys_peripheral,
         # который был вычислен выше под target_MAP / target_CO
         pp = dict(peripheral_params or {})
+        if pp.get('R_base') is None:
+            pp.pop('R_base', None)
         pp.setdefault('R_base', R_sys_peripheral)
         self.peripheral = PeripheralTissues(**pp)
             
@@ -196,19 +197,12 @@ class WholeBodyModel:
         self.pul_ven = WindkesselVessel(C=C_pul_ven, P0=P_pv0, mode='P')
 
         # sys_ven — БУФЕР объёма. Работает в V-mode.
-        # Стартовый объём = 50% всей крови (типичная доля для вен).
-        #
-        # Проще: задать V_sv0 напрямую и вычислить C из условия
-        # P_sv = P0 при V_sv = V0.
-        SYS_VEN_FRACTION = 0.5                  # 50% крови в системных венах
         V_sv0 = SYS_VEN_FRACTION * blood_init['V0']
-        # Ёмкость вен: ~400 мл/мм рт.ст. — реалистично для взрослого
-        C_sys_ven_eff = 400.0
 
         self.sys_ven = WindkesselVessel(
             C=C_sys_ven_eff, P0=P_sv0, mode='V', V0=V_sv0,
             target_fraction=SYS_VEN_FRACTION,
-            tau_target=300.0,                   # 5 мин на релаксацию
+            tau_target=tau_target,                   # 5 мин на релаксацию
         )
 
         self.R_sys_peripheral = R_sys_peripheral
@@ -248,7 +242,7 @@ class WholeBodyModel:
             start += size
         self.total_states = start
 
-    def calibrate_initial_state(self, t_calib=120.0, t_eval=None,
+    def calibrate_initial_state(self, t_calib=600.0, t_eval=None,
                                 rtol=1e-6, atol=1e-8,
                                 p_sa_lo=50.0, p_sa_hi=150.0,
                                 rel_tol_cycle=0.15):

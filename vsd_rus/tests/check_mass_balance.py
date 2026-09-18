@@ -5,12 +5,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np
 from whole_body import WholeBodyModel
 
-model = WholeBodyModel(vsd_resistance=5.0)
+model = WholeBodyModel(heart_params={'R_vsd': 5.0})
 
 # Симулируем с увеличенным fluid_intake
 # model.fluid_intake_rate = 2.0  # мл/с, инфузия
 model.fluid_intake_rate = 0
-y0 = model.get_initial_state()
+y0 = model.calibrate_initial_state(t_calib=900.0)
 sol = model.simulate((0, 600), y0=y0, method='LSODA',
                      max_step=0.05, t_eval=np.linspace(0, 600, 3000))
 
@@ -23,13 +23,21 @@ for tc in [0, 100, 200, 400, 600]:
           f"{out['P_sv']:7.2f}  {out['P_sa']:7.2f}  {out['Q_aortic']:10.2f}")
 
 # Симулируем с очень сильным оттоком: insensible_loss > intake
+# Модель собираем в ШТАТНОМ режиме (без потерь), калибруем y0 при
+# нулевом оттоке — тогда V_sv стартует с согласованного уровня
+# ≈ SYS_VEN_FRACTION·V0, а не с уже «упавшего» состояния.
+# Отток включаем ПОСЛЕ калибровки, чтобы тест проверял именно
+# реакцию WindkesselVessel на потерю объёма, а не результат
+# двойного эффекта «некалиброванный старт + отток».
 model = WholeBodyModel(
-    vsd_resistance=5.0,
+    heart_params={'R_vsd': 5.0},
     fluid_intake_rate=0.0,
-    insensible_loss_rate=5.0,   # 5 мл/с потерь — экстремально
+    # insensible_loss_rate пока НЕ передаём — оставляем дефолт 0
 )
+y0 = model.calibrate_initial_state(t_calib=900.0)
 
-y0 = model.get_initial_state()
+model.insensible_loss_rate = 5.0    # включаем отток ПОСЛЕ калибровки
+
 sol = model.simulate((0, 600), y0=y0, method='LSODA',
                      max_step=0.05, t_eval=np.linspace(0, 600, 3000))
 
