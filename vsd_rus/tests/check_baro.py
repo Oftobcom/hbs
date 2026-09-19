@@ -13,10 +13,10 @@ model = WholeBodyModel(heart_params={'R_vsd': 5.0})
 #     baroreflex_params={'P_set': 80.0, 'HR_base': HR_base},
 # )
 # y0 = model.get_initial_state()
-y0 = model.calibrate_initial_state(t_calib=900, p_sa_lo=20.0)
+y0 = model.calibrate_initial_state(t_calib=800, p_sa_lo=20.0)
 
 sol = model.simulate((0, 400), y0=y0, method='LSODA',
-                     max_step=0.05, t_eval = np.linspace(0, 400, 40001))
+                     max_step=0.07, t_eval = np.linspace(0, 400, 40001))
 
 # --- Усреднение по последним ~5 кардиоциклам ---
 # Итеративно уточняем окно: сначала грубая T из HR в последней точке,

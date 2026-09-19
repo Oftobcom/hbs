@@ -5,7 +5,7 @@ run_simulation.py
 Сравнение гемодинамики: здоровый vs ДМЖП (малый / большой / Эйзенменгер).
 
 Совместим с текущей архитектурой whole_body.WholeBodyModel:
-  - Mass-balance B: sys_ven в V-mode (target_fraction=0.5, tau=300 s)
+  - Mass-balance B: sys_ven в V-mode (target_fraction=0.5, tau=200 s)
   - Мягкий барорефлекс (P_set=80, gain=0.002, k_inotropy=0.5)
   - heart с мягкими клапанами (R_mitral=0.03, R_venous=0.05)
   - peripheral с мягкой ауторегуляцией (k_O2=0.5, k_P=0.002)
@@ -47,18 +47,16 @@ SCENARIO_ORDER = list(COLORS.keys())
 #
 # T_CALIB — прогрев перед основной симуляцией. Должен покрывать
 # самую медленную релаксацию в модели:
-#   sys_ven (V-mode):  tau_target   = 300 с → 3τ = 900 с
+#   sys_ven (V-mode):  tau_target   = 200 с → 3τ = 600 с
 #   lungs.R_remodel:   tau_remodel  = 200 с → 3τ = 600 с
 #   peripheral.R_eff:  tau_autoreg  =   3 с → 3τ ≈   9 с
 #   baroreflex.HR:     tau          =   2 с → 3τ ≈   6 с
-# Поэтому T_CALIB = 900 с: 3τ для sys_ven (95 % сходимости)
-# и 4.5τ для lungs.R_remodel (99 %). Значение 150 с (старое)
-# оставляло sys_ven на полпути и портило y0.
-
+# Поэтому T_CALIB = 800 с: 4τ для sys_ven (98 % сходимости)
+# и 4τ для lungs.R_remodel (98 %).
 T_END   = 800.0
-T_CALIB = 900.0
-DT_EVAL = 0.03                 # шаг вывода, для 0,01 → ~80 точек/кардиоцикл при HR=70
-N_EVAL = int(T_END / DT_EVAL) + 1 # количество точек вывода
+T_CALIB = 800.0
+N_EVAL  = 20000                     # желаемое число точек вывода
+DT_EVAL = T_END / (N_EVAL - 1)
 
 # --- Баланс потребления O2 ---
 # Полное VO2 организма фиксировано и складывается из двух слагаемых:
@@ -68,8 +66,6 @@ PERIPH_VO2_BASE = 1.5   # мл O2/с — доля, приходящаяся на
 GAS_EX_VO2_BASE = TOTAL_VO2_BASE - PERIPH_VO2_BASE   # = 2.7 мл O2/с
 
 # --- Прореживание рядов для графиков ---
-# Полное число точек вывода N_EVAL ≈ 26667. subsample() сжимает
-# ряд до ~N_PLOT_POINTS, чтобы matplotlib не тормозил и PDF не пух.
 # Значение фиксировано единым для всех панелей, чтобы разные кривые
 # на одном графике имели одинаковую длину.
 N_PLOT_POINTS       = 4000   # для plot_enhanced_comparison (мелкие панели, много сценариев)
@@ -159,16 +155,16 @@ def simulate_scenario(vsd_resistance,
           f"HR={out0['HR']:.1f}  V_blood={out0['V_blood']:.0f}")
 
     # --- Основная симуляция ---
-    t_eval = np.arange(t_span[0], t_span[1] + 0.5 * DT_EVAL, DT_EVAL)
-    n_pts = t_eval.size
+    n_pts = N_EVAL
+    t_eval = np.linspace(t_span[0], t_span[1], n_pts)
     print(f"  Симуляция {label} (0..{t_span[1]:.0f} с, LSODA, "
           f"dt_eval={DT_EVAL:g} с, {n_pts} точек вывода)...",
           end=" ", flush=True)
     sol = model.simulate(
         t_span, t_eval, y0=y0,
         method='LSODA',
-        rtol=1e-5, atol=1e-7,
-        max_step=0.05,
+        rtol=1e-4, atol=1e-5,
+        max_step=0.07,
     )
     print(f"готово ({sol.t.size} точек вывода, "
           f"{sol.nfev} вызовов RHS)")
@@ -611,6 +607,9 @@ def print_detailed_report(results_dict):
         print(f"  • Сатурация O₂ (SaO2)              : {_ms('SaO2', scale=100.0, fmt='{:.1f}')} %  — <90% = гипоксемия (R→L)")
         print(f"  • ЧСС (HR)                         : {_ms('HR')} уд/мин  — текущая частота сердечных сокращений")
         print(f"  • СКФ (GFR)                        : {_ms('GFR', fmt='{:.2f}')} мл/с  — скорость клубочковой фильтрации почек")
+        print(f"  • Потребление O₂ мозгом            : {_ms('O2_consumption', fmt='{:.3f}')} мл O₂/с  — утилизация O₂ церебральной тканью")
+        print(f"  • Потребление O₂ периферией        : {_ms('O2_consumption_periph', fmt='{:.3f}')} мл O₂/с  — утилизация O₂ периферической тканью")
+        print(f"  • Поглощение O₂ лёгкими            : {_ms('O2_uptake', fmt='{:.3f}')} мл O₂/с  — поглощение O₂ лёгкими")
 
         # Доля R→L шунта в системном выбросе — печатаем только если есть
         _sh = _ms('shunt_fraction_R2L', scale=100.0, fmt='{:.1f}')

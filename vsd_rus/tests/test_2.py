@@ -25,7 +25,7 @@ print(f"lactate_clearance_base = {model.liver.lactate_clearance_base}")
 
 y0 = model.calibrate_initial_state()
 sol = model.simulate((0, 400), t_eval=np.linspace(0, 400, 1000),
-                     y0=y0, method='LSODA', rtol=1e-5, max_step=0.05)
+                     y0=y0, method='LSODA', rtol=1e-4, atol=1e-5, max_step=0.07)
 
 out = model.compute_outputs(sol.t[-1], sol.y[:, -1])
 print(f"C_lactate_blood  = {out['C_lactate_blood']:.4f} мг/мл")

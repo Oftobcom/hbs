@@ -197,10 +197,8 @@ def get_steady_outputs(model: WholeBodyModel,
     t_eval = np.linspace(t_span[0], t_span[1], n_samples)
     # y0 = model.calibrate_initial_state(t_calib=10.0)
     y0 = model.calibrate_initial_state()
-    sol = model.simulate(t_span, t_eval, y0=y0, method="LSODA", rtol=1e-5, atol=1e-6, max_step=0.05)
-    # sol = model.simulate(t_span, t_eval, y0=y0, method="BDF", rtol=1e-5, atol=1e-6, max_step=0.05)
-    # sol = model.simulate(t_span, t_eval, method='RK45', rtol=1e-5, atol=1e-6, max_step=0.05)
-
+    sol = model.simulate(t_span, t_eval, y0=y0, method="LSODA", rtol=1e-4, atol=1e-5, max_step=0.07)
+    
     if sol.y.shape[1] < 2 or not np.all(np.isfinite(sol.y[:, -1])):
         if verbose:
             print("  [warn] решение не конечно")

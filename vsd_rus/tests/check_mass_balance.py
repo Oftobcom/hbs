@@ -10,9 +10,9 @@ model = WholeBodyModel(heart_params={'R_vsd': 5.0})
 # Симулируем с увеличенным fluid_intake
 # model.fluid_intake_rate = 2.0  # мл/с, инфузия
 model.fluid_intake_rate = 0
-y0 = model.calibrate_initial_state(t_calib=900.0)
+y0 = model.calibrate_initial_state(t_calib=800.0)
 sol = model.simulate((0, 600), y0=y0, method='LSODA',
-                     max_step=0.05, t_eval=np.linspace(0, 600, 3000))
+                     max_step=0.07, t_eval=np.linspace(0, 600, 3000))
 
 print(f"{'t':>6}  {'V_blood':>9}  {'V_sv':>9}  {'P_sv':>7}  {'P_sa':>7}  {'Q_aortic':>10}")
 print("-" * 60)
@@ -34,12 +34,12 @@ model = WholeBodyModel(
     fluid_intake_rate=0.0,
     # insensible_loss_rate пока НЕ передаём — оставляем дефолт 0
 )
-y0 = model.calibrate_initial_state(t_calib=900.0)
+y0 = model.calibrate_initial_state(t_calib=800.0)
 
 model.insensible_loss_rate = 5.0    # включаем отток ПОСЛЕ калибровки
 
 sol = model.simulate((0, 600), y0=y0, method='LSODA',
-                     max_step=0.05, t_eval=np.linspace(0, 600, 3000))
+                     max_step=0.07, t_eval=np.linspace(0, 600, 3000))
 
 V_sv_arr = sol.y[model.idx['sys_ven']][0]
 print(f"V_sv: min = {V_sv_arr.min():.2f}, max = {V_sv_arr.max():.2f}")

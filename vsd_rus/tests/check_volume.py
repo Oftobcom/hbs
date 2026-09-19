@@ -4,11 +4,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 from whole_body import WholeBodyModel
+from utils import HR_base
 
-model = WholeBodyModel(vsd_resistance=5.0)
-y0 = model.calibrate_initial_state(t_calib=60, p_sa_lo=20.0)
-sol = model.simulate((0, 300), y0=y0, method='LSODA',
-                     max_step=0.05, t_eval=np.linspace(0, 300, 2000))
+
+model = WholeBodyModel(
+    heart_params={'hr': HR_base, 'R_vsd': 5.0},
+    baroreflex_params={'P_set': 80.0, 'HR_base': HR_base},
+)
+y0 = model.calibrate_initial_state(t_calib=800)
+sol = model.simulate((0, 600), y0=y0, method='LSODA', max_step=0.07,
+                        t_eval=np.arange(0.0, 600.005, 0.05))
+
 
 out = model.compute_outputs(sol.t[-1], sol.y[:, -1])
 

@@ -22,7 +22,7 @@ from whole_body import WholeBodyModel
 model = WholeBodyModel(vsd_resistance=5.0)   # малый ДМЖП
 y0 = model.calibrate_initial_state()
 sol = model.simulate((0, 400), t_eval=np.linspace(0, 400, 1000),
-                     y0=y0, method='LSODA', rtol=1e-5, max_step=0.05)
+                     y0=y0, method='LSODA', rtol=1e-4, atol=1e-5, max_step=0.07)
 
 assert np.all(np.isfinite(sol.y)), "Решение содержит NaN/Inf!"
 

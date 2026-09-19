@@ -20,10 +20,10 @@ model = WholeBodyModel(
     heart_params={'hr': HR_base, 'R_vsd': 5.0},
     baroreflex_params={'P_set': 80.0, 'HR_base': HR_base},
 )
-y0 = model.calibrate_initial_state(t_calib=900.0)
+y0 = model.calibrate_initial_state(t_calib=800.0)
 model.insensible_loss_rate = 1.0    # включаем ПОСЛЕ калибровки
 sol = model.simulate((0, 600), y0=y0, method='LSODA',
-                     max_step=0.05, t_eval=np.arange(0.0, 600.005, 0.1))
+                     max_step=0.07, t_eval=np.arange(0.0, 600.005, 0.1))
 
 print(f"{'t':>5}  {'V_blood':>9}  {'V_sv':>9}  {'V_target':>9}  {'V_sv/Vb':>9}  {'P_sv':>7}  {'P_sa':>7}")
 print("-" * 70)

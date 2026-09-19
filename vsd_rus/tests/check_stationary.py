@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 from whole_body import WholeBodyModel
-
+from utils import HR_base
 
 def cycle_mean(data, model, t_center, n_cycles=1.0):
     """
@@ -32,12 +32,20 @@ def cycle_mean(data, model, t_center, n_cycles=1.0):
     idx_center = int(np.argmin(np.abs(t_arr - t_center)))
     y_center = data['y'][:, idx_center]
     out_center = model.compute_outputs(t_arr[idx_center], y_center)
-    HR = out_center['HR']
-    T = 60.0 / max(HR, 1e-6)
+    HR = max(out_center['HR'], 20.0)
+    T = 60.0 / HR
+    mask = (t_arr > t_center - n_cycles * T) & (t_arr <= t_center)
+
+    # уточнение: HR_mean по первичной маске, пересчёт T и маски
+    if mask.sum() >= 3:
+        hrs = np.array([model.compute_outputs(t_arr[i], data['y'][:, i])['HR']
+                        for i in np.where(mask)[0]])
+        T = 60.0 / max(hrs.mean(), 20.0)
+        mask = (t_arr > t_center - n_cycles * T) & (t_arr <= t_center)
 
     # Окно: [t_center - n_cycles*T, t_center]
     t_start = t_center - n_cycles * T
-    mask = (t_arr > t_start) & (t_arr <= t_center)
+    mask = (np.abs(t_arr - t_center) <= 0.5 * n_cycles * T)
 
     if mask.sum() < 3:
         return None, mask  # слишком узкое окно
@@ -59,12 +67,13 @@ def cycle_mean(data, model, t_center, n_cycles=1.0):
 
 
 def main():
-    model = WholeBodyModel(vsd_resistance=5.0)
-    y0 = model.calibrate_initial_state(t_calib=60, p_sa_lo=20.0)
-
-    sol = model.simulate((0, 600), y0=y0, method='LSODA',
-                         max_step=0.05,
-                         t_eval=np.linspace(0, 600, 4000))
+    model = WholeBodyModel(
+        heart_params={'hr': HR_base, 'R_vsd': 5.0},
+        baroreflex_params={'P_set': 80.0, 'HR_base': HR_base},
+    )
+    y0 = model.calibrate_initial_state(t_calib=800)
+    sol = model.simulate((0, 600), y0=y0, method='LSODA', max_step=0.07,
+                         t_eval=np.arange(0.0, 600.005, 0.05))
 
     # Упаковываем результат в dict для удобства
     data = {'t': sol.t, 'y': sol.y}
@@ -72,8 +81,7 @@ def main():
     # Ширина окна в циклах
     N_CYCLES = 5.0
 
-    print(f"Средние за {N_CYCLES:.0f} циклов "
-          f"(все величины усреднены, как в compare_configs.py):")
+    print(f"Средние за {N_CYCLES:.0f} циклов (установившийся режим):")
     print(f"{'t, с':>6}  {'P_sa':>7}  {'P_sv':>7}  {'P_pv':>7}  "
           f"{'P_pa':>7}  {'Q_aortic':>10}  {'HR':>7}")
     print("-" * 70)
@@ -93,7 +101,7 @@ def main():
     if 400 in results and 600 in results:
         print(f"\nДрейф между t=400 и t=600 "
               f"(по средним за {N_CYCLES:.0f} циклов):")
-        for key in ['P_sa', 'P_sv', 'P_pv', 'P_pa']:
+        for key in ['P_sa', 'P_sv', 'P_pv', 'P_pa', 'Q_aortic', 'HR']:
             v400 = results[400][key]
             v600 = results[600][key]
             drift = abs(v600 - v400)

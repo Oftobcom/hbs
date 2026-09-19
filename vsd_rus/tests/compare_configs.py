@@ -4,6 +4,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 from whole_body import WholeBodyModel
+from utils import HR_base
 
 configs = [
     ('baseline (R_aort=0.15, E_max_lv=2.5)',
@@ -17,10 +18,13 @@ configs = [
 ]
 
 for name, kwargs in configs:
-    model = WholeBodyModel(vsd_resistance=5.0, **kwargs)
-    y0 = model.get_initial_state()
-    sol = model.simulate((0, 300), y0=y0, method='LSODA',
-                         max_step=0.05, t_eval=np.linspace(0, 300, 2000))
+    model = WholeBodyModel(
+        heart_params={'hr': HR_base, 'R_vsd': 5.0},
+        baroreflex_params={'P_set': 80.0, 'HR_base': HR_base},
+    )
+    y0 = model.calibrate_initial_state(t_calib=800)
+    sol = model.simulate((0, 600), y0=y0, method='LSODA', max_step=0.07,
+                            t_eval=np.arange(0.0, 600.005, 0.05))
     HR = model.compute_outputs(sol.t[-1], sol.y[:, -1])['HR']
     T = 60.0 / HR
     mask = sol.t > (sol.t[-1] - T)

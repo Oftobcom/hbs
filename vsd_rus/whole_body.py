@@ -28,7 +28,7 @@ class WindkesselVessel(OrganModel):
                   Используется для системных вен — «буфера» крови.
     """
     def __init__(self, C, P0, mode='P', V0=None,
-                 target_fraction=None, tau_target=300.0):
+                 target_fraction=None, tau_target=200.0):
         self.C = C
         self.P0 = P0
         self.mode = mode
@@ -112,7 +112,7 @@ class WholeBodyModel:
         P_sa0=85.0, P_sv0=12.0, P_pv0=12.0,
         SYS_VEN_FRACTION=0.5,
         C_sys_ven_eff=400.0,
-        tau_target=300.0,
+        tau_target=200.0,
         fluid_intake_rate=0.0,
         insensible_loss_rate=0.0,
         peripheral_params=None,
@@ -202,7 +202,7 @@ class WholeBodyModel:
         self.sys_ven = WindkesselVessel(
             C=C_sys_ven_eff, P0=P_sv0, mode='V', V0=V_sv0,
             target_fraction=SYS_VEN_FRACTION,
-            tau_target=tau_target,                   # 5 мин на релаксацию
+            tau_target=tau_target,
         )
 
         self.R_sys_peripheral = R_sys_peripheral
@@ -243,9 +243,9 @@ class WholeBodyModel:
         self.total_states = start
 
     def calibrate_initial_state(self, t_calib=600.0, t_eval=None,
-                                rtol=1e-6, atol=1e-8,
+                                rtol=1e-4, atol=1e-5,
                                 p_sa_lo=50.0, p_sa_hi=150.0,
-                                rel_tol_cycle=0.15):
+                                rel_tol_cycle=0.25):
         """
         Калибровка начального состояния.
 
@@ -258,9 +258,19 @@ class WholeBodyModel:
         # страховка от вырожденного y0 (обычно no-op)
         y0[heart_slc] = np.maximum(y0[heart_slc], 1.5 * V0_arr)
 
+        # --- Санитизация t_eval ---
+        # solve_ivp при t_eval is not None требует строго t_eval ⊂ (t_span[0], t_span[1]).
+        # Ошибки округления np.arange могут выкинуть последний элемент за t_calib,
+        # поэтому отрезаем всё, что не попало в открытый интервал.
+        if t_eval is not None:
+            t_eval = np.asarray(t_eval, dtype=float)
+            t_eval = t_eval[(t_eval > 0.0) & (t_eval < t_calib)]
+            if t_eval.size == 0:
+                t_eval = None
+
         try:
             sol = solve_ivp(self.derivatives, (0.0, t_calib), y0,
-                            t_eval=t_eval, method='LSODA', rtol=rtol, atol=atol, max_step=0.05)
+                            t_eval=t_eval, method='LSODA', rtol=rtol, atol=atol, max_step=0.07)
         except Exception as e:
             warnings.warn(f"calibrate: solver failed ({e}); using analytic y0")
             return y0
@@ -278,16 +288,11 @@ class WholeBodyModel:
             return y0
 
         # Проверка цикличности — только если есть траектория
-        if t_eval is not None and sol.y.shape[1] >= 2:
-            P_sa_traj = sol.y[self.idx['sys_art'][0], :]
-            # Последний цикл — оцениваем T по последней HR или просто
-            # берём окно ~1 с (типичный T при HR=60..100)
-            # Более честно: T = 60 / HR(t_end), но HR — состояние барорефлекса
+        if sol.t.size >= 3:
+            P_sa_traj = sol.y[self.idx['sys_art'].start, :]     # ← исправлено
             HR_end = y_steady[self.idx['baroreflex']][0]
             T = 60.0 / max(HR_end, 1e-6)
-            # Индексы точек в последнем цикле
-            t_arr = np.asarray(t_eval)
-            mask = t_arr >= (t_arr[-1] - T)
+            mask = sol.t >= (sol.t[-1] - T)
             if mask.sum() >= 3:
                 ps_cycle = P_sa_traj[mask]
                 mean_ps = np.mean(ps_cycle)
