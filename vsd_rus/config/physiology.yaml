@@ -129,7 +129,7 @@ brain:
   C: 4.0
   autoreg_gain: 0.3
   P_autoreg: 80.0
-  O2_extraction: 0.4
+  O2_demand_target: 0.4
   glucose_extraction: 0.1
   P0: 47.5
 
@@ -172,11 +172,12 @@ systemic:
 
 simulation:
   method: LSODA
-  rtol=1e-4
-  atol=1e-5
-  max_step=0.07
+  rtol: 1e-4
+  atol: 1e-5
+  max_step: 0.07
   t_calib: 600.0
   t_span: [0.0, 1800.0]
   n_samples_t: 12001
   t_start_stationary: 600.0
   stationary_rel_tol: 0.10
+  stationary_rel_tol_stage1: 0.01

@@ -38,6 +38,7 @@ from matplotlib.patches import Circle
 from scipy.stats import linregress
 from utils import safe_savgol_filter as safe_savgol
 from utils import subsample, steady_mask
+from physio_config import load_all_patients
 
 warnings.filterwarnings("ignore")
 
@@ -62,32 +63,10 @@ def _setup_style() -> None:
     })
 
 _setup_style()
-
-COLORS: Dict[str, str] = {
-    "Здоровый":             "#2ecc71",
-    "Малый ДМЖП (R=5.0)":   "#f39c12",
-    "Большой ДМЖП (R=1.0)": "#e74c3c",
-    "Эйзенменгер (R=0.7)":  "#8e44ad",
-}
-
-SCENARIO_ORDER = [
-    "Здоровый",
-    "Малый ДМЖП (R=5.0)",
-    "Большой ДМЖП (R=1.0)",
-    "Эйзенменгер (R=0.7)",
-]
-
-# Возможные варианты имён файлов → читаемое название
-FILE_NAME_MAPPING: Dict[str, str] = {
-    "Здоровый":              "Здоровый",
-    "Малый_ДМЖП_R-5.0":      "Малый ДМЖП (R=5.0)",
-    "Малый_ДМЖП":            "Малый ДМЖП (R=5.0)",
-    "Большой_ДМЖП_R-1.0":    "Большой ДМЖП (R=1.0)",
-    "Большой_ДМЖП":          "Большой ДМЖП (R=1.0)",
-    "Эйзенменгер_R-0.7":     "Эйзенменгер (R=0.7)",
-    "Эйзенменгер":           "Эйзенменгер (R=0.7)",
-}
-
+_PATIENTS = load_all_patients()
+COLORS: Dict[str, str] = {p['label']: p['color'] for p in _PATIENTS.values()}
+SCENARIO_ORDER = [p['label'] for p in
+                  sorted(_PATIENTS.values(), key=lambda c: int(c['order']))]
 
 # ===========================================================================
 # Утилиты
@@ -95,6 +74,10 @@ FILE_NAME_MAPPING: Dict[str, str] = {
 
 def _color(name: str) -> str:
     return COLORS.get(name, "gray")
+
+
+def _short(s: str, n: int = 22) -> str:
+    return s if len(s) <= n else s[: n - 1] + "…"
 
 
 def has_field(data: dict, *keys: str) -> bool:
@@ -124,23 +107,8 @@ def steady_mean_std(data: dict, key: str, scale: float = 1.0
 # Загрузка
 # ===========================================================================
 
-def _match_display_name(stem: str) -> str:
-    if stem in FILE_NAME_MAPPING:
-        return FILE_NAME_MAPPING[stem]
-    if "Здоровый" in stem:
-        return "Здоровый"
-    if "Малый" in stem:
-        return "Малый ДМЖП (R=5.0)"
-    if "Большой" in stem:
-        return "Большой ДМЖП (R=1.0)"
-    if "Эйзенменгер" in stem:
-        return "Эйзенменгер (R=0.7)"
-    return stem
-
-
 def load_all_results(pattern: str = "vsd_results_*.npz"
                      ) -> Optional[Dict[str, dict]]:
-    """Загружает все .npz, возвращает упорядоченный dict сценариев."""
     files = sorted(glob.glob(pattern))
     if not files:
         print(f"❌ Не найдено файлов по маске {pattern!r}.")
@@ -151,14 +119,14 @@ def load_all_results(pattern: str = "vsd_results_*.npz"
     results: Dict[str, dict] = {}
 
     for path in files:
-        stem = path.replace("vsd_results_", "").replace(".npz", "")
-        name = _match_display_name(stem)
         try:
             with np.load(path, allow_pickle=True) as npz:
-                # Копируем в обычный dict, чтобы после закрытия файла
-                # массивы оставались доступными.
-                results[name] = {k: np.array(npz[k]) for k in npz.files}
-            print(f"✓ {stem:30s} → {name}")
+                # label из метаданных npz; fallback — имя файла
+                label = str(npz['label']) if 'label' in npz.files else path
+                payload = {k: np.array(npz[k]) for k in npz.files
+                           if k not in ('label', 'id', 'description')}
+            results[label] = payload
+            print(f"✓ {path:40s} → {label}")
         except Exception as exc:
             print(f"✗ Ошибка загрузки {path}: {exc}")
 
@@ -229,7 +197,7 @@ def plot_hemodynamic_timeseries(results: Dict[str, dict]) -> None:
     handles, labels = axes[0, 0].get_legend_handles_labels()
     if handles:
         fig.legend(handles, labels, loc="upper right",
-                   bbox_to_anchor=(0.99, 0.97), fontsize=9)
+           bbox_to_anchor=(0.99, 0.95), fontsize=8, ncol=2)
 
     plt.tight_layout(rect=(0, 0, 1, 0.95))
     plt.savefig("fig1_hemodynamics_timeseries.png",
@@ -290,13 +258,13 @@ def plot_phase_portraits(results: Dict[str, dict]) -> None:
     axes[0].set_ylabel("Давление ЛЖ (мм рт. ст.)")
     axes[0].set_title("Левый желудочек")
     axes[0].grid(True, alpha=0.3)
-    axes[0].legend(fontsize=8)
+    axes[0].legend(fontsize=7, loc="best")
 
     axes[1].set_xlabel("Объём ПЖ (мл)")
     axes[1].set_ylabel("Давление ПЖ (мм рт. ст.)")
     axes[1].set_title("Правый желудочек")
     axes[1].grid(True, alpha=0.3)
-    axes[1].legend(fontsize=8)
+    axes[1].legend(fontsize=7, loc="best")
 
     plt.tight_layout(rect=(0, 0, 1, 0.95))
     plt.savefig("fig2_phase_portraits.png", dpi=150, bbox_inches="tight")
@@ -343,7 +311,9 @@ def plot_bar_comparison(results: Dict[str, dict]) -> None:
                     ecolor="black", capsize=4, capthick=1)
         ax.set_ylabel(ylabel)
         ax.set_title(metric)
-        ax.tick_params(axis="x", rotation=25)
+        ax.tick_params(axis="x", rotation=40, labelsize=7)
+        for lbl in ax.get_xticklabels():
+            lbl.set_horizontalalignment("right")
         ax.grid(True, alpha=0.3, axis="y")
 
         ymax = max([abs(m) for m in means] + [1e-6])
@@ -385,7 +355,7 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
     ax.set_xlabel("Время (с)")
     ax.set_ylabel("Qp / Qs")
     ax.set_title("Соотношение Qp/Qs")
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=7, ncol=2)
     ax.grid(True, alpha=0.3)
 
     # --- 2. Объём ЛЖ ---
@@ -396,7 +366,7 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
         r = steady_mean_std(data, "V_lv")
         if r is not None:
             ax.axhline(r[0], color=_color(sc), ls="--", alpha=0.7,
-                       label=f"{sc}: {r[0]:.0f} мл")
+                        label=f"{_short(sc, 14)}: {r[0]:.0f} мл")
         t, y = subsample(data, "V_lv", 4000)
         mask = np.isfinite(y)
         if np.any(mask):
@@ -404,7 +374,7 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
     ax.set_xlabel("Время (с)")
     ax.set_ylabel("Объём ЛЖ (мл)")
     ax.set_title("Объём левого желудочка")
-    ax.legend(fontsize=7)
+    ax.legend(fontsize=6, ncol=2)
     ax.grid(True, alpha=0.3)
 
     # --- 3. Объём ПЖ ---
@@ -415,7 +385,7 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
         r = steady_mean_std(data, "V_rv")
         if r is not None:
             ax.axhline(r[0], color=_color(sc), ls="--", alpha=0.7,
-                       label=f"{sc}: {r[0]:.0f} мл")
+                        label=f"{_short(sc, 14)}: {r[0]:.0f} мл")
         t, y = subsample(data, "V_rv", 4000)
         mask = np.isfinite(y)
         if np.any(mask):
@@ -423,7 +393,7 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
     ax.set_xlabel("Время (с)")
     ax.set_ylabel("Объём ПЖ (мл)")
     ax.set_title("Объём правого желудочка")
-    ax.legend(fontsize=7)
+    ax.legend(fontsize=6, ncol=2)
     ax.grid(True, alpha=0.3)
 
     # --- 4. Корреляция Q_vsd ↔ Qp/Qs ---
@@ -453,7 +423,7 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
     ax.set_xlabel("Шунт VSD (мл/с)")
     ax.set_ylabel("Qp / Qs")
     ax.set_title("Корреляция: шунт ↔ Qp/Qs")
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=6, ncol=2)
     ax.grid(True, alpha=0.3)
 
     # --- 5. Сравнение объёмов желудочков ---
@@ -473,7 +443,7 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
     ax.set_xticks(x)
     ax.set_xticklabels([name for _, name in chambers])
     ax.set_title("Сравнение объёмов желудочков")
-    ax.legend(fontsize=7)
+    ax.legend(fontsize=6, ncol=2)
     ax.grid(True, alpha=0.3, axis="y")
 
     # --- 6. Региональное распределение кровотока ---
@@ -489,7 +459,7 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
                 lw=2, markersize=8, label=sc)
     ax.set_ylabel("Кровоток (мл/с)")
     ax.set_title("Региональное распределение кровотока")
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=6, ncol=2)
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout(rect=(0, 0, 1, 0.95))
@@ -686,9 +656,13 @@ def plot_comprehensive_dashboard(results: Dict[str, dict]) -> None:
         ("shunt_fraction_R2L", "R→L шунт, %",        "{:.1f} ± {:.2f}", 100.0),
         ("V_blood",            "Объём крови, мл",    "{:.0f} ± {:.0f}", 1.0),
         ("GFR",                "СКФ, мл/с",          "{:.2f} ± {:.2f}", 1.0),
+        ("O2_consumption",  "CMRO₂, мл O₂/с",   "{:.3f} ± {:.3f}", 1.0),
+        ("C_a_O2",          "C_aO₂, мл/мл",      "{:.3f} ± {:.3f}", 1.0),
+        ("Q_brain",         "Q_br, мл/с",        "{:.2f} ± {:.2f}", 1.0),
     ]
 
-    header = ["Показатель"] + [s[:16] for s in scenarios]
+    header = ["Показатель"] + [_short(s, 22) for s in scenarios]
+
     table_rows = [header]
     for key, label, fmt, scale in summary_metrics:
         row = [label]
@@ -701,8 +675,8 @@ def plot_comprehensive_dashboard(results: Dict[str, dict]) -> None:
                        loc="center",
                        colWidths=[0.26] + [0.74 / len(scenarios)] * len(scenarios))
     table.auto_set_font_size(False)
-    table.set_fontsize(8)
-    table.scale(1, 1.6)
+    table.set_fontsize(7)
+    table.scale(1, 1.5)
     for i in range(len(table_rows)):
         try:
             table[(i, 0)].set_facecolor("#f0f0f0")
@@ -783,25 +757,59 @@ def _draw_heart_schematic(ax, title, title_color,
 
 
 def plot_schematic_heart_comparison() -> None:
-    fig, axes = plt.subplots(1, 3, figsize=(18, 7))
-    fig.suptitle("Схематическое сравнение гемодинамики",
-                 fontsize=14, fontweight="bold")
+    """
+    Схематическое сравнение гемодинамики для двух крайних фенотипов:
+    «Здоровый» и «Эйзенменгер, декомпенсированный».
 
-    _draw_heart_schematic(axes[0], "Здоровое сердце", "green")
+    Промежуточные сценарии (малый / большой ДМЖП, компенсированный
+    Эйзенменгер) на этой схеме не показываются — она предназначена
+    для наглядной демонстрации двух полюсов клинического спектра:
+    нормы без шунта и запущенного право-левого шунта с цианозом.
 
-    _draw_heart_schematic(axes[1], "ДМЖП: лево-правый шунт (L→R)", "red",
-                          lv_radius=2.2, rv_radius=2.5,
-                          shunt_direction="L2R",
-                          qs_label="Qs < Qp  (L→R)", qs_color="red")
+    Цвета панелей подтягиваются из COLORS, если соответствующие метки
+    присутствуют в текущем наборе пациентов; иначе используются
+    разумные дефолты, чтобы функция работала и без физио-конфига.
+    """
+    # --- Цвета: пробуем взять из общей палитры, иначе — дефолты ---
+    healthy_color = COLORS.get("Здоровый", "#2ecc71")
+    eisenmenger_color = (
+        COLORS.get("Эйзенменгер, декомпенсированный")
+        or COLORS.get("Эйзенменгер декомпенс. (R=0.5)")
+        or COLORS.get("Эйзенменгер (R=0.7)")
+        or "#5b2c6f"   # тёмно-фиолетовый — согласован с общей палитрой
+    )
 
-    _draw_heart_schematic(axes[2], "Эйзенменгер: право-левый шунт (R→L)",
-                          "purple",
-                          lv_radius=2.3, rv_radius=2.6,
-                          shunt_direction="R2L",
-                          qs_label="Qs > Qp  (R→L, цианоз)",
-                          qs_color="purple")
+    # --- Фигура: 2 панели вместо 3 ---
+    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+    fig.suptitle(
+        "Схематическое сравнение гемодинамики:\n"
+        "Здоровый vs Эйзенменгер (декомпенсированный)",
+        fontsize=14, fontweight="bold",
+    )
 
-    plt.tight_layout(rect=(0, 0, 1, 0.95))
+    # --- Панель 0: здоровый ---
+    _draw_heart_schematic(
+        axes[0],
+        "Здоровое сердце (норма)",
+        healthy_color,
+        lv_radius=2.0, rv_radius=2.0,
+        shunt_direction=None,
+        qs_label="Qs = Qp  (шунт отсутствует)",
+        qs_color=healthy_color,
+    )
+
+    # --- Панель 1: декомпенсированный Эйзенменгер ---
+    _draw_heart_schematic(
+        axes[1],
+        "Эйзенменгер, декомпенсированный",
+        eisenmenger_color,
+        lv_radius=2.3, rv_radius=2.8,   # ПЖ дилатирован — визуальный акцент
+        shunt_direction="R2L",
+        qs_label="Qs > Qp  (R→L, цианоз)",
+        qs_color=eisenmenger_color,
+    )
+
+    plt.tight_layout(rect=(0, 0, 1, 0.92))
     plt.savefig("schematic_heart_comparison.png",
                 dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -845,7 +853,7 @@ def print_statistical_summary(results: Dict[str, dict]) -> None:
 
     header = f"{'Показатель':<32}"
     for s in scenarios:
-        header += f"{s[:20]:>22}"
+        header += f"{_short(s, 20):>22}" 
     print(header)
     print("-" * len(header))
 

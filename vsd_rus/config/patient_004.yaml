@@ -1,0 +1,14 @@
+id: patient_004
+label: "Эйзенменгер, компенсированный"
+description: "Хроническая компенсация: ПЖ гипертрофирован, функция сохранена"
+order: 4
+color: "#9b59b6"
+
+vsd_resistance: 0.7
+flow_dependent_lungs: true
+pressure_remodel: true
+pressure_sensitivity: 0.06
+R_remodel_max: 4.0
+tau_remodel: 200.0
+HR_base: 85
+E_max_rv: 1.0

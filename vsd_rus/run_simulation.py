@@ -11,35 +11,28 @@ run_simulation.py
   - peripheral с мягкой ауторегуляцией (k_O2=0.5, k_P=0.002)
   - V0_blood = 5800 мл (дефолт whole_body)
 
-Сценарии:
-  - Здоровый:       R_vsd = inf
-  - Малый ДМЖП:     R_vsd = 5.0  (d_vsd ≈ 4 мм)
-  - Большой ДМЖП:   R_vsd = 1.0  (d_vsd ≈ 6 мм)
-  - Эйзенменгер:    R_vsd = 0.7  + ремоделирование лёгких
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 import warnings
-warnings.filterwarnings('ignore')
-
+import time
 from whole_body import WholeBodyModel
 from utils import (safe_savgol_filter, subsample, steady_mask,
                    clean_nans, SUBSAMPLE_N_TARGET, STEADY_FRAC_DEFAULT)
+from physio_config import load_all_patients
+
+warnings.filterwarnings('ignore')
+
+# --- Пациенты: единый источник истины для меток, цветов и порядка ---
+_PATIENTS = load_all_patients()
+COLORS = {p['label']: p['color'] for p in _PATIENTS.values()}
+SCENARIO_ORDER = [p['label'] for p in
+                  sorted(_PATIENTS.values(), key=lambda c: int(c['order']))]
 
 # =====================================================================
-# Константы и палитра
+# Константы
 # =====================================================================
-
-COLORS = {
-    'Здоровый': '#2ecc71',
-    'Малый ДМЖП (R=5.0)': '#f39c12',
-    'Большой ДМЖП (R=1.0)': '#e74c3c',
-    'Эйзенменгер (R=0.7)': '#8e44ad',
-}
-LABELS = {k: k for k in COLORS}
-
-SCENARIO_ORDER = list(COLORS.keys())
 
 # Длительность симуляции и калибровки.
 # tau_remodel = 200 с (Эйзенменгер), tau_target = 300 с (mass-balance B),
@@ -55,7 +48,7 @@ SCENARIO_ORDER = list(COLORS.keys())
 # и 4τ для lungs.R_remodel (98 %).
 T_END   = 800.0
 T_CALIB = 800.0
-N_EVAL  = 20000                     # желаемое число точек вывода
+N_EVAL  = 10000   # желаемое число точек вывода
 DT_EVAL = T_END / (N_EVAL - 1)
 
 # --- Баланс потребления O2 ---
@@ -81,6 +74,11 @@ def simulate_scenario(vsd_resistance,
                       label,
                       pressure_remodel=False,
                       pressure_sensitivity=0.06,
+                      R_remodel_max=5.0,
+                      tau_remodel=200.0,
+                      HR_base=None,
+                      E_max_rv_override=None,
+                      flow_sensitivity=0.15,
                       t_span=(0.0, T_END),
                       t_calib=T_CALIB):
     """
@@ -110,11 +108,11 @@ def simulate_scenario(vsd_resistance,
     # здоровый — 70. Значение уходит и в heart.hr_base, и в
     # baroreflex.HR_base, чтобы hr_factor = HR / HR_base был
     # согласован между органами.
-    HR_base = 75 if vsd_resistance != np.inf else 70
-    heart_params = {
-        'hr':    HR_base,
-        'R_vsd': vsd_resistance,
-    }
+    if HR_base is None:
+        HR_base = 75 if vsd_resistance != np.inf else 70
+    heart_params = {'hr': HR_base, 'R_vsd': vsd_resistance}
+    if E_max_rv_override is not None:
+        heart_params['E_max_rv'] = E_max_rv_override
 
     # --- Сборка модели. Не переопределяем C_sys_art / C_pul_ven / P_*0 ---
     # (используем дефолты whole_body: C_sys_art=1.5, C_pul_ven=15,
@@ -124,12 +122,12 @@ def simulate_scenario(vsd_resistance,
         blood_params=blood_params,
         flow_dependent_lungs=flow_dependent_lungs,
         lungs_params={
-            'flow_sensitivity':   0.15,
+            'flow_sensitivity':   flow_sensitivity,
             'pressure_remodel':   pressure_remodel,
             'P_pa_threshold':     25.0,
             'pressure_sensitivity': pressure_sensitivity,
-            'R_remodel_max':      5.0,
-            'tau_remodel':        200.0,
+            'R_remodel_max':      R_remodel_max,
+            'tau_remodel':        tau_remodel,
         },
         heart_params=heart_params,
         # --- Явно: доля VO2, уходящая в периферию ---
@@ -608,6 +606,14 @@ def print_detailed_report(results_dict):
         print(f"  • ЧСС (HR)                         : {_ms('HR')} уд/мин  — текущая частота сердечных сокращений")
         print(f"  • СКФ (GFR)                        : {_ms('GFR', fmt='{:.2f}')} мл/с  — скорость клубочковой фильтрации почек")
         print(f"  • Потребление O₂ мозгом            : {_ms('O2_consumption', fmt='{:.3f}')} мл O₂/с  — утилизация O₂ церебральной тканью")
+        # --- Церебральный O₂-баланс: градиент здоровый ≈ компенс. > декомпенс. ---
+        _sao2_v = _ms('SaO2', scale=100.0, fmt='{:.1f}')
+        _cao2_v = _ms('C_a_O2', fmt='{:.3f}')
+        _o2_v   = _ms('O2_consumption', fmt='{:.3f}')
+        _qbr_v  = _ms('Q_brain', fmt='{:.2f}')
+        print(f"  • Церебральный O₂-баланс          : "
+            f"SaO₂={_sao2_v} %  |  C_a_O₂={_cao2_v} мл/мл  |  "
+            f"Q_br={_qbr_v} мл/с  |  CMRO₂={_o2_v} мл/с")        
         print(f"  • Потребление O₂ периферией        : {_ms('O2_consumption_periph', fmt='{:.3f}')} мл O₂/с  — утилизация O₂ периферической тканью")
         print(f"  • Поглощение O₂ лёгкими            : {_ms('O2_uptake', fmt='{:.3f}')} мл O₂/с  — поглощение O₂ лёгкими")
 
@@ -623,83 +629,49 @@ def print_detailed_report(results_dict):
 # =====================================================================
 
 def main():
+    t_start = time.perf_counter()
+
     print("=" * 80)
     print("СРАВНЕНИЕ ГЕМОДИНАМИКИ: ЗДОРОВЫЙ vs ДМЖП")
     print("=" * 80)
 
-    scenarios = {
-        'Здоровый': {
-            'vsd_resistance': np.inf,
-            'flow_dependent_lungs': False,
-            'pressure_remodel': False,
-            'color': COLORS['Здоровый'],
-            'description': 'Здоровое сердце без дефекта',
-        },
-        'Малый ДМЖП (R=5.0)': {
-            'vsd_resistance': 5.0,
-            # Малый дефект: гемодинамически значимого L→R шунта нет,
-            # Qp/Qs остаётся около 1. Поэтому лёгкие не испытывают
-            # ни потоковой, ни барической нагрузки:
-            #   flow_dependent_lungs=False — shear-stress вазоконстрикция
-            #                                не активируется (Q≈норма);
-            #   pressure_remodel=False     — P_pa не превышает порог,
-            #                                ремоделирование не запускается.
-            # Это НЕ забытые флаги, а осознанный выбор: ремоделирование
-            # включается только для «Большого ДМЖП» и «Эйзенменгера».
-            'flow_dependent_lungs': False,
-            'pressure_remodel': False,
-            'color': COLORS['Малый ДМЖП (R=5.0)'],
-            'description': 'Малый дефект (d≈4 мм), незначительный L→R шунт',
-        },
-        # Большой дефект: значимый L→R шунт (Qp/Qs > 1), лёгкие получают
-        # повышенный поток → активируется flow-зависимая вазоконстрикция.
-        # Ремоделирование пока НЕ включаем: этот сценарий моделирует
-        # острую/подострую фазу без структурных изменений сосудов.
-        'Большой ДМЖП (R=1.0)': {
-            'vsd_resistance': 1.0,
-            'flow_dependent_lungs': True,
-            'pressure_remodel': False,
-            'color': COLORS['Большой ДМЖП (R=1.0)'],
-            'description': 'Большой дефект (d≈6 мм), выраженный L→R шунт',
-        },
-        # Хроническая фаза: длительно повышенные Qp и P_pa → включаем
-        # оба механизма — flow-зависимое сопротивление и медленное
-        # структурное ремоделирование (pressure_remodel=True).
-        # Это и даёт в итоге R→L шунт.
-        'Эйзенменгер (R=0.7)': {
-            'vsd_resistance': 0.7,
-            'flow_dependent_lungs': True,
-            'pressure_remodel': True,
-            'pressure_sensitivity': 0.06,
-            'color': COLORS['Эйзенменгер (R=0.7)'],
-            'description': 'Ремоделирование лёгких → R→L шунт',
-        },
-    }
+    scenarios = _PATIENTS
+    print(f"Загружено пациентов: {list(scenarios.keys())}")
 
     print("\n🚀 Запуск симуляций...")
     results = {}
 
+    per_scenario_times = {}
     for name, params in scenarios.items():
         print(f"\n▶ Сценарий: {name}")
         print(f"   {params['description']}")
+
+        t_sim = time.perf_counter()
 
         data = simulate_scenario(
             vsd_resistance=params['vsd_resistance'],
             flow_dependent_lungs=params['flow_dependent_lungs'],
             label=name,
-            pressure_remodel=params.get('pressure_remodel', False),
+            pressure_remodel=params['pressure_remodel'],
             pressure_sensitivity=params.get('pressure_sensitivity', 0.06),
+            R_remodel_max=params.get('R_remodel_max', 5.0),
+            tau_remodel=params.get('tau_remodel', 200.0),
+            HR_base=params.get('HR_base', None),
+            E_max_rv_override=params.get('E_max_rv', None),
+            flow_sensitivity=params.get('flow_sensitivity', 0.15),
         )
+
         results[name] = (data, params['color'], name)
 
-        safe_name = (name
-                     .replace(' ', '_')
-                     .replace('(', '')
-                     .replace(')', '')
-                     .replace('=', '-'))
-        filename = f"vsd_results_{safe_name}.npz"
-        np.savez(filename, **data)
-        print(f"   💾 {filename}")
+        filename = f"vsd_results_{params['id']}.npz"      # vsd_results_patient_004.npz
+        np.savez(filename, **data,
+                label=np.array(name),
+                id=np.array(params['id']),
+                description=np.array(params.get('description', '')))
+
+        dt_sim = time.perf_counter() - t_sim
+        per_scenario_times[name] = dt_sim
+        print(f"   💾 {filename}  ({dt_sim:.1f} с)")
 
     print("\n📊 Генерация визуализаций...")
     plot_enhanced_comparison(results)
@@ -712,6 +684,12 @@ def main():
     print("   - shunt_effect_analysis.png")
     print("   - vsd_results_*.npz")
 
+    print("\n⏱  Время по сценариям:")
+    for nm, dt in per_scenario_times.items():
+        print(f"   • {nm:<40s} {dt:>7.1f} с")        
+    t_total = time.perf_counter() - t_start
+    print(f"\n⏱  Общее время: {t_total:.1f} с "
+          f"({t_total/60:.1f} мин)")
 
 if __name__ == "__main__":
     main()

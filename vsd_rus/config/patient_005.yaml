@@ -1,0 +1,15 @@
+id: patient_005
+label: "Эйзенменгер, декомпенсированный"
+description: "ПЖ-недостаточность, тяжёлая гипоксемия"
+order: 5
+color: "#5b2c6f"
+
+vsd_resistance: 0.5
+flow_dependent_lungs: true
+pressure_remodel: true
+flow_sensitivity: 0.20
+pressure_sensitivity: 0.10
+R_remodel_max: 10.0
+tau_remodel: 150.0
+HR_base: 105
+E_max_rv: 0.7

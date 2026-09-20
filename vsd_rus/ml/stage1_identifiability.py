@@ -20,7 +20,6 @@ Stage 1 из ML_Tasks.txt: анализ идентифицируемости 8 �
 from __future__ import annotations
 
 import sys
-import json
 import warnings
 from pathlib import Path
 
@@ -88,6 +87,21 @@ PARAM_SCALES = {
     "V0_blood":         5800.0,
 }
 
+# --- ALT-набор для Fallback B (Stage 0, §2.3) -------------------------------
+# k_inotropy уже есть в physiology.yaml (baroreflex.k_inotropy = 0.5);
+# build_model() умеет его подхватывать, если ключ есть в θ.
+PARAM_NAMES_ALT = PARAM_NAMES + ["k_inotropy"]
+
+PARAM_SCALES_ALT = {
+    **PARAM_SCALES,
+    "k_inotropy": 0.5,
+}
+
+THETA0_ALT = {
+    **THETA0,
+    "k_inotropy": 0.5,   # = baroreflex.k_inotropy из YAML
+}
+
 # Наблюдаемые выходы (ЭхоКГ-подобные)
 X_NAMES = ["P_sa", "P_pa", "Q_aortic", "Qp_Qs", "EDV_LV", "EDV_RV", "HR"]
 
@@ -128,6 +142,9 @@ def build_model(theta: dict,
 
     baroreflex_params = dict(cfg["baroreflex"])
     baroreflex_params["HR_base"] = theta["HR_base"]
+    # поддержка 6_alt-режима (Stage 0, §2.3): если θ содержит k_inotropy — переопределить
+    if "k_inotropy" in theta:
+        baroreflex_params["k_inotropy"] = float(theta["k_inotropy"])
 
     # --- 5. Остальные органы — из YAML без изменений ---
     liver_params    = dict(cfg["liver"])
@@ -170,9 +187,9 @@ def build_model(theta: dict,
         P_sa0=sys_cfg["P_sa0"],
         P_sv0=sys_cfg["P_sv0"],
         P_pv0=sys_cfg["P_pv0"],
-        SYS_VEN_FRACTION=sys_cfg["SYS_VEN_FRACTION"],   # <-- ДОБАВИТЬ
-        C_sys_ven_eff=sys_cfg["C_sys_ven_eff"],         # <-- ДОБАВИТЬ
-        tau_target=sys_cfg["tau_target"],               # <-- ДОБАВИТЬ
+        SYS_VEN_FRACTION=sys_cfg["SYS_VEN_FRACTION"],   # согласовано с systemic в YAML
+        C_sys_ven_eff=sys_cfg["C_sys_ven_eff"],
+        tau_target=sys_cfg["tau_target"],
     )    
     return model
 
@@ -234,14 +251,26 @@ def get_steady_outputs(model: WholeBodyModel,
 
     data = _collect_outputs(model, sol)
 
-    # Проверка стационарности (P_sa за последние 50 с)
-    last50 = data["t"] > (t_span[1] - 50.0)
-    ps_tail = data["P_sa"][last50]
-    if ps_tail.size == 0 or np.mean(ps_tail) <= 0:
+    # Стационарность: сравнение средних P_sa по двум окнам по 10 циклов
+    tail_for_hr = data["t"] > t_start_stationary
+    HR_for_stat = float(np.mean(data["HR"][tail_for_hr])) if np.any(tail_for_hr) else 70.0
+    T_stat = 60.0 / max(HR_for_stat, 1e-6)
+    # окно в сэмплах
+    dt = data["t"][1] - data["t"][0]
+    win_len = max(int(round(10.0 * T_stat / dt)), 4)
+    ps_recent = data["P_sa"][-2 * win_len:]
+    if ps_recent.size < 4:
         return None
-    if np.std(ps_tail) / np.mean(ps_tail) > float(sim_cfg["stationary_rel_tol"]):
+    half = ps_recent.size // 2
+    mean_early, mean_late = ps_recent[:half].mean(), ps_recent[half:].mean()
+    if mean_late <= 0:
+        return None
+    rel_diff = abs(mean_late - mean_early) / mean_late
+    # для Stage 1 — 0.01 (спека §3.4); fallback на sim_cfg, если ключа нет
+    stat_tol = float(sim_cfg.get("stationary_rel_tol_stage1", 0.01))
+    if rel_diff > stat_tol:
         if verbose:
-            print(f"  [warn] нестационарен: std/mean(P_sa)={np.std(ps_tail)/np.mean(ps_tail):.3f}")
+            print(f"  [warn] нестационарен: |ΔP_sa|/P_sa = {rel_diff:.4f} > {stat_tol}")
         return None
 
     # Усредняем за последние 10 кардиоциклов
@@ -273,8 +302,10 @@ def get_steady_outputs(model: WholeBodyModel,
 def compute_jacobian(theta0: dict,
                      rel_step: float = 0.01,
                      sim_cfg: dict | None = None,
-                     verbose: bool = True
-                     ) -> tuple[np.ndarray, dict, dict]:    
+                     verbose: bool = True,
+                     param_names: list[str] | None = None,
+                     scales_override: dict | None = None,
+                     ) -> tuple[np.ndarray, dict, dict]:   
     """
     J_ij = (dX_i / X0_i) / (dtheta_j / scale_j)
 
@@ -284,10 +315,15 @@ def compute_jacobian(theta0: dict,
     # Разрешаем R_sys один раз
     theta0 = dict(theta0)
     # локальная копия масштабов, чтобы не мутировать глобальный PARAM_SCALES
-    scales = dict(PARAM_SCALES)
+    if param_names is None:
+        param_names = PARAM_NAMES
+    if scales_override is None:
+        scales_override = PARAM_SCALES
+    theta0 = dict(theta0)
+    scales = dict(scales_override)
     if theta0["R_sys"] is None:
         theta0["R_sys"] = resolve_R_sys(theta0)
-        scales["R_sys"] = theta0["R_sys"]  # синхронизируем масштаб для R_sys
+        scales["R_sys"] = theta0["R_sys"]
 
     if verbose:
         print(f"[Stage1] R_sys resolved = {theta0['R_sys']:.4f}")
@@ -304,12 +340,14 @@ def compute_jacobian(theta0: dict,
             print(f"    {k:14s} = {X0[k]:.4f}")
 
     nX = len(X_NAMES)
-    nP = len(PARAM_NAMES)
+    nP = len(param_names)
     J = np.full((nX, nP), np.nan)
 
-    for j, p in enumerate(PARAM_NAMES):
-        delta = rel_step * scales[p]
-        if p == "d_vsd": delta = max(delta, 0.04)
+    for j, p in enumerate(param_names): 
+        s_j = scales[p]
+        delta = max(rel_step * abs(theta0[p]), s_j * rel_step * 0.1)
+        if p == "d_vsd":
+            delta = max(delta, 0.04)
 
         theta_plus = dict(theta0); theta_plus[p] = theta0[p]+delta
         theta_minus = dict(theta0); theta_minus[p] = theta0[p]-delta
@@ -381,6 +419,82 @@ def fix_and_recompute(J: np.ndarray,
               f"{dict(zip(keep_names, np.round(res['v_last'], 3)))}")
     return res
 
+
+def _pick_to_fix_by_name(svd_res, param_names, priority,
+                         n_fix=2, thr_priority=0.3, thr_other=0.4):
+    """Выбор ровно n_fix параметров для фиксации по приоритету и |Vt[-1]|."""
+    contrib = svd_res["contrib"]
+    to_fix = []
+    for p in priority:
+        if p in contrib and abs(contrib[p]) > thr_priority:
+            to_fix.append(p)
+    for p, v in contrib.items():
+        if p in to_fix:
+            continue
+        if abs(v) > thr_other:
+            to_fix.append(p)
+    return to_fix[:n_fix]
+
+
+def _fix_and_cond(J, param_names, to_fix):
+    keep = [i for i, p in enumerate(param_names) if p not in to_fix]
+    J_red = J[:, keep]
+    U, S, Vt = np.linalg.svd(np.nan_to_num(J_red, nan=0.0), full_matrices=False)
+    cond = float(S[0] / S[-1]) if S[-1] > 1e-12 else np.inf
+    return cond, Vt[-1], [param_names[i] for i in keep]
+
+
+def select_final_theta(J, param_names, verbose=True):
+    """
+    1. Фиксируем V0_blood, HR_base → cond_6.
+    2. Если cond_6 < 100 → режим '6'.
+    3. Иначе фиксируем C_sys_art → cond_5.
+    4. Если cond_5 < 100 → режим '5'.
+    5. Иначе заменяем C_sys_art на k_inotropy → режим '6_alt'.
+    """
+    # 1. Считаем SVD по полной J, чтобы взять contrib для приоритетного отбора
+    svd_full = analyze_svd(J, param_names, X_NAMES)
+
+    to_fix = _pick_to_fix_by_name(svd_full, param_names,
+                                  ["V0_blood", "HR_base", "C_sys_art"], n_fix=2)
+    cond6, v6, keep6 = _fix_and_cond(J, param_names, to_fix)
+    if verbose:
+        print(f"[Stage1] режим 6: to_fix={to_fix}, cond={cond6:.3f}")
+    if cond6 < 100.0:
+        return {"mode": "6", "theta_final": keep6, "to_fix": to_fix,
+                "cond": cond6, "v_last": v6}
+
+    # 2. Fallback A
+    to_fix2 = to_fix + ["C_sys_art"]
+    cond5, v5, keep5 = _fix_and_cond(J, param_names, to_fix2)
+    if verbose:
+        print(f"[Stage1] режим 5: to_fix={to_fix2}, cond={cond5:.3f}")
+    if cond5 < 100.0:
+        return {"mode": "5", "theta_final": keep5, "to_fix": to_fix2,
+                "cond": cond5, "v_last": v5}
+
+    # 3. Fallback B — реальный второй проход с колонкой k_inotropy
+    if verbose:
+        print(f"[Stage1] Fallback B: пересчёт J с k_inotropy (9 столбцов)...")
+
+    J_alt, _, _ = compute_jacobian(
+        THETA0_ALT,
+        rel_step=0.01,
+        sim_cfg=None,                    # дефолт, как в main()
+        verbose=False,
+        param_names=PARAM_NAMES_ALT,
+        scales_override=PARAM_SCALES_ALT,
+    )
+    cond6a, v6a, keep6a = _fix_and_cond(J_alt, PARAM_NAMES_ALT, to_fix)
+    if verbose:
+        print(f"[Stage1] режим 6_alt: to_fix={to_fix}, cond={cond6a:.3f}")
+
+    # theta_final — 6 имён из PARAM_NAMES_ALT минус зафиксированные;
+    # C_sys_art заменяется на k_inotropy, V0_blood и HR_base остаются фикс.
+    theta_final_alt = [p for p in PARAM_NAMES_ALT if p not in to_fix]
+
+    return {"mode": "6_alt", "theta_final": theta_final_alt,
+            "to_fix": to_fix, "cond": cond6a, "v_last": v6a}
 
 # =============================================================================
 # 5. Визуализация
@@ -477,24 +591,45 @@ def main():
     plot_results(J, svd_res, PARAM_NAMES, X_NAMES, out_dir / "stage1_SVD.png")
     print(f"[Stage1] Графики сохранены: {out_dir / 'stage1_SVD.png'}")
 
-    # Автоматическая рекомендация: фиксируем параметры с |Vt[-1]| > 0.4
-    priority = ["V0_blood", "HR_base"]
-    to_fix = list(priority)
+    # Автоматический выбор 6 / 5 / 6_alt
+    selection = select_final_theta(J, PARAM_NAMES, verbose=True, sim_cfg=sim_cfg)
 
     report_lines = []
-    report_lines.append("# STAGE 1 REPORT\n")
-    report_lines.append(f"- X0 = {json.dumps({k: round(v, 4) for k, v in X0.items()}, indent=2)}\n")
-    report_lines.append(f"- cond_8 = {svd_res['cond']:.3f}\n")
-    report_lines.append("- |Vt[-1]|:\n")
-    for k, v in svd_res["contrib"].items():
-        report_lines.append(f"    - {k:18s} : {v:.4f}\n")
+    report_lines.append("# STAGE 1 REPORT\n\n")
+    report_lines.append("## Базовая точка θ₀\n")
+    report_lines.append(f"- d_vsd = {theta0_resolved['d_vsd']:.4f} мм → "
+                        f"R_vsd = {d_vsd_to_R_vsd(theta0_resolved['d_vsd']):.4f}\n")
+    report_lines.append(f"- R_sys = {theta0_resolved['R_sys']:.4f}\n")
+    report_lines.append(f"- E_max_lv = {theta0_resolved['E_max_lv']}, "
+                        f"E_max_rv = {theta0_resolved['E_max_rv']}\n")
+    report_lines.append(f"- flow_sensitivity = {theta0_resolved['flow_sensitivity']}, "
+                        f"C_sys_art = {theta0_resolved['C_sys_art']}\n")
+    report_lines.append(f"- HR_base = {theta0_resolved['HR_base']}, "
+                        f"V0_blood = {theta0_resolved['V0_blood']}\n\n")
 
-    if to_fix:
-        svd_red = fix_and_recompute(J, PARAM_NAMES, X_NAMES, to_fix, verbose=True)
-        theta_final = [p for p in PARAM_NAMES if p not in to_fix]
-        report_lines.append(f"\n- Зафиксированы: {to_fix}\n")
-        report_lines.append(f"- cond_6 = {svd_red['cond']:.3f}\n")
-        report_lines.append(f"- θ_final = {theta_final}\n")
+    report_lines.append("## X0 (mean по 10 циклам после t > t_start_stationary)\n")
+    for k in X_NAMES:
+        report_lines.append(f"- {k:10s} = {X0[k]:.4f}\n")
+    report_lines.append("\n")
+
+    report_lines.append(f"## cond_8 = {svd_res['cond']:.3f}\n\n")
+    report_lines.append("## |Vt[-1]| (слабое направление)\n")
+    for k, v in svd_res["contrib"].items():
+        flag = "  ← FIX" if k in selection["to_fix"] else ""
+        report_lines.append(f"- {k:18s} : {v:.4f}{flag}\n")
+    report_lines.append("\n")
+
+    report_lines.append("## Решение\n")
+    report_lines.append(f"- Режим: **{selection['mode']}**\n")
+    report_lines.append(f"- Зафиксированы: {selection['to_fix']}\n")
+    report_lines.append(f"- θ_final = {selection['theta_final']}\n")
+    report_lines.append(f"- cond_final = {selection['cond']:.3f}\n\n")
+
+    report_lines.append("## Ограничения\n")
+    report_lines.append("- C_sys_art на стационаре влияет только на пульсации; "
+                        "если не идентифицируется — фиксируется в Fallback A.\n")
+    report_lines.append("- Экстраполяция за пределы R_vsd ∈ [0.5, 15.8] "
+                        "(d_vsd ∈ [3.0, 7.11] мм) не гарантируется.\n")
 
     (out_dir / "STAGE1_REPORT.md").write_text("".join(report_lines), encoding="utf-8")
     print(f"[Stage1] Отчёт сохранён: {out_dir / 'STAGE1_REPORT.md'}")
@@ -532,7 +667,7 @@ def debug_base_point():
 
     # --- Многооконная диагностика ---
     print("\n--- Конвергенция по окнам ---")
-    for t_lo, t_hi in [(100, 300), (500, 700), (1000, 1200), (1600, 1800)]:
+    for t_lo, t_hi in [(100, 300), (500, 700), (800, 1000), (1000, 1200)]:
         m = (data["t"] >= t_lo) & (data["t"] <= t_hi)
         if not np.any(m):
             continue
@@ -577,9 +712,6 @@ def debug_base_point():
         print(f"  {k:12s}  min={arr.min():6.1f}  "
               f"max={arr.max():6.1f}  mean={arr.mean():6.1f}")
 
-# if __name__ == "__main__":
-#     debug_base_point()          # сначала проверяем базовую точку
-#     # main()                    # раскомментируйте после того, как debug покажет нормальные значения
 
 if __name__ == "__main__":
     import sys

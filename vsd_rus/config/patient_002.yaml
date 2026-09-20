@@ -1,0 +1,11 @@
+id: patient_002
+label: "Малый ДМЖП (R=5.0)"
+description: "Малый дефект (d≈4 мм), незначительный L→R шунт"
+order: 2
+color: "#f39c12"
+
+vsd_resistance: 5.0
+flow_dependent_lungs: false
+pressure_remodel: false
+HR_base: 75
+E_max_rv: 0.8

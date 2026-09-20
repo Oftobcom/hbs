@@ -1,3 +1,6 @@
+# hbs
+# HBS – Human Body Simulation is a modular Python framework
+# for multi-organ physiological modeling.
 # organ_base.py
 from abc import ABC, abstractmethod
 import numpy as np

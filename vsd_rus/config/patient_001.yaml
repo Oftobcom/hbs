@@ -1,7 +1,11 @@
-heart:
-  E_min_lv: 0.03      # желудочек жёстче (фиброз)
-  E_min_la: 0.15      # предсердие жёстче (гипертрофия)
+id: patient_001
+label: "Здоровый"
+description: "Здоровое сердце без дефекта"
+order: 1
+color: "#2ecc71"
 
-lungs:
-  P_pa_threshold: 20.0
-  pressure_remodel: true
+vsd_resistance: .inf            # YAML-native inf; строка "inf" тоже поддержана
+flow_dependent_lungs: false
+pressure_remodel: false
+HR_base: 70
+E_max_rv: 0.8

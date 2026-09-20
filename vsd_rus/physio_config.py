@@ -1,3 +1,6 @@
+# hbs
+# HBS – Human Body Simulation is a modular Python framework
+# for multi-organ physiological modeling.
 # physio_config.py
 from functools import lru_cache
 from pathlib import Path
@@ -66,3 +69,41 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             out[k] = v
     return out
+
+# ---- Загрузка описаний пациентов -------------------------------------------
+DEFAULT_PATIENT_DIR = Path(__file__).parent / "config"
+
+_REQUIRED_PATIENT_KEYS = (
+    "id", "label", "order", "color",
+    "vsd_resistance", "flow_dependent_lungs", "pressure_remodel",
+)
+
+
+def _validate_patient(cfg: dict, path: Path) -> None:
+    missing = [k for k in _REQUIRED_PATIENT_KEYS if k not in cfg]
+    if missing:
+        raise ValueError(f"{path.name}: отсутствуют обязательные ключи {missing}")
+
+
+def load_patient(path) -> dict:
+    """Загружает один patient_*.yaml, резолвит inf, валидирует."""
+    p = Path(path)
+    mtime = os.path.getmtime(p)
+    cfg = _load_yaml_cached(str(p), mtime)
+    cfg = _resolve_inf(cfg)
+    _validate_patient(cfg, p)
+    return cfg
+
+
+def load_all_patients(config_dir=None) -> dict:
+    """
+    Читает все patient_*.yaml из config_dir (по умолчанию ./config),
+    сортирует по полю `order`, возвращает {label: cfg}.
+    """
+    d = Path(config_dir) if config_dir else DEFAULT_PATIENT_DIR
+    files = sorted(d.glob("patient_*.yaml"))
+    if not files:
+        raise FileNotFoundError(f"Не найдено patient_*.yaml в {d}")
+    patients = [load_patient(f) for f in files]
+    patients.sort(key=lambda c: int(c["order"]))
+    return {p["label"]: p for p in patients}

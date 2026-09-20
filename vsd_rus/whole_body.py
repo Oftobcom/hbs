@@ -1,3 +1,6 @@
+# hbs
+# HBS – Human Body Simulation is a modular Python framework
+# for multi-organ physiological modeling.
 # whole_body.py
 from pprint import pp
 import warnings
@@ -398,12 +401,6 @@ class WholeBodyModel:
         kidney_effects = self.kidney.compute_effects(P_sa, P_sv,
                                                     conc.get('tox', 0.0), Vb)
 
-        # --- Мозг ---
-        brain_inputs = {'P_sa': P_sa, 'P_sv': P_sv,
-                        'C_ammonia': conc.get('ammonia', 0.0)}
-        d_brain = self.brain.get_derivatives(t, V_brain, brain_inputs)
-        brain_out = self.brain.get_outputs(V_brain)
-
         # --- Газообмен ---
         gas_ex = self.gas_exchange.compute_effects(
             C_v_O2  = conc.get('oxygen', 0.15),
@@ -412,6 +409,13 @@ class WholeBodyModel:
             Q_shunt = heart_out['Q_vsd'],
             V_blood = Vb,
         )
+
+        # --- Мозг ---
+        brain_inputs = {'P_sa': P_sa, 'P_sv': P_sv,
+                        'C_a_O2': gas_ex['C_a_O2'],
+                        'C_ammonia': conc.get('ammonia', 0.0)}
+        d_brain = self.brain.get_derivatives(t, V_brain, brain_inputs)
+        brain_out = self.brain.get_outputs(V_brain)
 
         # --- Периферия ---
         peripheral_inputs = {'P_sa': P_sa, 'P_sv': P_sv,
