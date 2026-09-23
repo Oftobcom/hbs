@@ -32,8 +32,6 @@ SAFE_SAVGOL_POLY     = 3
 SUBSAMPLE_N_TARGET   = 5000
 STEADY_FRAC_DEFAULT  = 0.75
 
-HR_base = 75
-
 # ---------------------------------------------------------------------------
 # Сглаживание
 # ---------------------------------------------------------------------------
@@ -147,3 +145,84 @@ def clean_nans(data):
         else:
             data[key] = np.zeros_like(arr)
     return data
+
+
+# ---------------------------------------------------------------------------
+# Авто-масштабирование оси Y
+# ---------------------------------------------------------------------------
+
+def auto_ylim(ax, *arrays, pad_frac: float = 0.10, pct=(1, 99)):
+    """
+    Устойчивое к выбросам авто-масштабирование оси Y.
+
+    Диапазон берётся по перцентилям pct (по умолчанию 1–99), а не по
+    min/max: это защищает панели от диастолических пиков Qp_Qs ~1e6,
+    которые иначе растягивают ось и схлопывают полезный диапазон.
+
+    Параметры
+    ---------
+    ax       : matplotlib.axes.Axes — ось, у которой меняется ylim
+    *arrays  : один или несколько массивов значений (NaN/Inf игнорируются)
+    pad_frac : доля диапазона, добавляемая сверху и снизу
+    pct      : кортеж (lo, hi) перцентилей
+    """
+    try:
+        all_y = np.concatenate(
+            [np.asarray(a)[np.isfinite(a)] for a in arrays if np.size(a) > 0]
+        )
+        if all_y.size == 0:
+            return
+        lo, hi = np.percentile(all_y, pct)
+        pad = pad_frac * (hi - lo) if hi > lo else 1.0
+        ax.set_ylim(lo - pad, hi + pad)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Установившиеся средние и их форматирование
+# ---------------------------------------------------------------------------
+
+def steady_mean(data, key, scale=1.0):
+    """Среднее по установившемуся окну. Возвращает float или None."""
+    if key not in data:
+        return None
+    m = steady_mask(data) & np.isfinite(np.asarray(data[key]))
+    if not np.any(m):
+        return None
+    return float(np.mean(data[key][m]) * scale)
+
+
+def steady_mean_std(data, key, scale=1.0):
+    """Кортеж (mean, std) по установившемуся окну или None."""
+    if key not in data:
+        return None
+    m = steady_mask(data) & np.isfinite(np.asarray(data[key]))
+    vals = np.asarray(data[key])[m]
+    if vals.size == 0:
+        return None
+    return float(np.mean(vals) * scale), float(np.std(vals) * scale)
+
+
+def format_mean_std(data, key, scale=1.0, fmt="{:.1f}"):
+    """Строка 'mean ± std' или 'N/A'. Для печати отчётов."""
+    r = steady_mean_std(data, key, scale)
+    if r is None:
+        return "N/A"
+    return fmt.format(r[0]) + f" ± {fmt.format(r[1])}"
+
+
+def qp_qs_steady(data):
+    """
+    Qp/Qs = mean(Q_pulmonary) / mean(Q_aortic).
+
+    Корректный способ усреднения для стационарного режима.
+    Прямое усреднение мгновенного отношения Qp(t)/Qs(t) даёт
+    артефакты порядка 1e6 из-за деления на почти нулевые
+    диастолические потоки.
+    """
+    qp = steady_mean(data, "Q_pulmonary")
+    qa = steady_mean(data, "Q_aortic")
+    if qp is None or qa is None or qa <= 0:
+        return None
+    return qp / qa

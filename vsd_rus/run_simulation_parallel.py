@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-run_simulation.py
-Сравнение гемодинамики: здоровый vs ДМЖП (малый / большой / Эйзенменгер).
-
-Совместим с текущей архитектурой whole_body.WholeBodyModel:
-  - Mass-balance B: sys_ven в V-mode (target_fraction=0.5, tau=200 s)
-  - Мягкий барорефлекс (P_set=80, gain=0.002, k_inotropy=0.5)
-  - heart с мягкими клапанами (R_mitral=0.03, R_venous=0.05)
-  - peripheral с мягкой ауторегуляцией (k_O2=0.5, k_P=0.002)
-  - V0_blood = 5800 мл (дефолт whole_body)
+run_simulation_parallel.py — параллельная версия run_simulation.py
 
 """
 
+import matplotlib
+matplotlib.use('Agg')  # важно для joblib/loky — не форкать GUI backend
 import numpy as np
 import matplotlib.pyplot as plt
 import warnings
 import time
+import os
+from datetime import datetime
+from joblib import Parallel, delayed
 from whole_body import WholeBodyModel
 from utils import (safe_savgol_filter, subsample, steady_mask,
                    clean_nans, steady_mean, steady_mean_std,
@@ -26,51 +23,31 @@ from physio_config import load_all_patients
 
 warnings.filterwarnings('ignore')
 
-# --- Пациенты: единый источник истины для меток, цветов и порядка ---
 _PATIENTS = load_all_patients()
 COLORS = {p['label']: p['color'] for p in _PATIENTS.values()}
-SCENARIO_ORDER = [p['label'] for p in
-                  sorted(_PATIENTS.values(), key=lambda c: int(c['order']))]
+SCENARIO_ORDER = [p['label'] for p in sorted(_PATIENTS.values(), key=lambda c: int(c['order']))]
 
 # =====================================================================
-# Константы
+# Константы v4
 # =====================================================================
-
-# Длительность симуляции и калибровки.
-# tau_remodel = 200 с (Эйзенменгер), tau_target = 300 с (mass-balance B),
-# поэтому t_end = 800 с даёт 2-3 времени релаксации.
-#
-# T_CALIB — прогрев перед основной симуляцией. Должен покрывать
-# самую медленную релаксацию в модели:
-#   sys_ven (V-mode):  tau_target   = 200 с → 3τ = 600 с
-#   lungs.R_remodel:   tau_remodel  = 200 с → 3τ = 600 с
-#   peripheral.R_eff:  tau_autoreg  =   3 с → 3τ ≈   9 с
-#   baroreflex.HR:     tau          =   2 с → 3τ ≈   6 с
-# Поэтому T_CALIB = 800 с: 4τ для sys_ven (98 % сходимости)
-# и 4τ для lungs.R_remodel (98 %).
 T_END   = 800.0
 T_CALIB = 800.0
-N_EVAL  = 4000   # желаемое число точек вывода
+T_CALIB_HEALTHY = 400.0
+N_EVAL  = 4000   # v3: было 10000 -> 4000 (для отчетов хватает)
 DT_EVAL = T_END / (N_EVAL - 1)
+MAX_STEP = 0.10  # v3: было 0.07 -> 0.10 (-30% RHS вызовов)
 
-# --- Баланс потребления O2 ---
-# Полное VO2 организма фиксировано и складывается из двух слагаемых:
-# TOTAL_VO2  = VO2_blood_side (gas_exchange) + VO2_periph (peripheral_tissues)
-TOTAL_VO2_BASE  = 4.2   # мл O2/с — полное потребление O2 всем телом (≈ 250 мл/мин)
-PERIPH_VO2_BASE = 1.5   # мл O2/с — доля, приходящаяся на PeripheralTissues
-GAS_EX_VO2_BASE = TOTAL_VO2_BASE - PERIPH_VO2_BASE   # = 2.7 мл O2/с
+TOTAL_VO2_BASE  = 4.2
+PERIPH_VO2_BASE = 1.5
+GAS_EX_VO2_BASE = TOTAL_VO2_BASE - PERIPH_VO2_BASE
 
-# --- Прореживание рядов для графиков ---
-# Значение фиксировано единым для всех панелей, чтобы разные кривые
-# на одном графике имели одинаковую длину.
-N_PLOT_POINTS       = 4000   # для plot_enhanced_comparison (мелкие панели, много сценариев)
-N_PLOT_POINTS_DETAIL = 1200  # для plot_shunt_effect_analysis (крупные панели)
-
+N_PLOT_POINTS = 4000
+N_PLOT_POINTS_DETAIL = 1200
+STEADY_FRAC = 0.75
 
 # =====================================================================
-# Симуляция сценария
+# Симуляция одного сценария (оптимизированная)
 # =====================================================================
-
 def simulate_scenario(vsd_resistance,
                       flow_dependent_lungs,
                       label,
@@ -83,129 +60,81 @@ def simulate_scenario(vsd_resistance,
                       flow_sensitivity=0.15,
                       t_span=(0.0, T_END),
                       t_calib=T_CALIB):
-    """
-    Запускает симуляцию одного сценария.
 
-    Возвращает data — dict с временными рядами (включая 't').
-    """
-    # --- Initial concentrations (включая лактат, добавленный whole_body) ---
     initial_conc = {
-        'tox': 0.0,
-        'bilirubin': 0.5,
-        'ammonia': 0.3,
-        'albumin': 4.5,
-        'glucose': 5.0,
-        'oxygen': 0.15,
-        'co2': 0.52,
-        'lactate': 0.10,
+        'tox': 0.0, 'bilirubin': 0.5, 'ammonia': 0.3,
+        'albumin': 4.5, 'glucose': 5.0, 'oxygen': 0.15,
+        'co2': 0.52, 'lactate': 0.10,
     }
+    blood_params = {'initial_concentrations': initial_conc, 'V0': 5800.0}
 
-    blood_params = {
-        'initial_concentrations': initial_conc,
-        'V0': 5800.0,                 # совпадает с дефолтом whole_body
-    }
-
-    # HR_base — опорная ЧСС, от которой барорефлекс отсчитывает
-    # отклонение HR_target. Для VSD-сценариев берём чуть выше (75),
-    # здоровый — 70. Значение уходит и в heart.hr_base, и в
-    # baroreflex.HR_base, чтобы hr_factor = HR / HR_base был
-    # согласован между органами.
     if HR_base is None:
         HR_base = 75 if vsd_resistance != np.inf else 70
     heart_params = {'hr': HR_base, 'R_vsd': vsd_resistance}
     if E_max_rv_override is not None:
         heart_params['E_max_rv'] = E_max_rv_override
 
-    # --- Сборка модели. Не переопределяем C_sys_art / C_pul_ven / P_*0 ---
-    # (используем дефолты whole_body: C_sys_art=1.5, C_pul_ven=15,
-    #  P_sa0=85, P_sv0=12, P_pv0=12).
     model = WholeBodyModel(
         baroreflex_params={'P_set': 80.0, 'HR_base': HR_base},
         blood_params=blood_params,
         flow_dependent_lungs=flow_dependent_lungs,
         lungs_params={
-            'flow_sensitivity':   flow_sensitivity,
-            'pressure_remodel':   pressure_remodel,
-            'P_pa_threshold':     25.0,
+            'flow_sensitivity': flow_sensitivity,
+            'pressure_remodel': pressure_remodel,
+            'P_pa_threshold': 25.0,
             'pressure_sensitivity': pressure_sensitivity,
-            'R_remodel_max':      R_remodel_max,
-            'tau_remodel':        tau_remodel,
+            'R_remodel_max': R_remodel_max,
+            'tau_remodel': tau_remodel,
         },
         heart_params=heart_params,
-        # --- Явно: доля VO2, уходящая в периферию ---
         peripheral_params={'VO2_base': PERIPH_VO2_BASE},
-        # --- Явно: остаток VO2 уходит в GasExchange ---
         gas_exchange_params={'VO2_base': GAS_EX_VO2_BASE},
-        R_sys_peripheral=None,      # калибровка из target_MAP / target_CO
+        R_sys_peripheral=None,
         target_MAP=85.0, target_CO=83.0,
     )
 
-    # --- Калибровка ---
-    print(f"  [VO2] periph={model.peripheral.VO2_base:.2f}  "
-          f"gas_ex={model.gas_exchange.VO2_base:.2f}  "
-          f"sum={model.peripheral.VO2_base + model.gas_exchange.VO2_base:.2f}")
-    print(f"  Калибровка (t_calib={t_calib:.0f} с)...", end=" ", flush=True)
-    y0 = model.calibrate_initial_state(t_calib=t_calib)
-    print("готово")
+    # Адаптивный t_calib
+    t_calib_eff = t_calib
+    if not pressure_remodel and t_calib >= 600:
+        if t_calib == T_CALIB:
+            t_calib_eff = T_CALIB_HEALTHY
 
-    # --- Диагностика после калибровки ---
+    print(f"  [PID {os.getpid()}] [{label}] Калибровка t_calib={t_calib_eff:.0f}с...", flush=True)
+    y0 = model.calibrate_initial_state(t_calib=t_calib_eff)
+
     out0 = model.compute_outputs(0.0, y0)
-    print(f"  [CHECK] после калибровки: "
-          f"P_sa={out0['P_sa']:.1f}  P_sv={out0['P_sv']:.1f}  "
-          f"HR={out0['HR']:.1f}  V_blood={out0['V_blood']:.0f}")
+    print(f"  [PID {os.getpid()}] [{label}] CHECK P_sa={out0['P_sa']:.1f} P_sv={out0['P_sv']:.1f} HR={out0['HR']:.1f} V_blood={out0['V_blood']:.0f}", flush=True)
 
-    # --- Основная симуляция ---
     n_pts = N_EVAL
     t_eval = np.linspace(t_span[0], t_span[1], n_pts)
-    print(f"  Симуляция {label} (0..{t_span[1]:.0f} с, LSODA, "
-          f"dt_eval={DT_EVAL:g} с, {n_pts} точек вывода)...",
-          end=" ", flush=True)
+    print(f"  [PID {os.getpid()}] [{label}] Симуляция 0..{t_span[1]:.0f}с LSODA max_step={MAX_STEP} {n_pts} точек...", flush=True)
     sol = model.simulate(
         t_span, t_eval, y0=y0,
         method='LSODA',
         rtol=1e-4, atol=1e-5,
-        max_step=0.1,
+        max_step=MAX_STEP,
     )
-    print(f"готово ({sol.t.size} точек вывода, "
-          f"{sol.nfev} вызовов RHS)")
+    print(f"  [PID {os.getpid()}] [{label}] готово {sol.t.size} точек, {sol.nfev} RHS, cache_hits={getattr(model, '_flow_cache_hits', 0)}", flush=True)
 
-    # --- Сборка выходов — только в установившемся окне ---
-    # Было: len(sol.t) ≈ 10000 вызовов compute_outputs (полная пересборка
-    # _compute_organ_flows на каждой точке). Стало: ~25 % точек.
-    STEADY_FRAC = 0.75
+    # --- ОПТИМИЗАЦИЯ 1: только установившееся окно ---
     if sol.t.size > 0:
         mask_steady = sol.t > STEADY_FRAC * sol.t[-1]
         if np.sum(mask_steady) < 100:
-            # fallback: если окно пустое, берём последние 25 % точек
-            mask_steady = np.zeros_like(sol.t, dtype=bool)
-            mask_steady[int(0.75 * len(sol.t)):] = True
+            mask_steady = np.ones_like(sol.t, dtype=bool)
+            mask_steady[: int((1-STEADY_FRAC)*len(mask_steady))] = False
     else:
         mask_steady = np.array([], dtype=bool)
-
     idx_steady = np.where(mask_steady)[0]
-    print(f"  Сборка выходов: {len(idx_steady)}/{len(sol.t)} точек "
-          f"(t > {STEADY_FRAC:.2f}·t_end)")
 
-    outputs = [model.compute_outputs(sol.t[i], sol.y[:, i])
-               for i in idx_steady]
-    data = {key: np.array([out[key] for out in outputs])
-            for key in outputs[0].keys()}
+    outputs = [model.compute_outputs(sol.t[i], sol.y[:, i]) for i in idx_steady]
+    if len(outputs) == 0:
+        raise RuntimeError("Нет точек в установившемся окне")
+    data = {key: np.array([out[key] for out in outputs]) for key in outputs[0].keys()}
     data['t'] = sol.t[idx_steady]
-
-    # Диагностика кэша
-    if hasattr(model, "_flow_cache_hits"):
-        print(f"  [CACHE] hits={model._flow_cache_hits}  "
-              f"misses={model._flow_cache_misses}")
-
-    # --- Очистка NaN/Inf ---
+    data['_t_full'] = sol.t  # для графиков если нужно
     data = clean_nans(data)
-
     return data
 
-
-# =====================================================================
-# Визуализация: 4 сценария на одной сетке
-# =====================================================================
 
 def plot_enhanced_comparison(results_dict):
     """Сводная панель 3x3 по 4 сценариям."""
@@ -626,71 +555,87 @@ def print_detailed_report(results_dict):
                 print(f"  • Доля R→L шунта                   : {_sh} %  — часть венозной крови идёт в аорту, минуя лёгкие")
 
 # =====================================================================
+# Обертка для joblib (должна быть top-level для pickle)
+# =====================================================================
+def simulate_one_scenario(name, params):
+    t0 = time.perf_counter()
+    data = simulate_scenario(
+        vsd_resistance=params['vsd_resistance'],
+        flow_dependent_lungs=params['flow_dependent_lungs'],
+        label=name,
+        pressure_remodel=params['pressure_remodel'],
+        pressure_sensitivity=params.get('pressure_sensitivity', 0.06),
+        R_remodel_max=params.get('R_remodel_max', 5.0),
+        tau_remodel=params.get('tau_remodel', 200.0),
+        HR_base=params.get('HR_base', None),
+        E_max_rv_override=params.get('E_max_rv', None),
+        flow_sensitivity=params.get('flow_sensitivity', 0.15),
+    )
+    dt = time.perf_counter() - t0
+    filename = f"vsd_results_{params['id']}.npz"
+    np.savez(filename, **data,
+            label=np.array(name),
+            id=np.array(params['id']),
+            description=np.array(params.get('description','')))
+    print(f"  [PID {os.getpid()}] 💾 {filename} ({dt:.1f}с)", flush=True)
+    return name, data, params['color'], dt, filename
+
+# =====================================================================
 # main
 # =====================================================================
 
-def main():
+def main(parallel=True, n_jobs=5):
     t_start = time.perf_counter()
-
-    print("=" * 80)
-    print("СРАВНЕНИЕ ГЕМОДИНАМИКИ: ЗДОРОВЫЙ vs ДМЖП")
-    print("=" * 80)
-
+    dt_start = datetime.now()
+    print("="*80)
+    print(f"Запуск: {dt_start:%Y-%m-%d %H:%M:%S}")
+    print("СРАВНЕНИЕ ГЕМОДИНАМИКИ: ЗДОРОВЫЙ vs ДМЖП — v4 PARALLEL")
+    print(f"N_EVAL={N_EVAL}, MAX_STEP={MAX_STEP}, STEADY_FRAC={STEADY_FRAC}, t_calib healthy={T_CALIB_HEALTHY}")
+    print("="*80)
     scenarios = _PATIENTS
     print(f"Загружено пациентов: {list(scenarios.keys())}")
 
-    print("\n🚀 Запуск симуляций...")
-    results = {}
-
-    per_scenario_times = {}
-    for name, params in scenarios.items():
-        print(f"\n▶ Сценарий: {name}")
-        print(f"   {params['description']}")
-
-        t_sim = time.perf_counter()
-
-        data = simulate_scenario(
-            vsd_resistance=params['vsd_resistance'],
-            flow_dependent_lungs=params['flow_dependent_lungs'],
-            label=name,
-            pressure_remodel=params['pressure_remodel'],
-            pressure_sensitivity=params.get('pressure_sensitivity', 0.06),
-            R_remodel_max=params.get('R_remodel_max', 5.0),
-            tau_remodel=params.get('tau_remodel', 200.0),
-            HR_base=params.get('HR_base', None),
-            E_max_rv_override=params.get('E_max_rv', None),
-            flow_sensitivity=params.get('flow_sensitivity', 0.15),
+    if parallel:
+        n_jobs = min(n_jobs, len(scenarios), os.cpu_count() or 1)
+        print(f"\n🚀 Запуск {len(scenarios)} симуляций параллельно n_jobs={n_jobs} (loky)...")
+        results_list = Parallel(n_jobs=n_jobs, backend='loky', verbose=10)(
+            delayed(simulate_one_scenario)(name, params) for name, params in scenarios.items()
         )
+    else:
+        print("\n🚀 Запуск последовательно...")
+        results_list = [simulate_one_scenario(name, params) for name, params in scenarios.items()]
 
-        results[name] = (data, params['color'], name)
+    results = {}
+    per_scenario_times = {}
+    for name, data, color, dt, fname in results_list:
+        results[name] = (data, color, name)
+        per_scenario_times[name] = dt
 
-        filename = f"vsd_results_{params['id']}.npz"      # vsd_results_patient_004.npz
-        np.savez(filename, **data,
-                label=np.array(name),
-                id=np.array(params['id']),
-                description=np.array(params.get('description', '')))
-
-        dt_sim = time.perf_counter() - t_sim
-        per_scenario_times[name] = dt_sim
-        print(f"   💾 {filename}  ({dt_sim:.1f} с)")
-
-    print("\n📊 Генерация визуализаций...")
+    print("\n📊 Генерация визуализаций (последовательно)...")
     plot_enhanced_comparison(results)
     plot_shunt_effect_analysis(results)
     print_detailed_report(results)
 
-    print("\n✅ Готово.")
-    print("📁 Файлы:")
+    print("\n✅ Готово. Файлы:")
     print("   - hemodynamics_comparison_enhanced.png")
     print("   - shunt_effect_analysis.png")
     print("   - vsd_results_*.npz")
-
     print("\n⏱  Время по сценариям:")
     for nm, dt in per_scenario_times.items():
-        print(f"   • {nm:<40s} {dt:>7.1f} с")        
+        print(f"   • {nm:<40s} {dt:>7.1f}с")
     t_total = time.perf_counter() - t_start
-    print(f"\n⏱  Общее время: {t_total:.1f} с "
-          f"({t_total/60:.1f} мин)")
+    print(f"\n⏱  Общее wall time: {t_total:.1f}с ({t_total/60:.1f} мин)")
+    if parallel:
+        print(f"   Сумма CPU времени: {sum(per_scenario_times.values()):.1f}с")
+        print(f"   Ускорение vs последовательно: {sum(per_scenario_times.values())/max(t_total,1):.2f}x")
+    dt_end = datetime.now()
+    print(f"\n🏁 Завершение: {dt_end:%Y-%m-%d %H:%M:%S}")
+    print(f"   Общее время работы: {dt_end - dt_start}")
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--no-parallel', action='store_true', help='отключить параллель')
+    parser.add_argument('--n-jobs', type=int, default=5, help='число процессов')
+    args = parser.parse_args()
+    main(parallel=not args.no_parallel, n_jobs=args.n_jobs)

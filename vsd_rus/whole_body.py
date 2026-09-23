@@ -244,6 +244,14 @@ class WholeBodyModel:
             self.idx[name] = slc
             start += size
         self.total_states = start
+        # --- Кэш _compute_organ_flows ---
+        # Срабатывает при повторном вызове на той же точке (t, y):
+        # LSODA-ретраи, повторная диагностика, compute_outputs дважды.
+        self._flow_cache_t = None
+        self._flow_cache_y = None
+        self._flow_cache_result = None
+        self._flow_cache_hits = 0
+        self._flow_cache_misses = 0        
 
     def calibrate_initial_state(self, t_calib=600.0, t_eval=None,
                                 rtol=1e-4, atol=1e-5,
@@ -273,7 +281,7 @@ class WholeBodyModel:
 
         try:
             sol = solve_ivp(self.derivatives, (0.0, t_calib), y0,
-                            t_eval=t_eval, method='LSODA', rtol=rtol, atol=atol, max_step=0.07)
+                            t_eval=t_eval, method='LSODA', rtol=rtol, atol=atol, max_step=0.1)
         except Exception as e:
             warnings.warn(f"calibrate: solver failed ({e}); using analytic y0")
             return y0
@@ -336,6 +344,15 @@ class WholeBodyModel:
         Возвращает dict со всеми состояниями, выходами органов, локальными
         потоками, накопленным dC_blood_arr и dV_total.
         """
+        if (self._flow_cache_t is not None
+                and t == self._flow_cache_t
+                and self._flow_cache_y is not None
+                and self._flow_cache_y.shape == y.shape
+                and np.array_equal(self._flow_cache_y, y)):
+            self._flow_cache_hits += 1
+            return self._flow_cache_result
+
+        self._flow_cache_misses += 1
         sl = self.idx
 
         # --- Состояния ---
@@ -454,7 +471,7 @@ class WholeBodyModel:
                     - kidney_effects['urine_output']
                     - self.insensible_loss_rate)
 
-        return {
+        result = {
             # Состояния
             'V_heart': V_heart, 'V_lungs': V_lungs, 'V_liver': V_liver,
             'V_blood': V_blood, 'V_gitract': V_gitract, 'V_brain': V_brain,
@@ -482,6 +499,10 @@ class WholeBodyModel:
             # Кровь
             'dC_blood_arr': dC_blood_arr, 'dV_total': dV_total,
         }
+        self._flow_cache_t = t
+        self._flow_cache_y = y.copy()
+        self._flow_cache_result = result
+        return result
 
     def derivatives(self, t, y):
         f = self._compute_organ_flows(t, y)
@@ -596,7 +617,7 @@ class WholeBodyModel:
     def simulate(self, t_span, t_eval=None, y0=None, method='LSODA', **kwargs):
         if y0 is None:
             y0 = self.calibrate_initial_state()
-        kwargs.setdefault('max_step', 0.05)
+        kwargs.setdefault('max_step', 0.1)
         return solve_ivp(self.derivatives, t_span, y0, 
                          t_eval=t_eval, method=method, **kwargs)
      

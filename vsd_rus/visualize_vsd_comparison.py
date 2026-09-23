@@ -37,7 +37,8 @@ from matplotlib.gridspec import GridSpec
 from matplotlib.patches import Circle
 from scipy.stats import linregress
 from utils import safe_savgol_filter as safe_savgol
-from utils import subsample, steady_mask
+from utils import (subsample, steady_mask, steady_mean,
+                   steady_mean_std, qp_qs_steady)
 from physio_config import load_all_patients
 
 warnings.filterwarnings("ignore")
@@ -89,18 +90,6 @@ def has_field(data: dict, *keys: str) -> bool:
         if not isinstance(arr, np.ndarray) or arr.size == 0:
             return False
     return True
-
-
-def steady_mean_std(data: dict, key: str, scale: float = 1.0
-                    ) -> Optional[Tuple[float, float]]:
-    """Среднее ± std по установившемуся окну. None — если данных нет."""
-    if key not in data:
-        return None
-    m = steady_mask(data) & np.isfinite(np.asarray(data[key]))
-    vals = np.asarray(data[key])[m]
-    if vals.size == 0:
-        return None
-    return float(np.mean(vals) * scale), float(np.std(vals) * scale)
 
 
 # ===========================================================================
@@ -192,6 +181,7 @@ def plot_hemodynamic_timeseries(results: Dict[str, dict]) -> None:
             ax.axhline(90, color="orange", ls=":", alpha=0.6)
         if metric == "Qp_Qs":
             ax.axhline(1.0, color="black", ls="--", alpha=0.4)
+            ax.set_ylim(0.5, 5.0)
 
     # Одна общая легенда
     handles, labels = axes[0, 0].get_legend_handles_labels()
@@ -281,7 +271,6 @@ def plot_bar_comparison(results: Dict[str, dict]) -> None:
         ("P_sa",     "Системное АД (мм рт. ст.)", 1.0),
         ("P_pa",     "Лёгочное АД (мм рт. ст.)",  1.0),
         ("Q_aortic", "Системный выброс (мл/с)",   1.0),
-        ("Qp_Qs",    "Qp / Qs",                   1.0),
         ("V_rv",     "Объём ПЖ (мл)",             1.0),
         ("V_blood",  "Объём крови (мл)",          1.0),
         ("GFR",      "СКФ (мл/с)",                1.0),
@@ -322,6 +311,24 @@ def plot_bar_comparison(results: Dict[str, dict]) -> None:
                     bar.get_height() + ymax * 0.02,
                     f"{m:.1f}", ha="center", va="bottom", fontsize=8)
 
+    # --- Qp/Qs из средних потоков (закрывает артефакты 1e6) ---
+    ax_qp = axes[len(metrics)]         # 8-я панель из 8
+    vals_qp = [qp_qs_steady(results[sc]) or 0.0 for sc in scenarios]
+    bars_qp = ax_qp.bar(scenarios, vals_qp,
+                        color=[_color(s) for s in scenarios],
+                        alpha=0.75, edgecolor="black", linewidth=1)
+    ax_qp.set_ylabel("Qp / Qs")
+    ax_qp.set_title("Qp_Qs")
+    ax_qp.tick_params(axis="x", rotation=40, labelsize=7)
+    for lbl in ax_qp.get_xticklabels():
+        lbl.set_horizontalalignment("right")
+    ax_qp.grid(True, alpha=0.3, axis="y")
+    ymax_qp = max([abs(v) for v in vals_qp] + [1e-6])
+    for bar, v in zip(bars_qp, vals_qp):
+        ax_qp.text(bar.get_x() + bar.get_width() / 2,
+                   bar.get_height() + ymax_qp * 0.02,
+                   f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+
     plt.tight_layout(rect=(0, 0, 1, 0.95))
     plt.savefig("fig3_bar_comparison.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -357,6 +364,7 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
     ax.set_title("Соотношение Qp/Qs")
     ax.legend(fontsize=7, ncol=2)
     ax.grid(True, alpha=0.3)
+    ax.set_ylim(0.5, 5.0)
 
     # --- 2. Объём ЛЖ ---
     ax = axes[0, 1]
@@ -408,12 +416,23 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
             continue
         q_vsd = np.asarray(data["Q_vsd"])[mask]
         q_ratio = np.asarray(data["Qp_Qs"])[mask]
+        # Отбрасываем мгновенные выбросы Qp/Qs (диастолические скачки),
+        # чтобы scatter не растягивал ось и не тратил точки впустую.
+        keep = q_ratio < 5.0
+        q_vsd   = q_vsd[keep]
+        q_ratio = q_ratio[keep]
+        if q_vsd.size == 0:
+            continue
         step = max(1, q_vsd.size // 500)
         ax.scatter(q_vsd[::step], q_ratio[::step],
                    c=_color(sc), s=10, alpha=0.5, label=sc)
-        if abs(np.mean(q_vsd)) > 1.0:
-            xs.append(float(np.mean(q_vsd)))
-            ys.append(float(np.mean(q_ratio)))
+
+        # Точка-агрегат: Q_vsd — mean, Qp/Qs — из средних потоков
+        s_mean = steady_mean(data, "Q_vsd")
+        q_mean = qp_qs_steady(data)
+        if s_mean is not None and q_mean is not None and abs(s_mean) > 1.0:
+            xs.append(s_mean)
+            ys.append(q_mean)
     if len(xs) > 1:
         slope, intercept, r_val, _, _ = linregress(xs, ys)
         x_line = np.linspace(min(xs), max(xs), 50)
@@ -423,6 +442,7 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
     ax.set_xlabel("Шунт VSD (мл/с)")
     ax.set_ylabel("Qp / Qs")
     ax.set_title("Корреляция: шунт ↔ Qp/Qs")
+    ax.set_ylim(0.0, 5.0)              # ← ограничиваем окно; выбросы мгновенного Qp/Qs не растягивают ось
     ax.legend(fontsize=6, ncol=2)
     ax.grid(True, alpha=0.3)
 
@@ -473,7 +493,7 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
 # ===========================================================================
 
 def _plot_series(ax, results, key, ylabel, title,
-                 scale=1.0, smooth=False, hlines=()):
+                 scale=1.0, smooth=False, hlines=(), ylim=None):
     """Универсальный помощник для временного ряда на оси."""
     for sc, data in results.items():
         if not has_field(data, "t", key):
@@ -489,6 +509,8 @@ def _plot_series(ax, results, key, ylabel, title,
         ax.plot(t[mask], y_plot[mask], color=_color(sc), lw=1.6, label=sc)
     for y0, col, ls in hlines:
         ax.axhline(y0, color=col, ls=ls, alpha=0.5)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
     ax.set_xlabel("Время (с)")
     ax.set_ylabel(ylabel)
     ax.set_title(title, fontsize=11, fontweight="bold")
@@ -525,11 +547,12 @@ def plot_comprehensive_dashboard(results: Dict[str, dict]) -> None:
     # 1. Qp/Qs
     ax1 = fig.add_subplot(gs[0, :2])
     _plot_series(ax1, results, "Qp_Qs", "Qp / Qs",
-                 "Соотношение лёгочного и системного кровотока",
-                 smooth=True,
-                 hlines=[(1.0, "black", "--"),
-                         (1.5, "orange", ":"),
-                         (2.0, "red", ":")])
+             "Соотношение лёгочного и системного кровотока",
+             smooth=True,
+             hlines=[(1.0, "black", "--"),
+                     (1.5, "orange", ":"),
+                     (2.0, "red", ":")],
+             ylim=(0.5, 5.0))
 
     # 2. Давления
     ax2 = fig.add_subplot(gs[0, 2])
@@ -587,13 +610,13 @@ def plot_comprehensive_dashboard(results: Dict[str, dict]) -> None:
         if not has_field(data, "Q_vsd", "Qp_Qs"):
             continue
         r_vsd = steady_mean_std(data, "Q_vsd")
-        r_qp = steady_mean_std(data, "Qp_Qs")
-        if r_vsd is None or r_qp is None:
+        q_qp  = qp_qs_steady(data)
+        if r_vsd is None or q_qp is None:
             continue
         if abs(r_vsd[0]) > 1.0:
             xs.append(r_vsd[0])
-            ys.append(r_qp[0])
-            ax8.scatter(r_vsd[0], r_qp[0], s=120,
+            ys.append(q_qp)
+            ax8.scatter(r_vsd[0], q_qp, s=120,
                         c=_color(sc), edgecolor="black",
                         linewidth=1.5, label=sc)
     if len(xs) > 1:
@@ -631,6 +654,7 @@ def plot_comprehensive_dashboard(results: Dict[str, dict]) -> None:
                   fontsize=11, fontweight="bold")
     ax9.legend(fontsize=7)
     ax9.grid(True, alpha=0.3)
+    ax9.set_xlim(0.5, 5.0)
 
     # 10. P_aO2
     ax10 = fig.add_subplot(gs[2, 2])
@@ -646,7 +670,6 @@ def plot_comprehensive_dashboard(results: Dict[str, dict]) -> None:
     ax12.axis("off")
 
     summary_metrics = [
-        ("Qp_Qs",              "Qp/Qs",              "{:.2f} ± {:.2f}", 1.0),
         ("SaO2",               "SaO₂, %",            "{:.1f} ± {:.2f}", 100.0),
         ("P_sa",               "АД сист., мм рт. ст.", "{:.0f} ± {:.0f}", 1.0),
         ("P_pa",               "АД лёг., мм рт. ст.",  "{:.0f} ± {:.0f}", 1.0),
@@ -656,14 +679,23 @@ def plot_comprehensive_dashboard(results: Dict[str, dict]) -> None:
         ("shunt_fraction_R2L", "R→L шунт, %",        "{:.1f} ± {:.2f}", 100.0),
         ("V_blood",            "Объём крови, мл",    "{:.0f} ± {:.0f}", 1.0),
         ("GFR",                "СКФ, мл/с",          "{:.2f} ± {:.2f}", 1.0),
-        ("O2_consumption",  "CMRO₂, мл O₂/с",   "{:.3f} ± {:.3f}", 1.0),
-        ("C_a_O2",          "C_aO₂, мл/мл",      "{:.3f} ± {:.3f}", 1.0),
-        ("Q_brain",         "Q_br, мл/с",        "{:.2f} ± {:.2f}", 1.0),
+        ("O2_consumption",     "CMRO₂, мл O₂/с",     "{:.3f} ± {:.3f}", 1.0),
+        ("C_a_O2",             "C_aO₂, мл/мл",       "{:.3f} ± {:.3f}", 1.0),
+        ("Q_brain",            "Q_br, мл/с",         "{:.2f} ± {:.2f}", 1.0),
     ]
 
     header = ["Показатель"] + [_short(s, 22) for s in scenarios]
 
     table_rows = [header]
+
+    # Сначала — Qp/Qs, посчитанный из средних потоков
+    row = ["Qp/Qs"]
+    for sc in scenarios:
+        v = qp_qs_steady(results[sc])
+        row.append(f"{v:.2f}" if v is not None else "N/A")
+    table_rows.append(row)
+
+    # Остальные метрики — общий цикл
     for key, label, fmt, scale in summary_metrics:
         row = [label]
         for sc in scenarios:
@@ -833,7 +865,6 @@ def print_statistical_summary(results: Dict[str, dict]) -> None:
         ("P_pa",               "Лёгочное АД",               "мм рт. ст.", "{:.1f} ± {:.1f}", 1.0),
         ("Q_aortic",           "Системный выброс",          "мл/с",       "{:.1f} ± {:.1f}", 1.0),
         ("Q_pulmonary",        "Лёгочный кровоток",         "мл/с",       "{:.1f} ± {:.1f}", 1.0),
-        ("Qp_Qs",              "Qp / Qs",                   "",           "{:.2f} ± {:.2f}", 1.0),
         ("Q_vsd",              "Шунт VSD",                  "мл/с",       "{:+.1f} ± {:.1f}", 1.0),
         # --- Оксигенация ---
         ("SaO2",               "SaO₂",                      "%",          "{:.1f} ± {:.2f}", 100.0),
@@ -853,7 +884,7 @@ def print_statistical_summary(results: Dict[str, dict]) -> None:
 
     header = f"{'Показатель':<32}"
     for s in scenarios:
-        header += f"{_short(s, 20):>22}" 
+        header += f"{_short(s, 20):>22}"
     print(header)
     print("-" * len(header))
 
@@ -867,18 +898,25 @@ def print_statistical_summary(results: Dict[str, dict]) -> None:
                 line += f"{fmt.format(*r):>22}"
         print(line)
 
+    # Qp/Qs — отдельно, из средних потоков
+    line = f"{'Qp / Qs':<32}"
+    for sc in scenarios:
+        v = qp_qs_steady(results[sc])
+        line += f"{v:>22.2f}" if v is not None else f"{'N/A':>22}"
+    print(line)
+
     print("=" * 100)
 
     print("\n🔍 КЛЮЧЕВЫЕ НАХОДКИ:")
     for sc in scenarios:
         data = results[sc]
         r_sao2 = steady_mean_std(data, "SaO2", 100.0)
-        r_qp   = steady_mean_std(data, "Qp_Qs")
+        qp_qs  = qp_qs_steady(data)
         r_ppa  = steady_mean_std(data, "P_pa")
         r_r2l  = steady_mean_std(data, "shunt_fraction_R2L", 100.0)
-        if r_sao2 is None or r_qp is None:
+        if r_sao2 is None or qp_qs is None:
             continue
-        sao2, qp_qs = r_sao2[0], r_qp[0]
+        sao2 = r_sao2[0]
         ppa = r_ppa[0] if r_ppa else float("nan")
         r2l = r_r2l[0] if r_r2l else 0.0
 
