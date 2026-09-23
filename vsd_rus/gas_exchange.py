@@ -2,10 +2,6 @@
 """
 Альвеолярно-капиллярный газообмен O2/CO2.
 
-Алгебраический орган без состояния (по аналогии с KidneyHemodynamic).
-Возвращает производные смешанных венозных концентраций O2 и CO2,
-которые передаются в BloodPool через dC_blood_arr в whole_body.py.
-
 Физиологические соглашения:
     - C_O2, C_CO2 измеряются в мл газа / мл крови (совпадает с BloodPool)
     - Нормальные значения:
@@ -33,26 +29,21 @@ class GasExchange(OrganModel):
     Модель газообмена O2/CO2 в лёгких.
 
     Состояния нет — алгебраический орган, вызывается через compute_effects.
-    Эффекты на BloodPool: dC_O2, dC_CO2 — производные смешанной венозной
-    концентрации (мл газа / мл крови / с).
     """
 
     def __init__(self,
-                 # ---- Альвеолярный газ (фиксирован в MVP) ----
-                 P_alv_O2=100.0,           # мм рт. ст.
-                 P_alv_CO2=40.0,           # мм рт. ст.
-                 # ---- Гемоглобин и кривая Хилла ----
-                 Hb=15.0,                  # г/дл
-                 P50=26.8,                 # мм рт. ст.
-                 n_hill=2.7,
-                 alpha_O2=0.003,           # мл O2 / (дл · мм рт. ст.) — растворимость
-                 # ---- CO2 (линейная аппроксимация) ----
-                 C_CO2_offset=0.22,        # мл/мл при P_CO2 = 0
-                 k_CO2_slope=0.0065,       # мл/мл на мм рт. ст.
-                 # ---- Метаболизм (весь организм) ----
-                 VO2_base=4.2,             # мл O2 / с   (≈ 250 мл/мин)
-                 VCO2_base=3.3,            # мл CO2 / с  (≈ 200 мл/мин)
-                 Q_norm=83.0):             # мл/с — нормальный системный кровоток
+                # ---- Альвеолярный газ (фиксирован в MVP) ----
+                P_alv_O2=100.0,           # мм рт. ст.
+                P_alv_CO2=40.0,           # мм рт. ст.
+                # ---- Гемоглобин и кривая Хилла ----
+                Hb=15.0,                  # г/дл
+                P50=26.8,                 # мм рт. ст.
+                n_hill=2.7,
+                alpha_O2=0.003,           # мл O2 / (дл · мм рт. ст.) — растворимость
+                # ---- CO2 (линейная аппроксимация) ----
+                C_CO2_offset=0.22,        # мл/мл при P_CO2 = 0
+                k_CO2_slope=0.0065,       # мл/мл на мм рт. ст.
+                ):
         # Альвеолярный газ
         self.P_alv_O2 = float(P_alv_O2)
         self.P_alv_CO2 = float(P_alv_CO2)
@@ -64,10 +55,6 @@ class GasExchange(OrganModel):
         # CO2
         self.C_CO2_offset = float(C_CO2_offset)
         self.k_CO2_slope = float(k_CO2_slope)
-        # Метаболизм
-        self.VO2_base = float(VO2_base)
-        self.VCO2_base = float(VCO2_base)
-        self.Q_norm = float(Q_norm)
         # Кэш выходов
         self._current_outputs = {}
 
@@ -132,8 +119,7 @@ class GasExchange(OrganModel):
                         C_v_O2: float,
                         C_v_CO2: float,
                         Q_p: float,
-                        Q_shunt: float,
-                        V_blood: float) -> dict:
+                        Q_shunt: float) -> dict:
         """
         Параметры
         ---------
@@ -142,17 +128,17 @@ class GasExchange(OrganModel):
         Q_p     : лёгочный кровоток (мл/с), всегда > 0
         Q_shunt : поток через ДМЖП (мл/с),
                   > 0 — лево-правый (L→R), < 0 — право-левый (R→L)
-        V_blood : объём крови (мл)
 
         Возвращает
         ----------
-        Словарь с dC_O2, dC_CO2 и диагностическими полями.
+        Словарь с концентрациями (C_a_O2, C_v_O2, C_pv_O2, C_a_CO2, C_v_CO2, C_pv_CO2),
+        парциальными давлениями (P_a_O2, P_v_O2, P_v_CO2) и диагностикой
+        (SaO2, shunt_fraction_R2L, Qp_Qs, O2_uptake, CO2_removal, f_bypass).
         """
         # --- Защита от некорректных входов ---
         C_v_O2  = float(np.clip(C_v_O2,  0.001, 0.25))
         C_v_CO2 = float(np.clip(C_v_CO2, 0.05,  1.00))
         Q_p     = max(float(Q_p), 1e-6)
-        V_safe  = max(float(V_blood), 1e-6)
 
         # === 1. Системный кровоток (единая формула для обоих направлений) ===
         # Из баланса heart.py: Q_aortic = Q_pulmonary - Q_vsd
@@ -174,16 +160,6 @@ class GasExchange(OrganModel):
             f_bypass = 0.0
             C_a_O2  = C_pv_O2
             C_a_CO2 = C_pv_CO2
-
-        # === 4. Потребление O2 и продукция CO2, масштабированные по Q_s ===
-        Q_factor = float(np.clip(Q_s / self.Q_norm, 0.0, 1.0))
-        VO2_eff  = self.VO2_base  * Q_factor
-        VCO2_eff = self.VCO2_base * Q_factor
-
-        # === 5. Баланс смешанного венозного резервуара ===
-        # dC_v/dt = [Q_s · (C_a − C_v) ∓ метаболизм] / V_blood
-        dC_O2  = (Q_s * (C_a_O2  - C_v_O2)  - VO2_eff)  / V_safe
-        dC_CO2 = (Q_s * (C_a_CO2 - C_v_CO2) + VCO2_eff) / V_safe
 
         # === 6. Парциальные давления (для диагностики) ===
         P_v_O2  = self._P_O2_from_C(C_v_O2)
@@ -217,9 +193,6 @@ class GasExchange(OrganModel):
             'P_a_O2':   float(P_a_O2),
             'P_alv_O2': float(self.P_alv_O2),
             'P_alv_CO2': float(self.P_alv_CO2),
-            # --- Производные для BloodPool (мл/мл/с) ---
-            'dC_O2':    float(dC_O2),
-            'dC_CO2':   float(dC_CO2),
             # --- Диагностика ---
             'SaO2':               float(SaO2),           # сатурация артериальной крови
             'oxygenation_index':  float(SaO2),           # алиас для обратной совместимости
@@ -227,8 +200,6 @@ class GasExchange(OrganModel):
             'Qp_Qs':              float(Qp_Qs),
             'O2_uptake':          float(O2_uptake),
             'CO2_removal':        float(CO2_removal),
-            'VO2_eff':            float(VO2_eff),
-            'VCO2_eff':           float(VCO2_eff),
             'f_bypass':           float(f_bypass),
         }
         return self._current_outputs
@@ -244,30 +215,14 @@ if __name__ == "__main__":
     print("Тест 1: Здоровый (Q_shunt = 0)")
     print("=" * 70)
     out = gas.compute_effects(C_v_O2=0.15, C_v_CO2=0.52,
-                              Q_p=83.0, Q_shunt=0.0, V_blood=5000.0)
-    for k in ('C_a_O2', 'C_v_O2', 'SaO2', 'dC_O2', 'Qp_Qs', 'shunt_fraction_R2L'):
+                              Q_p=83.0, Q_shunt=0.0)
+    for k in ('C_a_O2', 'C_v_O2', 'SaO2', 'Qp_Qs', 'shunt_fraction_R2L'):
         print(f"  {k:22s} = {out[k]:+.6g}")
 
     print("\n" + "=" * 70)
-    print("Тест 2: Большой L→R шунт (Q_shunt = +50)")
+    print("Тест 2: Тяжёлый Эйзенменгер (Q_shunt = −60)")
     print("=" * 70)
     out = gas.compute_effects(C_v_O2=0.15, C_v_CO2=0.52,
-                              Q_p=133.0, Q_shunt=+50.0, V_blood=5000.0)
-    for k in ('C_a_O2', 'SaO2', 'Qp_Qs', 'shunt_fraction_R2L'):
-        print(f"  {k:22s} = {out[k]:+.6g}")
-
-    print("\n" + "=" * 70)
-    print("Тест 3: Право-левый шунт (Q_shunt = −30)")
-    print("=" * 70)
-    out = gas.compute_effects(C_v_O2=0.15, C_v_CO2=0.52,
-                              Q_p=80.0, Q_shunt=-30.0, V_blood=5000.0)
-    for k in ('C_a_O2', 'SaO2', 'P_a_O2', 'Qp_Qs', 'shunt_fraction_R2L', 'f_bypass'):
-        print(f"  {k:22s} = {out[k]:+.6g}")
-
-    print("\n" + "=" * 70)
-    print("Тест 4: Тяжёлый Эйзенменгер (Q_shunt = −60)")
-    print("=" * 70)
-    out = gas.compute_effects(C_v_O2=0.15, C_v_CO2=0.52,
-                              Q_p=80.0, Q_shunt=-60.0, V_blood=5000.0)
+                              Q_p=80.0, Q_shunt=-60.0)
     for k in ('C_a_O2', 'SaO2', 'P_a_O2', 'shunt_fraction_R2L'):
         print(f"  {k:22s} = {out[k]:+.6g}")

@@ -22,11 +22,13 @@
     C_O2       — мл O2 / мл крови
     C_lactate  — мг/мл  (≈ 0.09 мг/мл = 1 мМ)
 
-ВАЖНО (двойной счёт O2):
-    gas_exchange.VO2_base — это ПОЛНОЕ потребление O2 всем телом.
-    При включении PeripheralTissues нужно уменьшить VO2_base на
-    self.VO2_base, чтобы суммарно получилось то же число. Например:
-        gas_exchange_params={'VO2_base': 1.7}   # было 4.2; 2.5 идёт в периферию
+Распределение VO2 (после централизации в whole_body.py):
+    Периферия только РАПОРТУЕТ потребление через ключ
+    'O2_consumption_periph' — это flow-зависимая величина VO2_eff.
+    В dC_O2 крови периферия НЕ пишет: централизованный баланс O2/CO2
+    собирается в whole_body._compute_organ_flows, который суммирует
+    VO2_brain + VO2_periph + VO2_rest. Поле '_diagnostic_dC_O2_blood'
+    оставлено только для отладки и в баланс не подмешивается.
 """
 
 import numpy as np
@@ -46,9 +48,7 @@ class PeripheralTissues(OrganModel):
         # --- Метаболическая ауторегуляция ---
         O2_norm: float = 0.15,          # нормальная локальная O2
         k_O2_autoreg: float = 0.5,      # чувствительность к гипоксии
-        R_min_factor: float = 0.85,      # максимальная вазодилатация
-        # k_O2_autoreg: float = 1.5,      # чувствительность к гипоксии
-        # R_min_factor: float = 0.5,      # максимальная вазодилатация
+        R_min_factor: float = 0.75,      # максимальная вазодилатация
         tau_autoreg: float = 3.0,       # с, постоянная времени R_eff
 
         # --- Миогенная ауторегуляция ---
@@ -180,7 +180,9 @@ class PeripheralTissues(OrganModel):
         dC_lac_loc = lac_production - lac_clearance - lac_release
 
         # --- 5. Вклады в BloodPool ---
-        # Потребление O2 из крови: -VO2_base / V_blood  (мл O2/мл крови/с)
+        # Локальная скорость потребления O2 (диагностика).
+        # В системный баланс НЕ подмешивается — это делает whole_body
+        # через централизованный блок dC_O2_blood (см. fix_deepseek.md §2.6).
         dC_O2_blood = -VO2_eff / V_blood
         # Выделение лактата в кровь: lac_release * V_tissue_eff / V_blood (мг/мл/с)
         dC_lactate_blood = (lac_release * self.V_tissue_eff) / V_blood
@@ -204,13 +206,13 @@ class PeripheralTissues(OrganModel):
             # Метаболизм
             'C_O2_local':      float(C_O2_loc),
             'C_lactate_local': float(C_lac_loc),
-            'O2_consumption_periph': float(self.VO2_base),
+            'O2_consumption_periph': float(VO2_eff),
             'lactate_production':    float(lac_production),
             'lactate_release_to_blood': float(lac_release),
 
             # Производные для BloodPool
-            'dC_O2_blood':      float(dC_O2_blood),
-            'dC_lactate_blood': float(dC_lactate_blood),
+            '_diagnostic_dC_O2_blood': float(dC_O2_blood),
+            'dC_lactate_blood':        float(dC_lactate_blood),
         }
 
         return np.array([dC_O2_loc, dC_lac_loc, dR_eff])
@@ -245,7 +247,8 @@ if __name__ == "__main__":
     out = pt.get_outputs(y_end)
     print("\nSteady state (здоровый):")
     for k in ('Q_peripheral', 'R_eff', 'C_O2_local', 'C_lactate_local',
-              'O2_consumption_periph', 'lactate_production', 'dC_O2_blood'):
+              'O2_consumption_periph', 'lactate_production',
+              '_diagnostic_dC_O2_blood'):
         print(f"  {k:28s} = {out[k]:+.6g}")
 
     print("\nГипоксия (P_sa=60, C_a_O2=0.12):")

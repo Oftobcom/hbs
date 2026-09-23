@@ -18,6 +18,7 @@ from brain import Brain
 from baroreflex import Baroreflex
 from gas_exchange import GasExchange
 from peripheral_tissues import PeripheralTissues
+from jugular_vein import JugularVein
 
 class WindkesselVessel(OrganModel):
     """
@@ -113,12 +114,21 @@ class WholeBodyModel:
         target_MAP=85.0, target_CO=83.0,
         C_sys_art=1.5, C_pul_ven=15.0,
         P_sa0=85.0, P_sv0=12.0, P_pv0=12.0,
-        SYS_VEN_FRACTION=0.5,
+        SYS_VEN_FRACTION=0.52,
         C_sys_ven_eff=400.0,
         tau_target=200.0,
         fluid_intake_rate=0.0,
         insensible_loss_rate=0.0,
         peripheral_params=None,
+        jugular_params=None,
+        # --- Яремная вена ---
+        C_jug_ven_eff=20.0,
+        P_jv0=6.0,
+        R_jv_out=0.5,
+        JUG_VEN_FRACTION=0.05,
+        VO2_rest: float = 1.9,
+        RQ: float = 0.8,
+        occlusion_factor: float = 1.0,
         substance_names=None):
 
         # Если substance_names не передан, берём из blood_params или дефолтный список
@@ -208,26 +218,41 @@ class WholeBodyModel:
             tau_target=tau_target,
         )
 
+        # --- Яремная вена — отдельный компартмент с V_jv и C_jv_O2 ---
+        V_jv0 = JUG_VEN_FRACTION * blood_init['V0']
+        jp = dict(jugular_params or {})
+        jp.setdefault('C', C_jug_ven_eff)
+        jp.setdefault('P0', P_jv0)
+        jp.setdefault('V0', V_jv0)
+        jp.setdefault('R_out', R_jv_out)
+        jp.setdefault('target_fraction', JUG_VEN_FRACTION)
+        jp.setdefault('tau_target', tau_target)
+        self.jugular_vein = JugularVein(**jp)
+        self.VO2_rest = float(VO2_rest)
+        self.RQ = float(RQ)
+        self._occlusion_factor = float(occlusion_factor)
+
         self.R_sys_peripheral = R_sys_peripheral
         self.fluid_intake_rate = fluid_intake_rate
         self.insensible_loss_rate = insensible_loss_rate
 
         ge = dict(gas_exchange_params or {})
-        if 'VO2_base' not in ge:
-            ge['VO2_base'] = 4.2 - self.peripheral.VO2_base
+        ge.pop('VO2_base', None)
+        ge.pop('VCO2_base', None)
+        ge.pop('Q_norm', None)
         self.gas_exchange = GasExchange(**ge)
 
         # Порядок органов определяет структуру вектора состояния
         self.organ_list = [
             self.heart, self.lungs, self.liver, self.blood, self.gitract,
             self.brain, self.peripheral, self.baroreflex,
-            self.sys_art, self.sys_ven, self.pul_ven,
+            self.sys_art, self.sys_ven, self.pul_ven, self.jugular_vein,
         ]
         # Имена органов в том же порядке, что и organ_list
         ORGAN_NAMES = [
             'heart', 'lungs', 'liver', 'blood', 'gitract',
             'brain', 'peripheral', 'baroreflex',
-            'sys_art', 'sys_ven', 'pul_ven',
+            'sys_art', 'sys_ven', 'pul_ven', 'jugular_vein',
         ]
 
         assert len(ORGAN_NAMES) == len(self.organ_list), \
@@ -367,6 +392,7 @@ class WholeBodyModel:
         P_sa         = y[sl['sys_art']][0]
         V_sv         = y[sl['sys_ven']][0]      # объём системных вен (V-mode)
         P_pv         = y[sl['pul_ven']][0]
+        V_jv_state   = y[sl['jugular_vein']]  # [V_jv, C_jv_O2, C_jv_CO2]
         # Извлекаем P_sv из V_sv (линейная зависимость)
         P_sv = self.sys_ven.P0 + (V_sv - self.sys_ven.V0) / self.sys_ven.C
         P_sv = max(P_sv, 0.0)
@@ -424,13 +450,24 @@ class WholeBodyModel:
             C_v_CO2 = conc.get('co2',    0.52),
             Q_p     = heart_out['Q_pulmonary'],
             Q_shunt = heart_out['Q_vsd'],
-            V_blood = Vb,
         )
 
-        # --- Мозг ---
-        brain_inputs = {'P_sa': P_sa, 'P_sv': P_sv,
-                        'C_a_O2': gas_ex['C_a_O2'],
-                        'C_ammonia': conc.get('ammonia', 0.0)}
+        V_jv_arr = y[sl['jugular_vein']]     # [V_jv, C_jv_O2, C_jv_CO2]
+        V_jv = float(V_jv_arr[0])
+        P_jv = self.jugular_vein.P0 + (V_jv - self.jugular_vein.V0) / self.jugular_vein.C
+        P_jv = max(P_jv, 0.0)
+
+        # --- Мозг v2: с CO2 и V_blood для масс-баланса ---
+        brain_inputs = {
+            'P_sa':            P_sa,
+            'P_sv':            P_jv,                              # ← вместо P_sv
+            'C_a_O2':          gas_ex['C_a_O2'],
+            'C_a_CO2':         gas_ex['C_a_CO2'],
+            'C_lactate_blood': conc.get('lactate', 0.10),          # ← из крови, а не 0.8
+            'C_ammonia':       conc.get('ammonia', 0.0),
+            'V_blood':         Vb,
+            'occlusion_factor': self._occlusion_factor,            # см. §2.8
+        }
         d_brain = self.brain.get_derivatives(t, V_brain, brain_inputs)
         brain_out = self.brain.get_outputs(V_brain)
 
@@ -442,14 +479,60 @@ class WholeBodyModel:
         d_peripheral = self.peripheral.get_derivatives(t, V_periph, peripheral_inputs)
         periph_out = self.peripheral.get_outputs(V_periph)
 
+        # --- Яремная вена: отдельный компартмент V_jv + C_jv_O2 ---
+        jugular_inputs = {
+            'Q_in':     brain_out.get('Q_out', brain_out['Q_br']),   # ← венозный отток, не Q_br
+            'C_in_O2':  brain_out['C_v_O2_brain'],
+            'C_in_CO2': brain_out['C_v_CO2_brain'],
+            'P_sv':     P_sv,                                        # яремная вена → системные вены
+            'V_blood':  Vb,
+        }
+        d_jugular = self.jugular_vein.get_derivatives(t, V_jv_state, jugular_inputs)
+        jugular_out = self.jugular_vein.get_outputs(V_jv_state)
+
+        # Централизованный баланс O2/CO2
+        Q_s       = heart_out['Q_aortic']
+        Q_br      = brain_out['Q_br']
+        Q_other   = Q_s - Q_br
+        C_a_O2    = gas_ex['C_a_O2']
+        C_a_CO2   = gas_ex['C_a_CO2']
+        C_bulk_O2 = conc.get('oxygen', 0.15)
+        C_bulk_CO2= conc.get('co2',    0.52)
+        C_jv_O2   = jugular_out['C_jv_O2']
+        C_jv_CO2  = jugular_out['C_jv_CO2']
+        VO2_brain  = brain_out['VO2_brain']
+        VO2_periph = periph_out['O2_consumption_periph']
+        VO2_other  = VO2_periph + self.VO2_rest
+        VO2_total  = VO2_brain + VO2_other
+        VCO2_brain  = brain_out['CO2_production']
+        VCO2_periph = periph_out.get('VCO2_production', periph_out['O2_consumption_periph'] * self.RQ)
+        VCO2_total  = VCO2_brain + VCO2_periph + self.VO2_rest * self.RQ
+
+        Vb_safe = max(Vb, 1e-6)
+
+        # O2 в bulk: brain вынесен в jugular, входит через Q_br·(C_jv - C_bulk)
+        dC_O2_blood = (
+            Q_other * (C_a_O2 - C_bulk_O2)
+            - VO2_other
+            + Q_br * (C_jv_O2 - C_bulk_O2)
+        ) / Vb_safe
+
+        # CO2 lumped (jugular CO2 учитывается в общем стоке через VCO2_total)
+        dC_CO2_blood = (
+            Q_s * (C_a_CO2 - C_bulk_CO2)
+            + VCO2_total
+        ) / Vb_safe
+
         # --- Локальные потоки (единые для derivatives и compute_outputs) ---
         Q_peripheral = periph_out['Q_peripheral']
         Q_ha         = liver_out.get('Q_ha', 0.0)
         Q_renal      = kidney_effects['Q_renal']
         Q_gitract_in = (P_sa - V_gitract[0]) / self.gitract.R_art
         Q_brain      = brain_out['Q_br']
+        Q_jv_out     = jugular_out.get('Q_jv_out', Q_brain)  # отток яремной вены в системные вены
         Q_art_out    = Q_peripheral + Q_ha + Q_renal + Q_gitract_in + Q_brain
-        Q_ven_in     = Q_peripheral + liver_out['Q_liver_out'] + Q_renal + Q_brain
+        # Венозный возврат теперь через яремную вену, а не напрямую из мозга
+        Q_ven_in     = Q_peripheral + liver_out['Q_liver_out'] + Q_renal + Q_jv_out
         Q_ven_out    = heart_out['Q_sv_to_ra']
 
         # --- Накопление dC_blood_arr (все вклады в концентрации) ---
@@ -460,11 +543,12 @@ class WholeBodyModel:
         if 'albumin'   in idx: dC_blood_arr[idx['albumin']]   += liver_out.get('dC_albumin',   0.0)
         if 'lactate'   in idx: dC_blood_arr[idx['lactate']]   += liver_out.get('dC_lactate',   0.0)
         if 'tox'       in idx: dC_blood_arr[idx['tox']]       += kidney_effects['dC_tox']
-        if 'oxygen'    in idx: dC_blood_arr[idx['oxygen']]    += gas_ex['dC_O2']
-        if 'co2'       in idx: dC_blood_arr[idx['co2']]       += gas_ex['dC_CO2']
-        if 'oxygen'    in idx: dC_blood_arr[idx['oxygen']]    += periph_out['dC_O2_blood']
         if 'lactate'   in idx: dC_blood_arr[idx['lactate']]   += periph_out['dC_lactate_blood']
-
+        # Мозг v3: реальный венозный возврат + лактат + аммиак (BBB)
+        if 'lactate'   in idx: dC_blood_arr[idx['lactate']]   += brain_out.get('dC_lactate_blood', 0.0)
+        if 'ammonia'   in idx: dC_blood_arr[idx['ammonia']]   += brain_out.get('dC_ammonia_blood', 0.0)
+        if 'oxygen' in idx: dC_blood_arr[idx['oxygen']] += dC_O2_blood
+        if 'co2'    in idx: dC_blood_arr[idx['co2']]    += dC_CO2_blood
         # --- Баланс жидкости ---
         dV_total = (gitract_out['absorption_water']
                     + self.fluid_intake_rate
@@ -475,29 +559,38 @@ class WholeBodyModel:
             # Состояния
             'V_heart': V_heart, 'V_lungs': V_lungs, 'V_liver': V_liver,
             'V_blood': V_blood, 'V_gitract': V_gitract, 'V_brain': V_brain,
-            'V_periph': V_periph, 'V_baroreflex': V_baroreflex,
+            'V_periph': V_periph, 'V_baroreflex': V_baroreflex, 'V_jugular': V_jv_state,
             'P_sa': P_sa, 'P_sv': P_sv, 'P_pv': P_pv, 'P_pa': P_pa,
             'V_sv': V_sv, 'Vb': Vb, 'C_blood': C_blood, 'conc': conc,
             'V_sv_target': self.sys_ven.target_fraction * Vb if self.sys_ven.target_fraction else V_sv,
             'V_sv_fraction': V_sv / max(Vb, 1e-6) if Vb > 0 else 0.0,
+            'V_jv': V_jv_state[0], 'C_jv_O2': V_jv_state[1], 'C_jv_CO2': V_jv_state[2],
             # Барорефлекс
             'HR': HR, 'hr_factor': hr_factor, 'baroreflex_out': baroreflex_out,
             'baro_activation': baroreflex_out['baro_activation'],
             # Органные производные
             'd_heart': d_heart, 'd_lungs': d_lungs, 'd_liver': d_liver,
             'd_gitract': d_gitract, 'd_brain': d_brain,
-            'd_peripheral': d_peripheral, 'd_baroreflex': d_baroreflex,
+            'd_peripheral': d_peripheral, 'd_baroreflex': d_baroreflex, 'd_jugular': d_jugular,
             # Органные выходы
             'heart_out': heart_out, 'lungs_out': lungs_out,
             'gitract_out': gitract_out, 'liver_out': liver_out,
             'kidney_effects': kidney_effects, 'brain_out': brain_out,
-            'gas_ex': gas_ex, 'periph_out': periph_out,
+            'gas_ex': gas_ex, 'periph_out': periph_out, 'jugular_out': jugular_out,
             # Локальные потоки
             'Q_peripheral': Q_peripheral, 'Q_ha': Q_ha, 'Q_renal': Q_renal,
-            'Q_gitract_in': Q_gitract_in, 'Q_brain': Q_brain,
+            'Q_gitract_in': Q_gitract_in, 'Q_brain': Q_brain, 'Q_jv_out': Q_jv_out,
             'Q_art_out': Q_art_out, 'Q_ven_in': Q_ven_in, 'Q_ven_out': Q_ven_out,
             # Кровь
             'dC_blood_arr': dC_blood_arr, 'dV_total': dV_total,
+            'VO2_total':    float(VO2_total),
+            'VO2_brain':    float(VO2_brain),
+            'VO2_periph':   float(VO2_periph),
+            'VO2_rest':     float(self.VO2_rest),
+            'VCO2_total':   float(VCO2_total),
+            'dC_O2_blood':  float(dC_O2_blood),
+            'dC_CO2_blood': float(dC_CO2_blood),
+            'P_jv':         float(P_jv),
         }
         self._flow_cache_t = t
         self._flow_cache_y = y.copy()
@@ -533,10 +626,12 @@ class WholeBodyModel:
             {'Q_in': Q_from_lungs, 'Q_out': Q_pul_ven_out},
         )
 
+        d_jugular_vein = f['d_jugular']
+
         return np.concatenate([
             f['d_heart'], f['d_lungs'], f['d_liver'], d_blood,
             f['d_gitract'], f['d_brain'], f['d_peripheral'], f['d_baroreflex'],
-            d_sys_art, d_sys_ven, d_pul_ven,
+            d_sys_art, d_sys_ven, d_pul_ven, d_jugular_vein,
         ])
 
     def compute_outputs(self, t, y):
@@ -572,8 +667,6 @@ class WholeBodyModel:
             'Q_gitract_out': f['gitract_out']['Q_out'],
             'absorption_water': f['gitract_out']['absorption_water'],
             'Q_brain': f['brain_out']['Q_br'],
-            'O2_consumption': f['brain_out']['O2_consumption'],
-            'glucose_consumption': f['brain_out']['glucose_consumption'],
             'V_blood': f['Vb'],
             'GFR': f['kidney_effects']['GFR'],
             'C_bilirubin_blood': f['conc'].get('bilirubin', 0),
@@ -593,6 +686,8 @@ class WholeBodyModel:
             'P_a_O2': f['gas_ex']['P_a_O2'],
             'P_v_O2': f['gas_ex']['P_v_O2'],
             'P_v_CO2': f['gas_ex']['P_v_CO2'],
+            'C_a_CO2': f['gas_ex']['C_a_CO2'],
+            'C_v_CO2': f['gas_ex']['C_v_CO2'],
             'O2_uptake':   f['gas_ex']['O2_uptake'],
             'CO2_removal': f['gas_ex']['CO2_removal'],
             'Q_peripheral': f['Q_peripheral'],
@@ -610,6 +705,34 @@ class WholeBodyModel:
             'dC_lactate_periph_to_blood': f['periph_out'].get('dC_lactate_blood', 0.0),
             'Q_mitral':    heart_out['Q_mitral'],
             'Q_tricuspid': heart_out['Q_tricuspid'],
+            # --- Яремная вена (новый компартмент) ---
+            'V_jv': f['V_jv'],
+            'P_jv': f['jugular_out']['P_jv'],
+            'Q_jv_out': f['Q_jv_out'],
+            'C_jv_O2': f['jugular_out']['C_jv_O2'],
+            'C_jv_CO2': f['jugular_out']['C_jv_CO2'],
+            'SjvO2': f['jugular_out']['SjvO2'],
+            'P_jv_O2': f['jugular_out']['P_jv_O2'],
+            'C_v_O2_brain': f['brain_out'].get('C_v_O2_brain', f['brain_out'].get('C_v_O2')),
+            'C_v_CO2_brain': f['brain_out'].get('C_v_CO2_brain'),
+            'C_v_lactate_brain': f['brain_out'].get('C_v_lactate_brain'),
+            'C_v_ammonia_brain': f['brain_out'].get('C_v_ammonia_brain'),
+            'f_CO2_autoreg_brain': f['brain_out'].get('f_CO2_autoreg', 1.0),
+            'C_O2_tissue_brain': f['brain_out'].get('C_O2_tissue'),
+            'C_CO2_tissue_brain': f['brain_out'].get('C_CO2_tissue'),
+            'C_lactate_tissue_brain': f['brain_out'].get('C_lactate_tissue'),
+            'C_ammonia_tissue_brain': f['brain_out'].get('C_ammonia_tissue'),
+            'inhib_O2_brain': f['brain_out'].get('inhib_O2'),
+            'inhib_amm_brain': f['brain_out'].get('inhib_amm'),
+            'lactate_production_brain': f['brain_out'].get('lactate_production'),
+            'VO2_total':       f['VO2_total'],
+            'VO2_brain':       f['VO2_brain'],
+            'VO2_periph':      f['VO2_periph'],
+            'VO2_rest':        f['VO2_rest'],
+            'VCO2_total':      f['VCO2_total'],
+            'dC_CO2_blood':    f['dC_CO2_blood'],
+            'dC_O2_blood':     f['dC_O2_blood'],
+            'occlusion_factor': f['brain_out'].get('occlusion_factor', 1.0),
         }
 
     # def simulate(self, t_span, t_eval=None, y0=None, method='RK45', **kwargs):
@@ -620,4 +743,9 @@ class WholeBodyModel:
         kwargs.setdefault('max_step', 0.1)
         return solve_ivp(self.derivatives, t_span, y0, 
                          t_eval=t_eval, method=method, **kwargs)
-     
+
+    def set_occlusion(self, factor: float) -> None:
+        """0 — полная окклюзия, 1 — норма."""
+        self._occlusion_factor = float(np.clip(factor, 0.0, 1.0))
+        # Сбросить кэш, чтобы следующие шаги увидели новое значение
+        self._flow_cache_t = None

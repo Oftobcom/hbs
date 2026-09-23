@@ -226,3 +226,10 @@ def qp_qs_steady(data):
     if qp is None or qa is None or qa <= 0:
         return None
     return qp / qa
+
+def occlusion_profile(t, t_onset, severity=1.0, rise_time=5.0):
+    """Плавный ramp окклюзии: 1.0 до t_onset, затем плавно к (1-severity)."""
+    if t < t_onset:
+        return 1.0
+    frac = min((t - t_onset) / max(rise_time, 1e-6), 1.0)
+    return 1.0 - severity * frac

@@ -11,18 +11,10 @@ visualize_vsd_comparison.py
     fig2_phase_portraits.png           — фазовые PV-портреты (если есть P_lv/P_rv)
     fig3_bar_comparison.png            — столбчатое сравнение установившихся метрик
     fig4_detailed_cardiac.png          — детальный анализ сердца и регионов
+    fig5_gas_exchange.png              — газообмен O₂ / CO₂: 2×3 (O₂ сверху, CO₂ снизу)
     comprehensive_dashboard.png        — комплексный дашборд 4×4
     schematic_heart_comparison.png     — схематическая диаграмма
 
-Ожидаемые колонки в .npz (обязательные помечены *):
-    t*, P_sa*, P_pa*, P_sv, P_pv,
-    Q_aortic*, Q_pulmonary*, Q_vsd*, Qp_Qs*,
-    V_lv*, V_rv*, V_blood*, HR*,
-    GFR, Q_brain, O2_consumption,
-    SaO2, shunt_fraction_R2L, P_a_O2, P_v_O2, C_a_O2, C_v_O2,
-    P_lv, P_rv, P_la, P_ra  (опционально — нужны для PV-петель)
-
-Совместим с matplotlib 3.4+ (стиль задаётся безопасно).
 """
 
 from __future__ import annotations
@@ -489,6 +481,190 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
 
 
 # ===========================================================================
+# Рис. 5b — Газообмен O2 / CO2
+# ===========================================================================
+
+def plot_gas_exchange(results: Dict[str, dict]) -> None:
+    """
+    Диаграмма газообмена: верхний ряд — O2, нижний — CO2.
+
+    Требует ключей из централизованного баланса (см. fix_deepseek.md):
+        VO2_brain, VO2_periph, VO2_rest, VO2_total,
+        C_a_O2, C_v_O2, C_jv_O2,
+        P_a_O2, P_v_O2,
+        C_a_CO2, C_v_CO2, C_jv_CO2, P_v_CO2,
+        VCO2_total, CO2_removal, dC_CO2_blood
+    Если каких-то ключей нет — соответствующая панель просто пропускается.
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(16, 9))
+    fig.suptitle("Газообмен O₂ / CO₂: сравнение сценариев",
+                 fontsize=14, fontweight="bold")
+
+    # ======================= ВЕРХНИЙ РЯД: O₂ =======================
+
+    # 1. Концентрации O₂
+    ax = axes[0, 0]
+    for sc, data in results.items():
+        c = _color(sc)
+        if has_field(data, "t", "C_a_O2"):
+            t, y = subsample(data, "C_a_O2")
+            m = np.isfinite(y)
+            ax.plot(t[m], y[m], color=c, lw=1.5,
+                    label=f"{_short(sc, 14)} (a)")
+        if has_field(data, "t", "C_v_O2"):
+            t, y = subsample(data, "C_v_O2")
+            m = np.isfinite(y)
+            ax.plot(t[m], y[m], color=c, lw=1.2, ls='--', alpha=0.7)
+        if has_field(data, "t", "C_jv_O2"):
+            t, y = subsample(data, "C_jv_O2")
+            m = np.isfinite(y)
+            ax.plot(t[m], y[m], color=c, lw=1.0, ls=':', alpha=0.7)
+    ax.set_xlabel("Время (с)")
+    ax.set_ylabel("C_O₂ (мл/мл)")
+    ax.set_title("Концентрации O₂\nартерия (—), вена (- -), яремная (· ·)")
+    ax.legend(fontsize=6, ncol=2)
+    ax.grid(True, alpha=0.3)
+
+    # 2. Парциальные давления O₂
+    ax = axes[0, 1]
+    for sc, data in results.items():
+        c = _color(sc)
+        if has_field(data, "t", "P_a_O2"):
+            t, y = subsample(data, "P_a_O2")
+            m = np.isfinite(y)
+            ax.plot(t[m], y[m], color=c, lw=1.5,
+                    label=f"{_short(sc, 14)} (Pa)")
+        if has_field(data, "t", "P_v_O2"):
+            t, y = subsample(data, "P_v_O2")
+            m = np.isfinite(y)
+            ax.plot(t[m], y[m], color=c, lw=1.2, ls='--', alpha=0.7)
+    ax.set_xlabel("Время (с)")
+    ax.set_ylabel("P_O₂ (мм рт. ст.)")
+    ax.set_title("Парциальные давления O₂\nартерия (—), вена (- -)")
+    ax.legend(fontsize=6, ncol=2)
+    ax.grid(True, alpha=0.3)
+
+    # 3. Компоненты VO2 — bar chart
+    ax = axes[0, 2]
+    scenarios = list(results.keys())
+    components = [("VO2_brain",  "Мозг"),
+                  ("VO2_periph", "Периферия"),
+                  ("VO2_rest",   "Покой"),
+                  ("VO2_total",  "Всего")]
+    x = np.arange(len(components))
+    width = 0.8 / max(len(scenarios), 1)
+    any_data = False
+    for i, sc in enumerate(scenarios):
+        vals = []
+        for key, _ in components:
+            r = steady_mean_std(results[sc], key)
+            vals.append(r[0] if r is not None else 0.0)
+            if r is not None:
+                any_data = True
+        offset = (i - (len(scenarios) - 1) / 2) * width
+        ax.bar(x + offset, vals, width, label=sc,
+               color=_color(sc), alpha=0.75)
+    if any_data:
+        ax.set_xticks(x)
+        ax.set_xticklabels([n for _, n in components], fontsize=8)
+        ax.set_ylabel("VO₂ (мл O₂/с)")
+        ax.set_title("Компоненты потребления O₂")
+        ax.legend(fontsize=6, ncol=2)
+        ax.grid(True, alpha=0.3, axis="y")
+    else:
+        ax.text(0.5, 0.5, "VO₂_brain / VO₂_total\nотсутствуют в данных",
+                ha="center", va="center", transform=ax.transAxes,
+                fontsize=10, color="gray")
+        ax.axis("off")
+
+    # ======================= НИЖНИЙ РЯД: CO₂ =======================
+
+    # 4. Концентрации CO₂
+    ax = axes[1, 0]
+    for sc, data in results.items():
+        c = _color(sc)
+        if has_field(data, "t", "C_a_CO2"):
+            t, y = subsample(data, "C_a_CO2")
+            m = np.isfinite(y)
+            ax.plot(t[m], y[m], color=c, lw=1.5,
+                    label=f"{_short(sc, 14)} (a)")
+        if has_field(data, "t", "C_v_CO2"):
+            t, y = subsample(data, "C_v_CO2")
+            m = np.isfinite(y)
+            ax.plot(t[m], y[m], color=c, lw=1.2, ls='--', alpha=0.7)
+        if has_field(data, "t", "C_jv_CO2"):
+            t, y = subsample(data, "C_jv_CO2")
+            m = np.isfinite(y)
+            ax.plot(t[m], y[m], color=c, lw=1.0, ls=':', alpha=0.7)
+    ax.set_xlabel("Время (с)")
+    ax.set_ylabel("C_CO₂ (мл/мл)")
+    ax.set_title("Концентрации CO₂\nартерия (—), вена (- -), яремная (· ·)")
+    ax.legend(fontsize=6, ncol=2)
+    ax.grid(True, alpha=0.3)
+
+    # 5. Венозное P_vCO2
+    ax = axes[1, 1]
+    any_p = False
+    for sc, data in results.items():
+        if not has_field(data, "t", "P_v_CO2"):
+            continue
+        t, y = subsample(data, "P_v_CO2")
+        m = np.isfinite(y)
+        ax.plot(t[m], y[m], color=_color(sc), lw=1.5, label=sc)
+        any_p = True
+    if any_p:
+        ax.axhline(46.0, color="orange", ls=":", alpha=0.5,
+                   label="норма ≈ 46")
+        ax.set_xlabel("Время (с)")
+        ax.set_ylabel("P_vCO₂ (мм рт. ст.)")
+        ax.set_title("Венозное парциальное давление CO₂")
+        ax.legend(fontsize=6, ncol=2)
+    else:
+        ax.text(0.5, 0.5, "P_v_CO2 отсутствует",
+                ha="center", va="center", transform=ax.transAxes,
+                fontsize=10, color="gray")
+        ax.axis("off")
+    ax.grid(True, alpha=0.3)
+
+    # 6. Баланс CO₂ — bar chart
+    ax = axes[1, 2]
+    co2_metrics = [("VCO2_total",    "VCO₂\n(мл/с)"),
+                   ("CO2_removal",   "Удаление\nлёгкими (мл/с)"),
+                   ("dC_CO2_blood",  "dC_CO₂\nкрови (мл/мл/с)")]
+    x = np.arange(len(co2_metrics))
+    width = 0.8 / max(len(scenarios), 1)
+    any_co2 = False
+    for i, sc in enumerate(scenarios):
+        vals = []
+        for key, _ in co2_metrics:
+            r = steady_mean_std(results[sc], key)
+            vals.append(r[0] if r is not None else 0.0)
+            if r is not None:
+                any_co2 = True
+        offset = (i - (len(scenarios) - 1) / 2) * width
+        ax.bar(x + offset, vals, width, label=sc,
+               color=_color(sc), alpha=0.75)
+    if any_co2:
+        ax.set_xticks(x)
+        ax.set_xticklabels([n for _, n in co2_metrics], fontsize=7)
+        ax.set_ylabel("мл/с или мл/(мл·с)")
+        ax.set_title("Баланс CO₂")
+        ax.legend(fontsize=6, ncol=2)
+        ax.grid(True, alpha=0.3, axis="y")
+    else:
+        ax.text(0.5, 0.5, "VCO₂ / CO₂_removal\nотсутствуют",
+                ha="center", va="center", transform=ax.transAxes,
+                fontsize=10, color="gray")
+        ax.axis("off")
+
+    plt.tight_layout(rect=(0, 0, 1, 0.95))
+    plt.savefig("fig5_gas_exchange.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("  ✓ fig5_gas_exchange.png")
+
+
+
+# ===========================================================================
 # Рис. 5 — Комплексный дашборд
 # ===========================================================================
 
@@ -679,7 +855,7 @@ def plot_comprehensive_dashboard(results: Dict[str, dict]) -> None:
         ("shunt_fraction_R2L", "R→L шунт, %",        "{:.1f} ± {:.2f}", 100.0),
         ("V_blood",            "Объём крови, мл",    "{:.0f} ± {:.0f}", 1.0),
         ("GFR",                "СКФ, мл/с",          "{:.2f} ± {:.2f}", 1.0),
-        ("O2_consumption",     "CMRO₂, мл O₂/с",     "{:.3f} ± {:.3f}", 1.0),
+        ("VO2_brain",          "CMRO₂, мл O₂/с",     "{:.3f} ± {:.3f}", 1.0),
         ("C_a_O2",             "C_aO₂, мл/мл",       "{:.3f} ± {:.3f}", 1.0),
         ("Q_brain",            "Q_br, мл/с",         "{:.2f} ± {:.2f}", 1.0),
     ]
@@ -877,7 +1053,7 @@ def print_statistical_summary(results: Dict[str, dict]) -> None:
         ("GFR",                "СКФ",                       "мл/с",       "{:.2f} ± {:.2f}", 1.0),
         ("Q_brain",            "Мозговой кровоток",         "мл/с",       "{:.2f} ± {:.2f}", 1.0),
         # --- Потребление O₂: мозг / периферия / интеграл ---
-        ("O2_consumption",        "Потребление O₂ мозгом",      "мл O₂/с", "{:.3f} ± {:.3f}", 1.0),
+        ("VO2_brain",             "Потребление O₂ мозгом",      "мл O₂/с", "{:.3f} ± {:.3f}", 1.0),
         ("O2_consumption_periph", "Потребление O₂ периферией",  "мл O₂/с", "{:.3f} ± {:.3f}", 1.0),
         ("O2_uptake",             "Поглощение O₂ лёгкими",      "мл O₂/с", "{:.3f} ± {:.3f}", 1.0),
     ]
@@ -956,6 +1132,7 @@ def main() -> None:
     plot_phase_portraits(results)
     plot_bar_comparison(results)
     plot_cardiovascular_parameters(results)
+    plot_gas_exchange(results)
     plot_comprehensive_dashboard(results)
     plot_schematic_heart_comparison()
 
@@ -966,6 +1143,7 @@ def main() -> None:
               "fig2_phase_portraits.png",
               "fig3_bar_comparison.png",
               "fig4_detailed_cardiac.png",
+              "fig5_gas_exchange.png",
               "comprehensive_dashboard.png",
               "schematic_heart_comparison.png"):
         print(f"   - {f}")

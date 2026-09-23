@@ -30,16 +30,13 @@ SCENARIO_ORDER = [p['label'] for p in sorted(_PATIENTS.values(), key=lambda c: i
 # =====================================================================
 # Константы v4
 # =====================================================================
-T_END   = 800.0
+T_END   = 1200.0
 T_CALIB = 800.0
 T_CALIB_HEALTHY = 400.0
 N_EVAL  = 4000   # v3: было 10000 -> 4000 (для отчетов хватает)
-DT_EVAL = T_END / (N_EVAL - 1)
 MAX_STEP = 0.10  # v3: было 0.07 -> 0.10 (-30% RHS вызовов)
 
-TOTAL_VO2_BASE  = 4.2
 PERIPH_VO2_BASE = 1.5
-GAS_EX_VO2_BASE = TOTAL_VO2_BASE - PERIPH_VO2_BASE
 
 N_PLOT_POINTS = 4000
 N_PLOT_POINTS_DETAIL = 1200
@@ -70,7 +67,12 @@ def simulate_scenario(vsd_resistance,
 
     if HR_base is None:
         HR_base = 75 if vsd_resistance != np.inf else 70
-    heart_params = {'hr': HR_base, 'R_vsd': vsd_resistance}
+    heart_params = {
+        'hr': HR_base,
+        'R_vsd': vsd_resistance,
+        'R_venous_sys':  0.05,
+        'R_venous_pulm': 0.02,
+    }
     if E_max_rv_override is not None:
         heart_params['E_max_rv'] = E_max_rv_override
 
@@ -88,7 +90,6 @@ def simulate_scenario(vsd_resistance,
         },
         heart_params=heart_params,
         peripheral_params={'VO2_base': PERIPH_VO2_BASE},
-        gas_exchange_params={'VO2_base': GAS_EX_VO2_BASE},
         R_sys_peripheral=None,
         target_MAP=85.0, target_CO=83.0,
     )
@@ -535,11 +536,11 @@ def print_detailed_report(results_dict):
         print(f"  • Сатурация O₂ (SaO2)              : {format_mean_std(data, 'SaO2', scale=100.0, fmt='{:.1f}')} %  — <90% = гипоксемия (R→L)")
         print(f"  • ЧСС (HR)                         : {format_mean_std(data, 'HR')} уд/мин  — текущая частота сердечных сокращений")
         print(f"  • СКФ (GFR)                        : {format_mean_std(data, 'GFR', fmt='{:.2f}')} мл/с  — скорость клубочковой фильтрации почек")
-        print(f"  • Потребление O₂ мозгом            : {format_mean_std(data, 'O2_consumption', fmt='{:.3f}')} мл O₂/с  — утилизация O₂ церебральной тканью")
+        print(f"  • Потребление O₂ мозгом            : {format_mean_std(data, 'VO2_brain', fmt='{:.3f}')} мл O₂/с  — утилизация O₂ церебральной тканью")
         # --- Церебральный O₂-баланс: градиент здоровый ≈ компенс. > декомпенс. ---
         _sao2_v = format_mean_std(data, 'SaO2', scale=100.0, fmt='{:.1f}')
         _cao2_v = format_mean_std(data, 'C_a_O2', fmt='{:.3f}')
-        _o2_v   = format_mean_std(data, 'O2_consumption', fmt='{:.3f}')
+        _o2_v   = format_mean_std(data, 'VO2_brain', fmt='{:.3f}')
         _qbr_v  = format_mean_std(data, 'Q_brain', fmt='{:.2f}')
         print(f"  • Церебральный O₂-баланс          : "
             f"SaO₂={_sao2_v} %  |  C_a_O₂={_cao2_v} мл/мл  |  "

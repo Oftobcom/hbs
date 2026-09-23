@@ -16,7 +16,7 @@ heart:
 
   # --- Эластанс желудочков ---
   E_max_lv: 3.5
-  E_min_lv: 0.06
+  E_min_lv: 0.03
   E_max_rv: 0.8
   E_min_rv: 0.03
 
@@ -37,7 +37,8 @@ heart:
   R_aortic: 0.10
   R_tricuspid: 0.03
   R_pulmonary: 0.05
-  R_venous: 0.08
+  R_venous_sys:  0.05   # системный венозный возврат (SVC/IVC → RA)
+  R_venous_pulm: 0.02   # пульмональный (PV → LA), низкорезистивный
 
   # --- Клапанная кинетика ---
   k_valve: 20.0
@@ -86,7 +87,7 @@ peripheral:
   P_tissue0: 15.0
   O2_norm: 0.15
   k_O2_autoreg: 0.5
-  R_min_factor: 0.85
+  R_min_factor: 0.75
   tau_autoreg: 3.0
   k_P_myogenic: 0.002
   P_sa_norm: 90.0
@@ -127,11 +128,31 @@ kidney:
 brain:
   R_base: 7.0
   C: 4.0
-  autoreg_gain: 0.3
   P_autoreg: 80.0
-  O2_demand_target: 0.4
+  CMRO2_target: 0.55
+  C_v_min: 0.06
+  max_extraction: 0.60
   glucose_extraction: 0.1
   P0: 47.5
+  C_a_O2_norm: 0.20
+  C_a_CO2_norm: 0.50
+  k_hypoxic_dilation: 0.6
+  k_hypercapnic_dilation: 1.2
+  k_myo: 0.30
+  V_tissue: 150.0
+  RQ: 0.85
+  C_O2_critical: 0.08
+  # Лактат
+  C_lac_norm: 0.8
+  k_lac_prod: 0.08
+  k_lac_clear: 0.02
+  k_lac_release: 0.03
+  # Аммиак BBB
+  C_amm_norm: 0.3
+  k_amm_bbb_in: 0.02
+  k_amm_bbb_out: 0.01
+  k_amm_detox: 0.01
+  k_amm_inhibition: 0.15
 
 gitract:
   R_art: 1.8
@@ -154,9 +175,6 @@ gas_exchange:
   alpha_O2: 0.003
   C_CO2_offset: 0.22
   k_CO2_slope: 0.0065
-  VO2_base: 2.7
-  VCO2_base: 3.3
-  Q_norm: 83.0
 
 systemic:
   target_MAP: 85.0
@@ -166,9 +184,12 @@ systemic:
   P_sa0: 85.0
   P_sv0: 12.0
   P_pv0: 12.0
-  SYS_VEN_FRACTION: 0.5
+  SYS_VEN_FRACTION: 0.52
   C_sys_ven_eff: 400.0
   tau_target: 300.0
+  VO2_rest: 1.9          # мл/с — сердце + печень + почки + ЖКТ
+  RQ: 0.8                # дыхательный коэффициент
+  occlusion_factor: 1.0  # 1.0 = норма (для сценариев инсульта)
 
 simulation:
   method: LSODA
@@ -181,3 +202,14 @@ simulation:
   t_start_stationary: 600.0
   stationary_rel_tol: 0.10
   stationary_rel_tol_stage1: 0.01
+
+jugular_vein:
+  C: 20.0                # комплаенс, мл/мм рт.ст.
+  P0: 6.0                # базовое давление, мм рт.ст.
+  V0: 290.0              # объём при P0 (≈5% от V0 крови)
+  R_out: 0.5             # сопротивление оттока в системные вены
+  target_fraction: 0.05
+  tau_target: 300.0
+  C_O2_init: 0.12        # мл/мл, SjvO2 ≈ 60%
+  C_CO2_init: 0.56
+  Hb: 15.0

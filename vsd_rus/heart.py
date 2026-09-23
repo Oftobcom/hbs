@@ -14,14 +14,12 @@ class Heart4Chambers(OrganModel):
                     E_max_lv=3.5,  E_min_lv=0.03,
                     E_max_rv=0.8,  E_min_rv=0.02,
                     V0_la=10, V0_lv=10, V0_ra=5, V0_rv=10,
-                    # --- Конечно-диастолические объёмы (мл), физиология взрослого ---
                     EDV_la=80.0, EDV_lv=120.0, EDV_ra=40.0, EDV_rv=120.0,
                     R_mitral=0.02, R_aortic=0.10,   # митральный в 1.6× меньше
                     R_tricuspid=0.02, R_pulmonary=0.05,
-                    # R_venous=0.10, 
-                    # R_venous=0.05, # для тестов с низким венозным сопротивлением
-                    R_venous=0.09,
-                    R_vsd=np.inf,          # сопротивление дефекта (бесконечность = нет шунта)
+                    R_venous_sys=0.05,   # системные вены (valves, гравитация)
+                    R_venous_pulm=0.02,  # лёгочные вены — низкорезистивные
+                    R_vsd=np.inf,  # сопротивление дефекта (бесконечность = нет шунта)
                     hr_min=30, hr_max=130,
                     k_valve=20.0):
         self.hr_base = hr
@@ -41,7 +39,8 @@ class Heart4Chambers(OrganModel):
             'tricuspid': R_tricuspid,
             'pulmonary': R_pulmonary
         }
-        self.R_venous = R_venous
+        self.R_venous_sys = R_venous_sys
+        self.R_venous_pulm = R_venous_pulm
         self.R_vsd = R_vsd
         self.k_valve = float(k_valve)
         self._current_hr = self.hr_base
@@ -52,8 +51,6 @@ class Heart4Chambers(OrganModel):
     def get_state_size(self):
         return 4
 
-    # def get_initial_state(self, P_la=1.5, P_lv=7.5, P_ra=1.2, P_rv=3.15):
-    # def get_initial_state(self, P_la=1.5, P_ra=1.5, P_lv=7.0, P_rv=3.0):
     def get_initial_state(self) -> np.ndarray:
         """
         Начальное состояние — физиологические конечно-диастолические
@@ -121,16 +118,20 @@ class Heart4Chambers(OrganModel):
         E = self._elastance(t, chamber)
 
         if chamber in ('LA', 'RA'):
-            # Suga-Sagawa: активная + пассивная компонента
-            # LA жестче RA
             A = 0.4 if chamber=='LA' else 0.3
             k = 0.025 if chamber=='LA' else 0.02
             exp_arg = float(np.clip(k * dV, 0.0, 8.0))
             P_passive = A * (np.exp(exp_arg) - 1.0)
             return E * dV + P_passive
 
-        # Желудочки — линейная (стандарт time-varying elastance)
-        return E * dV
+        # Желудочки — линейная + пассивная экспонента
+        if chamber == 'LV':
+            A_v, k_v = 0.03, 0.02
+        else:
+            A_v, k_v = 0.02, 0.015
+        exp_arg = float(np.clip(k_v * dV, 0.0, 8.0))
+        P_passive = A_v * (np.exp(exp_arg) - 1.0)
+        return E * dV + P_passive
     
     def _valve_flow(self, dP, R):
         """
@@ -191,38 +192,23 @@ class Heart4Chambers(OrganModel):
         P_ra = self._pressure('RA', V_ra, t)
         P_rv = self._pressure('RV', V_rv, t)
 
-        mitral_open = P_la > P_lv
-        aortic_open = P_lv > P_sa
-        tricuspid_open = P_ra > P_rv
-        pulmonary_open = P_rv > P_pa
-
-        # Q_mitral = (P_la - P_lv) / self.R_valve['mitral'] if mitral_open else 0.0
-        # Q_aortic = (P_lv - P_sa) / self.R_valve['aortic'] if aortic_open else 0.0
-        # Q_tricuspid = (P_ra - P_rv) / self.R_valve['tricuspid'] if tricuspid_open else 0.0
-        # Q_pulmonary = (P_rv - P_pa) / self.R_valve['pulmonary'] if pulmonary_open else 0.0
-
         # Гладкие потоки через клапаны (C^∞, без разрывов)
         Q_mitral    = self._valve_flow(P_la - P_lv, self.R_valve['mitral'])
         Q_aortic    = self._valve_flow(P_lv - P_sa, self.R_valve['aortic'])
         Q_tricuspid = self._valve_flow(P_ra - P_rv, self.R_valve['tricuspid'])
         Q_pulmonary = self._valve_flow(P_rv - P_pa, self.R_valve['pulmonary'])
 
-        # Шунт через ДМЖП (слева направо, если P_lv > P_rv)
-        # if np.isfinite(self.R_vsd) and self.R_vsd > 0:
-        #     Q_vsd = max(0.0, (P_lv - P_rv) / self.R_vsd)  # только слева направо
-        # else:
-        #     Q_vsd = 0.0
-
-        # Шунт через ДМЖП - ДВУНАПРАВЛЕННЫЙ, для Эйзенменгера
-        if np.isfinite(self.R_vsd) and self.R_vsd > 0:
-            # Q_vsd = (P_lv - P_rv) / self.R_vsd 
-            Q_vsd = self._valve_flow(P_lv - P_rv, self.R_vsd)
+        # Шунт через ДМЖП — двунаправленный линейный резистор (отверстие
+        # в перегородке, а не клапан). НЕ использовать _valve_flow — он
+        # односторонний и блокирует R→L при Эйзенменгере.
+        # Q_vsd > 0 — L→R, Q_vsd < 0 — R→L.
+        if np.isfinite(self.R_vsd) and self.R_vsd > 1e-9:
+            Q_vsd = (P_lv - P_rv) / self.R_vsd
         else:
             Q_vsd = 0.0
 
-        R_venous = self.R_venous
-        Q_sv_to_ra = (P_sv - P_ra) / R_venous
-        Q_pv_to_la = (P_pv - P_la) / R_venous
+        Q_sv_to_ra = (P_sv - P_ra) / self.R_venous_sys
+        Q_pv_to_la = (P_pv - P_la) / self.R_venous_pulm
 
         self._current_flows = {
             'Q_aortic': Q_aortic,

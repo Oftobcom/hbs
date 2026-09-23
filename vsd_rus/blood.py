@@ -16,10 +16,12 @@ class BloodPool(OrganModel):
     def __init__(self,
                  substance_names: List[str],
                  V0: float = 5000.0,
+                 V_min: float = 2000.0,
                  initial_concentrations: Dict[str, float] = None):
         self.substance_names = substance_names.copy()
         self.num_substances = len(substance_names)
         self.V0 = V0
+        self.V_min = float(V_min)
         if initial_concentrations is None:
             self.C0 = np.zeros(self.num_substances)
         else:
@@ -58,8 +60,7 @@ class BloodPool(OrganModel):
 
         # Защита от отрицательного объема
         # Мягкий пол: при V < 2000 мл и dV < 0 гасим отток
-        V_min = 2000.0
-        if V < V_min and dV < 0:
+        if V < self.V_min and dV < 0:
             dV = 0.0
         return np.concatenate(([dV], dC))
 
