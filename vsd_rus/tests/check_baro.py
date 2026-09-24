@@ -16,7 +16,7 @@ model = WholeBodyModel(heart_params={'R_vsd': 5.0})
 y0 = model.calibrate_initial_state(t_calib=800, p_sa_lo=20.0)
 
 sol = model.simulate((0, 400), y0=y0, method='LSODA',
-                     max_step=0.07, t_eval = np.linspace(0, 400, 40001))
+                     max_step=0.1, t_eval = np.linspace(0, 400, 40001))
 
 # --- Усреднение по последним ~5 кардиоциклам ---
 # Итеративно уточняем окно: сначала грубая T из HR в последней точке,

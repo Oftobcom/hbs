@@ -27,9 +27,9 @@ heart:
   V0_rv: 10
 
   # --- Конечно-диастолические объёмы (начальное условие) ---
-  EDV_la: 40.0
+  EDV_la: 80.0
   EDV_lv: 120.0
-  EDV_ra: 40.0
+  EDV_ra: 80.0
   EDV_rv: 120.0
 
   # --- Сопротивления клапанов ---
@@ -37,11 +37,11 @@ heart:
   R_aortic: 0.10
   R_tricuspid: 0.03
   R_pulmonary: 0.05
-  R_venous_sys:  0.05   # системный венозный возврат (SVC/IVC → RA)
-  R_venous_pulm: 0.02   # пульмональный (PV → LA), низкорезистивный
+  R_venous_sys:  0.08   # системный венозный возврат (SVC/IVC → RA)
+  R_venous_pulm: 0.03   # пульмональный (PV → LA), низкорезистивный
 
   # --- Клапанная кинетика ---
-  k_valve: 20.0
+  k_valve: 9.0
 
 lungs:
   R1: 0.06
@@ -184,18 +184,20 @@ systemic:
   P_sa0: 85.0
   P_sv0: 12.0
   P_pv0: 12.0
-  SYS_VEN_FRACTION: 0.52
-  C_sys_ven_eff: 400.0
+  SYS_VEN_FRACTION: 0.58
+  C_sys_ven_eff: 550.0
   tau_target: 300.0
   VO2_rest: 1.9          # мл/с — сердце + печень + почки + ЖКТ
   RQ: 0.8                # дыхательный коэффициент
   occlusion_factor: 1.0  # 1.0 = норма (для сценариев инсульта)
+  fluid_intake_rate: 0.018
+  insensible_loss_rate: 0.0
 
 simulation:
   method: LSODA
   rtol: 1e-4
   atol: 1e-5
-  max_step: 0.07
+  max_step: 0.1
   t_calib: 600.0
   t_span: [0.0, 1800.0]
   n_samples_t: 12001

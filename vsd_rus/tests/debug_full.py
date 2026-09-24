@@ -11,7 +11,7 @@ y0 = model.get_initial_state()
 
 # Очень длинная симуляция
 sol = model.simulate((0, 1000), y0=y0, method='LSODA',
-                     max_step=0.05, t_eval=np.linspace(0, 1000, 5000))
+                     max_step=0.1, t_eval=np.linspace(0, 1000, 5000))
 
 # P_sa по точкам
 print(f"{'t, с':>6}  {'P_sa':>7}  {'HR':>6}  {'Q_aortic':>9}")

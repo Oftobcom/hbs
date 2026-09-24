@@ -8,7 +8,7 @@ from whole_body import WholeBodyModel
 model = WholeBodyModel(vsd_resistance=5.0)
 y0 = model.get_initial_state()
 sol = model.simulate((0, 500), y0=y0, method='LSODA',
-                     max_step=0.05, t_eval=np.linspace(0, 500, 3000))
+                     max_step=0.1, t_eval=np.linspace(0, 500, 3000))
 
 # Усреднение по 5 последним циклам
 out_end = model.compute_outputs(sol.t[-1], sol.y[:, -1])

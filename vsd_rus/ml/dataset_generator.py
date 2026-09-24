@@ -384,9 +384,9 @@ def _steady_with_reason(model,
     чтобы отделить "не сошлось по стационару" от "исключение в solve_ivp".
     """
     try:
-        y0 = model.calibrate_initial_state(t_calib=10.0)
+        y0 = model.calibrate_initial_state(t_calib=600.0)
         t_eval = np.linspace(t_span[0], t_span[1], n_samples)
-        sol = model.simulate(t_span, t_eval, y0=y0, method="LSODA", rtol=1e-4, atol=1e-5, max_step=0.07)
+        sol = model.simulate(t_span, t_eval, y0=y0, method="LSODA", rtol=1e-4, atol=1e-5, max_step=0.1)
         # sol = model.simulate(t_span, t_eval, method='RK45', rtol=1e-5, atol=1e-7)
     except Exception as e:
         return None, f"sim_exception:{type(e).__name__}"

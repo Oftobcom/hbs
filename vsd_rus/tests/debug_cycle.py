@@ -12,7 +12,7 @@ y0 = model.calibrate_initial_state(t_calib=60, p_sa_lo=20.0)
 
 # Длинная симуляция до стационара
 sol = model.simulate((0, 400), y0=y0, method='LSODA',
-                     max_step=0.05, t_eval=np.linspace(0, 400, 3000))
+                     max_step=0.1, t_eval=np.linspace(0, 400, 3000))
 
 # Усреднение по последнему циклу
 HR_end = model.compute_outputs(sol.t[-1], sol.y[:, -1])['HR']

@@ -238,7 +238,7 @@ if __name__ == "__main__":
         })
 
     sol = solve_ivp(rhs, (0, 60), pt.get_initial_state(),
-                    method='LSODA', rtol=1e-4, atol=1e-5, max_step=0.07)
+                    method='LSODA', rtol=1e-4, atol=1e-5, max_step=0.1)
     y_end = sol.y[:, -1]
     pt.get_derivatives(sol.t[-1], y_end, {
         'P_sa': 85.0, 'P_sv': 5.0, 'C_a_O2': 0.20,

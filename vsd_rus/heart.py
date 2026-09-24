@@ -17,11 +17,11 @@ class Heart4Chambers(OrganModel):
                     EDV_la=80.0, EDV_lv=120.0, EDV_ra=40.0, EDV_rv=120.0,
                     R_mitral=0.02, R_aortic=0.10,   # митральный в 1.6× меньше
                     R_tricuspid=0.02, R_pulmonary=0.05,
-                    R_venous_sys=0.05,   # системные вены (valves, гравитация)
-                    R_venous_pulm=0.02,  # лёгочные вены — низкорезистивные
+                    R_venous_sys=0.08,   # системные вены (valves, гравитация)
+                    R_venous_pulm=0.03,  # лёгочные вены — низкорезистивные
                     R_vsd=np.inf,  # сопротивление дефекта (бесконечность = нет шунта)
                     hr_min=30, hr_max=130,
-                    k_valve=20.0):
+                    k_valve=9.0):
         self.hr_base = hr
         self.hr_min = hr_min
         self.hr_max = hr_max

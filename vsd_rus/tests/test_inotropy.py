@@ -19,7 +19,7 @@ for label, h_params, br_params, per_params in [
     )
     y0 = model.calibrate_initial_state(t_calib=60, p_sa_lo=20.0)
     sol = model.simulate((0, 300), y0=y0, method='LSODA',
-                         max_step=0.05, t_eval=np.linspace(0, 300, 2000))
+                         max_step=0.1, t_eval=np.linspace(0, 300, 2000))
     HR = model.compute_outputs(sol.t[-1], sol.y[:, -1])['HR']
     T = 60.0 / HR
     # mask = sol.t > (sol.t[-1] - T)

@@ -188,8 +188,10 @@ def build_model(theta: dict,
         P_sa0=sys_cfg.get("P_sa0", 85.0),
         P_sv0=sys_cfg.get("P_sv0", 12.0),
         P_pv0=sys_cfg.get("P_pv0", 12.0),
-        SYS_VEN_FRACTION=sys_cfg.get("SYS_VEN_FRACTION", 0.52),
+        SYS_VEN_FRACTION=sys_cfg.get("SYS_VEN_FRACTION", 0.58),
         tau_target=sys_cfg.get("tau_target", 300.0),
+        fluid_intake_rate=sys_cfg.get("fluid_intake_rate", 0.015),
+        insensible_loss_rate=sys_cfg.get("insensible_loss_rate", 0.0),
     )
 
 
@@ -211,13 +213,13 @@ def _stage1_sim_cfg(sim_cfg: Optional[dict]) -> dict:
     """
     out = {
         "method": "LSODA",
-        "rtol": 1e-5,
-        "atol": 1e-6,
-        "max_step": 0.05,
-        "t_calib": 400.0,
-        "t_end": 1200.0,
-        "n_samples_t": 12000,
-        "t_start_stationary": 600.0,
+        "rtol": 1e-4,
+        "atol": 1e-5,
+        "max_step": 0.1,
+        "t_calib": 600.0,
+        "t_end": 800.0,
+        "n_samples_t": 4000,
+        "t_start_stationary": 300.0,
         "stationary_rel_tol_stage1": 0.05,
     }
     if not sim_cfg:
@@ -289,6 +291,9 @@ def get_steady_outputs(model,
         if verbose:
             print(f"  [warn] solver failed: {e}")
         return None
+
+    print(f"[solver, 1] nfev={sol.nfev} njev={getattr(sol,'njev',0)} "
+        f"nlu={getattr(sol,'nlu',0)} t={sol.t[-1]:.1f} y_last={sol.y[:4,-1]}")
 
     if not getattr(sol, "success", False) or sol.y.shape[1] < 2:
         return None
@@ -715,20 +720,22 @@ def debug_base_point() -> None:
     print(f"[Stage1] R_sys resolved = {theta['R_sys']:.3f}, K_VSD = {K_VSD}")
 
     model = build_model(theta)
-    t_calib = 300.0
-    print(f"[Stage1] calibrate t_calib = {t_calib}с (венозный tau=300с)")
+    t_calib = 600.0
+    print(f"[Stage1] calibrate t_calib = {t_calib}с")
 
     y0 = model.calibrate_initial_state(t_calib=t_calib)
     print(f"y0 heart = {y0[model.idx['heart']]}")
     print(f"y0 V_blood = {y0[model.idx['blood']][0]:.0f}")
 
-    t_end = 1200.0
+    t_end = 1000.0
     t_eval = np.linspace(0.0, t_end, 8001)
     sol = model.simulate(
         (0.0, t_end), t_eval=t_eval, y0=y0,
         method=str(sim_cfg.get("method", "LSODA")),
-        rtol=1e-5, atol=1e-6, max_step=0.05,
+        rtol=1e-4, atol=1e-5, max_step=0.1,
     )
+    print(f"[solver, 2] nfev={sol.nfev} njev={getattr(sol,'njev',0)} "
+      f"nlu={getattr(sol,'nlu',0)} t={sol.t[-1]:.1f} y_last={sol.y[:4,-1]}")
     data = _collect_outputs(model, sol)
 
     print("\n--- Конвергенция по окнам ---")
