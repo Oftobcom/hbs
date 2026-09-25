@@ -60,7 +60,7 @@ def test_static():
 
 def test_dilution_intake():
     print("\n"+"="*70)
-    print("TEST 2: Разбавление - fluid_intake 0.018 мл/с (из physiology.yaml)")
+    print("TEST 2: Разбавление - fluid_intake 0.01 мл/с (из physiology.yaml)")
     print("="*70)
     pool, names, init = get_default_pool()
     y0 = pool.get_initial_state()

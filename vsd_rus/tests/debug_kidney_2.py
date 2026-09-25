@@ -130,7 +130,7 @@ def test_renal_flow():
 def test_volume_balance():
     print("\n"+"="*70+"\nTEST 4: Объёмный баланс urine = GFR*(1-reabs)\n"+"="*70)
     k=make_kidney()
-    intake=SYS_CFG.get("fluid_intake_rate",0.02)
+    intake=SYS_CFG.get("fluid_intake_rate",0.015)
     print(f"  intake={intake} мл/с insensible={SYS_CFG.get('insensible_loss_rate',0)}")
     for P_sa in [65,85,95,120]:
         eff=k.compute_effects(P_sa=P_sa,P_sv=5,C_tox=0.5,V_blood=5800)
@@ -183,7 +183,7 @@ def test_anuria():
 def test_volume_equilibrium():
     print("\n"+"="*70+"\nTEST 7: Равновесие объёма — найти P_eq где intake=urine\n"+"="*70)
     k=make_kidney()
-    intake=SYS_CFG.get("fluid_intake_rate",0.02)
+    intake=SYS_CFG.get("fluid_intake_rate",0.015)
     # найдем P где urine = intake
     Ps=np.linspace(10,200,39)
     eq=None
@@ -214,7 +214,7 @@ def test_volume_equilibrium():
 def test_drift():
     print("\n"+"="*70+"\nTEST 8: Drift — эволюция V_blood 600с и 1800с (t_calib/t_span)\n"+"="*70)
     k=make_kidney()
-    intake=SYS_CFG.get("fluid_intake_rate",0.02)
+    intake=SYS_CFG.get("fluid_intake_rate",0.015)
     ins=SYS_CFG.get("insensible_loss_rate",0.0)
     V=5800.0
     for P_sa in [65,85]:
@@ -266,7 +266,7 @@ def summary(res):
     # подсказка для P_sa 65 vs 85
     print("\nПодсказка для whole_body P_sa 65:")
     k=make_kidney()
-    intake=SYS_CFG.get("fluid_intake_rate",0.02)
+    intake=SYS_CFG.get("fluid_intake_rate",0.015)
     for P in [65,85]:
         eff=k.compute_effects(P_sa=P,P_sv=5,C_tox=0.5,V_blood=5800)
         print(f"  P {P}: GFR {eff['GFR']*60:.1f} мл/мин urine {eff['urine_output']*60:.2f} мл/мин net {intake-eff['urine_output']:+.5f} мл/с → {'теряет кровь → EDV 69' if eff['urine_output']>intake else 'набирает'}")

@@ -197,7 +197,7 @@ systemic:
   VO2_rest: 1.9          # мл/с — сердце + печень + почки + ЖКТ
   RQ: 0.8                # дыхательный коэффициент
   occlusion_factor: 1.0  # 1.0 = норма (для сценариев инсульта)
-  fluid_intake_rate: 0.02
+  fluid_intake_rate: 0.015
   insensible_loss_rate: 0.0
 
 simulation:

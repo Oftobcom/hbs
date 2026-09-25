@@ -9,7 +9,7 @@ model = WholeBodyModel(heart_params={'R_vsd': 5.0})
 
 # Симулируем с увеличенным fluid_intake
 # model.fluid_intake_rate = 2.0  # мл/с, инфузия
-model.fluid_intake_rate = 0.018
+model.fluid_intake_rate = 0.015
 y0 = model.calibrate_initial_state(t_calib=800.0)
 sol = model.simulate((0, 600), y0=y0, method='LSODA',
                      max_step=0.1, t_eval=np.linspace(0, 600, 3000))
@@ -31,7 +31,7 @@ for tc in [0, 100, 200, 400, 600]:
 # двойного эффекта «некалиброванный старт + отток».
 model = WholeBodyModel(
     heart_params={'R_vsd': 5.0},
-    fluid_intake_rate=0.018,
+    fluid_intake_rate=0.01,
     # insensible_loss_rate пока НЕ передаём — оставляем дефолт 0
 )
 y0 = model.calibrate_initial_state(t_calib=800.0)

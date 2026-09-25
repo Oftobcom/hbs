@@ -199,7 +199,7 @@ class WholeBodyModel:
         SYS_VEN_FRACTION=0.58,
         C_sys_ven_eff=550.0,
         tau_target=200.0,
-        fluid_intake_rate=0.018,
+        fluid_intake_rate=0.015,
         insensible_loss_rate=0.0,
         peripheral_params=None,
         jugular_params=None,

@@ -97,7 +97,7 @@ def build_model(theta: dict, target_MAP: Optional[float]=None, target_CO: Option
         P_sv0=sys_cfg.get("P_sv0",12.0), P_pv0=sys_cfg.get("P_pv0",12.0),
         SYS_VEN_FRACTION=sys_cfg.get("SYS_VEN_FRACTION",0.58),
         tau_target=sys_cfg.get("tau_target",300.0),
-        fluid_intake_rate=sys_cfg.get("fluid_intake_rate",0.015),
+        fluid_intake_rate=sys_cfg.get("fluid_intake_rate",0.01),
         insensible_loss_rate=sys_cfg.get("insensible_loss_rate",0.0),
     )
 

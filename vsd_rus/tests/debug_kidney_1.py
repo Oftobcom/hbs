@@ -266,7 +266,7 @@ def test_volume_equilibrium():
     print("TEST 7: Равновесие объёма — P_eq, где intake = urine")
     print("=" * 78)
     k = make_kidney()
-    intake = SYS_CFG.get("fluid_intake_rate", 0.02)
+    intake = SYS_CFG.get("fluid_intake_rate", 0.015)
     ins = SYS_CFG.get("insensible_loss_rate", 0.0)
     target = intake - ins
     print(f"  intake={intake} мл/с, insensible={ins} мл/с, "
