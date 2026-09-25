@@ -32,12 +32,30 @@ class Lungs2Chamber(OrganModel):
     Произведение почти не меняется — лёгкие стабилизируют PVR.
     """
 
+    # --- Санити-пороги для валидации конфигурации ---
+    _K_FLOW_MIN = 1.0
+    _K_FLOW_MAX = 100.0
+    _R_MIN = 1e-3
+    _R_MAX = 10.0
+    _C_MIN = 0.1
+    _C_MAX = 100.0
+    _Q_NORM_MIN = 1.0
+    _Q_NORM_MAX = 500.0
+    _P50_MIN = 1.0
+    _P50_MAX = 100.0
+    _TAU_REMODEL_MIN = 1.0
+    _TAU_REMODEL_MAX = 1e5
+    _R_REMODEL_MAX_MIN = 1.0
+    _R_REMODEL_MAX_LIMIT = 20.0
+
     def __init__(self,
                  R1=0.06, R2=0.04,
                  C1=4.0, C2=8.0,
                  # --- Быстрая вазоконстрикция от потока ---
                  flow_dependent_resistance=False,
                  flow_sensitivity=0.15,
+                 Q_norm: float = 80.0,
+                 k_flow: float = 15.0,
                  # --- Passive recruitment / distension ---
                  recruitment_enabled=True,
                  P_recruit_50=20.0,        # мм рт. ст., давление полу-рекруитмента
@@ -50,27 +68,122 @@ class Lungs2Chamber(OrganModel):
                  R_remodel_max=5.0,
                  tau_remodel=200.0):       # с, время выхода на R_target
 
-        self.R1_base = R1
-        self.R2_base = R2
-        self.C1 = C1
-        self.C2 = C2
+        # =================================================================
+        # Валидация конфигурации — fail-fast при инициализации.
+        # Эти параметры приходят из YAML и не меняются во время симуляции;
+        # ошибки в них должны ловиться один раз, а не в горячем пути RHS.
+        # =================================================================
 
-        self.flow_dependent_resistance = flow_dependent_resistance
-        self.flow_sensitivity = flow_sensitivity
+        def _check_range(name, v, lo, hi, typical=""):
+            v = float(v)
+            if not np.isfinite(v) or not (lo <= v <= hi):
+                raise ValueError(
+                    f"Lungs2Chamber: {name}={v} вне [{lo}, {hi}]. {typical}"
+                )
+            return v
 
+        # --- k_flow (крутизна виртуального клапана) ---
+        # Нижняя граница: δ=1/k_flow ≤ 1 мм рт.ст. — сглаживание не шире шкалы.
+        # Верхняя граница: при k>100 профиль становится почти разрывным, LSODA
+        # начинает тратить шаги на «дребезг» около dP=0.
+        self.k_flow = _check_range(
+            "k_flow", k_flow, self._K_FLOW_MIN, self._K_FLOW_MAX,
+            "типично 9–15 (ширина виртуального клапана ~1/k_flow мм рт.ст.). "
+            "k_flow → 0 даёт нефизичную утечку v(0)=δ/(2R); "
+            "k_flow > 100 делает клапан численно жёстким."
+        )
+
+        # --- Базовые сопротивления ---
+        self.R1_base = _check_range(
+            "R1", R1, self._R_MIN, self._R_MAX,
+            "типично 0.02–0.10 мм рт.ст.·с/мл; проверьте единицы."
+        )
+        self.R2_base = _check_range(
+            "R2", R2, self._R_MIN, self._R_MAX,
+            "типично 0.02–0.10 мм рт.ст.·с/мл; проверьте единицы."
+        )
+
+        # --- Комплаенсы ---
+        self.C1 = _check_range(
+            "C1", C1, self._C_MIN, self._C_MAX,
+            "типично 2–20 мл/мм рт.ст.; проверьте единицы."
+        )
+        self.C2 = _check_range(
+            "C2", C2, self._C_MIN, self._C_MAX,
+            "типично 2–20 мл/мм рт.ст.; проверьте единицы."
+        )
+
+        # --- Flow-зависимая вазоконстрикция ---
+        self.flow_dependent_resistance = bool(flow_dependent_resistance)
+        self.flow_sensitivity = float(flow_sensitivity)
+        if self.flow_sensitivity < 0.0:
+            raise ValueError(
+                f"Lungs2Chamber: flow_sensitivity={flow_sensitivity} должно быть ≥ 0."
+            )
+
+        self.Q_norm = _check_range(
+            "Q_norm", Q_norm, self._Q_NORM_MIN, self._Q_NORM_MAX,
+            "типично 80, согласовано с target_CO в systemic."
+        )
+
+        # --- Passive recruitment ---
         self.recruitment_enabled = bool(recruitment_enabled)
-        self.P_recruit_50 = float(P_recruit_50)
-        self.n_recruit = float(n_recruit)
-        self.f_recruit_min = float(np.clip(f_recruit_min, 0.1, 1.0))
 
-        self.pressure_remodel = pressure_remodel
-        self.P_pa_threshold = P_pa_threshold
-        self.pressure_sensitivity = pressure_sensitivity
-        self.R_remodel_max = R_remodel_max
-        self.tau_remodel = tau_remodel
+        self.P_recruit_50 = _check_range(
+            "P_recruit_50", P_recruit_50, self._P50_MIN, self._P50_MAX,
+            "типично 20 мм рт.ст. — давление полу-рекруитмента."
+        )
+
+        n_rec = float(n_recruit)
+        if not np.isfinite(n_rec) or n_rec <= 0.0:
+            raise ValueError(
+                f"Lungs2Chamber: n_recruit={n_recruit} должно быть > 0 (типично 3)."
+            )
+        self.n_recruit = n_rec
+
+        fmin = float(f_recruit_min)
+        if not np.isfinite(fmin) or not (0.0 < fmin < 1.0):
+            raise ValueError(
+                f"Lungs2Chamber: f_recruit_min={f_recruit_min} вне (0, 1). "
+                f"Типично 0.55 (максимальный рекруитмент — 55% от базового R)."
+            )
+        self.f_recruit_min = fmin
+
+        # --- Структурное ремоделирование ---
+        self.pressure_remodel = bool(pressure_remodel)
+
+        pthr = float(P_pa_threshold)
+        if not np.isfinite(pthr):
+            raise ValueError(
+                f"Lungs2Chamber: P_pa_threshold={P_pa_threshold} не конечно."
+            )
+        self.P_pa_threshold = pthr
+
+        ps = float(pressure_sensitivity)
+        if not np.isfinite(ps) or ps < 0.0:
+            raise ValueError(
+                f"Lungs2Chamber: pressure_sensitivity={pressure_sensitivity} "
+                f"должно быть ≥ 0."
+            )
+        self.pressure_sensitivity = ps
+
+        self.R_remodel_max = _check_range(
+            "R_remodel_max", R_remodel_max,
+            self._R_REMODEL_MAX_MIN, self._R_REMODEL_MAX_LIMIT,
+            "типично 3–10 (кратное превышение нормы PVR)."
+        )
+
+        self.tau_remodel = _check_range(
+            "tau_remodel", tau_remodel,
+            self._TAU_REMODEL_MIN, self._TAU_REMODEL_MAX,
+            "типично 150–300 с."
+        )
 
         self._current_outputs = {}
 
+    # ------------------------------------------------------------------
+    # Обязательный интерфейс OrganModel
+    # ------------------------------------------------------------------
     def get_state_size(self):
         return 3   # [P_prox, P_dist, R_remodel]
 
@@ -93,14 +206,54 @@ class Lungs2Chamber(OrganModel):
         if not self.flow_dependent_resistance:
             return 1.0
 
-        Q_norm = 80.0
         Q = max(float(Q_pulm), 0.0)
-        if Q <= Q_norm:
+        if Q <= self.Q_norm:
             return 1.0
 
-        excess = (Q - Q_norm) / Q_norm
+        excess = (Q - self.Q_norm) / self.Q_norm
         f = 1.0 + self.flow_sensitivity * excess
         return float(np.clip(f, 1.0, 3.0))
+
+    # ------------------------------------------------------------------
+    # 1b. Гладкий односторонний поток (виртуальный клапан)
+    # ------------------------------------------------------------------
+    def _valve_flow(self, dP: float, R: float) -> float:
+        """
+        Гладкий односторонний клапан (сдвинутый smooth ReLU).
+
+            v(dP) = max( 0, (dP + sqrt(dP² + δ²) − δ) / (2R) )
+            где δ = 1/k_flow — ширина сглаживания.
+
+        Свойства:
+            dP = 0     →  v = 0              (клапан полностью закрыт, утечки нет)
+            dP >> δ    →  v ≈ dP/R − δ/(2R)  (ламинарный поток)
+            dP << −δ   →  v = 0              (обратного тока нет)
+
+        Гарантированно ≥ 0 при любом dP. Гладкая C¹ (излом производной
+        только в dP = 0). Монотонно не убывает.
+
+        Параметр δ вычитается, чтобы v(0) = 0. Без него v(0) = δ/(2R) > 0 —
+        постоянная «утечка» из P_dist в P_pv, которая при Q=0 и P_pv=0
+        уводит P_dist в глубокий минус. Именно этот дефект был в старой
+        версии и ловился в debug_lungs (TEST 9, TEST 11).
+
+        Численная защита:
+          • R клипуется к 1e-6 — от solver retries, не от ошибок конфига
+            (конфиг валидируется в __init__).
+          • R=NaN/Inf тоже отлавливается: max(NaN, 1e-6) в Python даёт NaN,
+            поэтому сначала проверяем np.isfinite.
+          • np.hypot(dP, δ) вместо sqrt(dP²+δ²) — не переполняется при
+            больших |dP|.
+        """
+        # Мягкий клип R в runtime (без exception)
+        if not np.isfinite(R):
+            R_safe = 1e-6
+        else:
+            R_safe = max(float(R), 1e-6)
+
+        delta = 1.0 / self.k_flow          # k_flow ≥ 1 (валидировано в __init__)
+        q_raw = (float(dP) + np.hypot(float(dP), delta) - delta) / (2.0 * R_safe)
+        return float(q_raw) if q_raw > 0.0 else 0.0
 
     # ------------------------------------------------------------------
     # 2. Пассивный recruitment + distension
@@ -159,8 +312,14 @@ class Lungs2Chamber(OrganModel):
     # ------------------------------------------------------------------
     def get_derivatives(self, t, state, inputs):
         P_prox, P_dist, R_remodel = state
+
+        # Мягкие клипы (защита от solver retries, не от ошибок конфига)
+        P_prox = max(float(P_prox), 0.0)
+        P_dist = max(float(P_dist), 0.0)
+        R_remodel = float(np.clip(R_remodel, 0.1, self.R_remodel_max))
+
         Q_pulm = inputs.get('Q_pulmonary', 0.0)
-        P_pv = inputs.get('P_pv', 5.0)
+        P_pv = max(float(inputs.get('P_pv', 5.0)), 0.0)
 
         # 1. Быстрый активный отклик на поток
         f_flow = self._flow_factor(Q_pulm)
@@ -177,12 +336,23 @@ class Lungs2Chamber(OrganModel):
         R1_eff = self.R1_base * f_recruit * f_flow * R_remodel
         R2_eff = self.R2_base * f_recruit * f_flow * R_remodel
 
-        # Защита от деления на почти-ноль (не должно случаться, но на всякий случай)
-        R1_safe = max(R1_eff, 1e-6)
-        R2_safe = max(R2_eff, 1e-6)
+        # Мягкий клип R в runtime без exception.
+        # R1_eff/R2_eff в норме лежат в [0.002, 0.32] — клип не срабатывает.
+        # NaN-проверка страхует от численных сбоев LSODA.
+        if not np.isfinite(R1_eff):
+            R1_safe = 1e-6
+        else:
+            R1_safe = max(float(R1_eff), 1e-6)
+        if not np.isfinite(R2_eff):
+            R2_safe = 1e-6
+        else:
+            R2_safe = max(float(R2_eff), 1e-6)
 
-        dP_prox = (Q_pulm - (P_prox - P_dist) / R1_safe) / self.C1
-        dP_dist = ((P_prox - P_dist) / R1_safe - (P_dist - P_pv) / R2_safe) / self.C2
+        Q_int = (P_prox - P_dist) / R1_safe                          # внутри лёгких — без клапана
+        Q_out = self._valve_flow(P_dist - P_pv, R2_safe)             # односторонний к P_pv
+
+        dP_prox = (Q_pulm - Q_int) / self.C1
+        dP_dist = (Q_int - Q_out) / self.C2
 
         # Диагностика
         self._current_outputs = {
@@ -192,7 +362,9 @@ class Lungs2Chamber(OrganModel):
             'R2_eff': float(R2_eff),
             'R_remodel': float(R_remodel),
             'flow_factor': float(f_flow),
-            'recruit_factor': float(f_recruit),   # <-- новый диагностический выход
+            'recruit_factor': float(f_recruit),
+            'Q_int': float(Q_int),
+            'Q_out': float(Q_out),
         }
         return np.array([dP_prox, dP_dist, dR_remodel])
 

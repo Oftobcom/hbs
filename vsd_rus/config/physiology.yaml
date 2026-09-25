@@ -37,8 +37,8 @@ heart:
   R_aortic: 0.10
   R_tricuspid: 0.03
   R_pulmonary: 0.05
-  R_venous_sys:  0.08   # системный венозный возврат (SVC/IVC → RA)
-  R_venous_pulm: 0.03   # пульмональный (PV → LA), низкорезистивный
+  R_venous_sys:  0.05   # системный венозный возврат (SVC/IVC → RA)
+  R_venous_pulm: 0.02   # пульмональный (PV → LA), низкорезистивный
 
   # --- Клапанная кинетика ---
   k_valve: 9.0
@@ -50,7 +50,8 @@ lungs:
   C2: 8.0
   flow_dependent_resistance: true
   flow_sensitivity: 0.15
-  # --- НОВЫЕ параметры recruitment (если уже в lungs.py) ---
+  Q_norm: 80.0
+  k_flow: 9.0
   recruitment_enabled: true
   P_recruit_50: 20.0
   n_recruit: 3.0
@@ -65,9 +66,9 @@ lungs:
 baroreflex:
   P_set: 80.0
   HR_base: 70.0
-  gain: 0.002
+  gain: 0.015
   tau: 2.0
-  k_inotropy: 0.5
+  k_inotropy: 1.5
 
 blood:
   V0: 5800.0
@@ -86,19 +87,20 @@ peripheral:
   C_tissue: 8.0
   P_tissue0: 15.0
   O2_norm: 0.15
-  k_O2_autoreg: 0.5
-  R_min_factor: 0.75
+  k_O2_autoreg: 1.0
+  R_min_factor: 0.45
   tau_autoreg: 3.0
   k_P_myogenic: 0.002
   P_sa_norm: 90.0
   R_max_factor: 2.5
   P_myogenic_deadband: 10.0
   VO2_base: 1.5
+  VO2_basal_frac: 0.05
   V_tissue_eff: 400.0
   C_a_O2_norm: 0.20
   C_O2_lactate_threshold: 0.08
   k_lactate_prod: 0.05
-  k_lactate_clear: 0.0
+  k_lactate_clear: 0.02
   k_lactate_release: 0.05
   C_lactate0: 0.10
   C_O2_local0: 0.10
@@ -115,6 +117,11 @@ liver:
   bilirubin_clearance_base: 0.2
   ammonia_clearance_base: 0.15
   lactate_clearance_base: 0.05
+  k_uptake_bil: 0.1
+  k_uptake_amm: 0.1
+  k_deg_alb: 0.01
+  k_release_alb: 0.05
+  k_lac_clear: 2.0
 
 kidney:
   GFR_base: 120.0
@@ -123,7 +130,7 @@ kidney:
   autoreg_slope: 0.025
   toxin_clearance_frac: 0.2
   volume_reabsorption_frac: 0.99
-  renal_resistance: 3.75
+  RBF_target: 20.0
 
 brain:
   R_base: 7.0
@@ -143,7 +150,7 @@ brain:
   RQ: 0.85
   C_O2_critical: 0.08
   # Лактат
-  C_lac_norm: 0.8
+  C_lac_norm: 0.15
   k_lac_prod: 0.08
   k_lac_clear: 0.02
   k_lac_release: 0.03
@@ -190,7 +197,7 @@ systemic:
   VO2_rest: 1.9          # мл/с — сердце + печень + почки + ЖКТ
   RQ: 0.8                # дыхательный коэффициент
   occlusion_factor: 1.0  # 1.0 = норма (для сценариев инсульта)
-  fluid_intake_rate: 0.018
+  fluid_intake_rate: 0.02
   insensible_loss_rate: 0.0
 
 simulation:

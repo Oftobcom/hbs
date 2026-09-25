@@ -15,7 +15,14 @@ class Liver(OrganModel):
                  bilirubin_clearance_base=0.2,
                  ammonia_clearance_base=0.15,
                  lactate_clearance_base=0.05,
-                 C_bilirubin0=0.0, C_ammonia0=0.0, C_albumin0=1.0):
+                 C_bilirubin0=0.0, C_ammonia0=0.0, C_albumin0=1.0,
+                 # --- Коэффициенты кинетики (были захардкожены в get_derivatives) ---
+                k_uptake_bil: float = 0.1,      # 1/с — скорость поглощения билирубина печенью
+                k_uptake_amm: float = 0.1,      # 1/с — скорость поглощения аммиака
+                k_deg_alb:    float = 0.01,     # 1/с — деградация альбумина в печени
+                k_release_alb: float = 0.05,    # 1/с — высвобождение альбумина в кровь
+                k_lac_clear:  float = 2.0      # безразмерный множитель в клиренсе лактата
+                ):
         self.R_ha = R_ha
         self.R_pv_base = R_pv_base
         self.R_hv_base = R_hv_base
@@ -31,6 +38,12 @@ class Liver(OrganModel):
         self.C_bilirubin0 = C_bilirubin0
         self.C_ammonia0 = C_ammonia0
         self.C_albumin0 = C_albumin0
+
+        self.k_uptake_bil  = k_uptake_bil
+        self.k_uptake_amm  = k_uptake_amm
+        self.k_deg_alb     = k_deg_alb
+        self.k_release_alb = k_release_alb
+        self.k_lac_clear   = k_lac_clear
 
         self._current_outputs = {}
 
@@ -57,7 +70,7 @@ class Liver(OrganModel):
         P_sv = inputs['P_sv']
         C_bil_blood = inputs.get('C_bilirubin_blood', 0.0)
         C_amm_blood = inputs.get('C_ammonia_blood', 0.0)
-        C_alb_blood = inputs.get('C_albumin_blood', 1.0)
+        C_alb_blood = inputs.get('C_albumin_blood', 4.5)
         C_lac_blood = inputs.get('C_lactate_blood', 0.10)
         V_blood = inputs.get('V_blood', 5000.0)
 
@@ -73,23 +86,23 @@ class Liver(OrganModel):
         dP_portal = (Q_gut_out - Q_pv) / self.C_portal # <-- Windkessel портальной вены
 
         # Метаболизм
-        uptake_bil = 0.1 * (C_bil_blood - C_bil)
+        uptake_bil = self.k_uptake_bil * (C_bil_blood - C_bil)
         clearance_bil = self.bilirubin_clearance_base * C_bil
         dC_bil = uptake_bil - clearance_bil
 
-        uptake_amm = 0.1 * (C_amm_blood - C_amm)
+        uptake_amm = self.k_uptake_amm * (C_amm_blood - C_amm)
         clearance_amm = self.ammonia_clearance_base * C_amm
         dC_amm = uptake_amm - clearance_amm
 
         synthesis_alb = self.albumin_prod_base
-        degradation_alb = 0.01 * C_alb
-        release_alb = 0.05 * (C_alb - C_alb_blood)
+        degradation_alb = self.k_deg_alb * C_alb
+        release_alb = self.k_release_alb * (C_alb - C_alb_blood)
         dC_alb = synthesis_alb - degradation_alb - release_alb
 
-        dC_bil_blood = -clearance_bil / V_blood
-        dC_amm_blood = -clearance_amm / V_blood
+        dC_bil_blood = -uptake_bil / V_blood
+        dC_amm_blood = -uptake_amm / V_blood
         dC_alb_blood = +release_alb / V_blood
-        dC_lac_blood = -Q_ha / max(V_blood, 1e-6) * C_lac_blood * self.lactate_clearance_base * 2.0
+        dC_lac_blood = -Q_ha / max(V_blood, 1e-6) * C_lac_blood * self.lactate_clearance_base * self.k_lac_clear
 
         self._current_outputs = {
             'Q_liver_out': Q_out,

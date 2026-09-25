@@ -96,12 +96,43 @@ class GasExchange(OrganModel):
         return float(C_per_dl / 100.0)
 
     def _P_O2_from_C(self, C_O2: float) -> float:
-        """Обратная кривая Хилла: C_O2 (мл/мл) -> P_O2 (мм рт. ст.)."""
+        """
+        Обратная кривая Хилла: C_O2 (мл/мл) -> P_O2 (мм рт. ст.).
+
+        Учитывает ОБА слагаемых в C = 1.34·Hb·SaO2/100 + α·P/100:
+        аналитически не решается, используем Newton.
+
+        Старая версия игнорировала растворённый O2, что давало
+        P=100 → C=0.199 → P_back=134 (ошибка 34%).
+        """
         C_max = 1.34 * self.Hb / 100.0        # макс. связанный O2, мл/мл
-        C = float(np.clip(C_O2, 1e-4, 0.999 * C_max))
-        SaO2 = C / C_max
-        SaO2 = float(np.clip(SaO2, 1e-6, 1.0 - 1e-6))
-        return float(self.P50 * (SaO2 / (1.0 - SaO2)) ** (1.0 / self.n_hill))
+        # Верхняя граница = bound + растворённый O2 (при разумном P_max=500)
+        C_max_eff = C_max + self.alpha_O2 * 500.0 / 100.0
+        C = float(np.clip(C_O2, 1e-6, 0.999 * C_max_eff))
+
+        P50n = self.P50 ** self.n_hill
+        n = self.n_hill
+        alpha_per_dl = self.alpha_O2          # мл/(дл·мм рт. ст.)
+
+        # Начальное приближение — из старой формулы (без растворённого O2)
+        Sa0 = float(np.clip(C / C_max, 1e-6, 1.0 - 1e-6))
+        P = self.P50 * (Sa0 / (1.0 - Sa0)) ** (1.0 / n)
+        P = max(P, 1.0)
+
+        for _ in range(20):
+            Pn = P ** n
+            SaO2 = Pn / (P50n + Pn + 1e-12)
+            C_calc = (1.34 * self.Hb * SaO2 + alpha_per_dl * P) / 100.0
+            # dC/dP
+            dSa_dP = n * P50n * (P ** (n - 1)) / (P50n + Pn) ** 2
+            dC_dP = (1.34 * self.Hb * dSa_dP + alpha_per_dl) / 100.0
+            dP = (C_calc - C) / max(dC_dP, 1e-12)
+            P = P - dP
+            if abs(dP) < 1e-6 * max(P, 1.0):
+                break
+            P = max(P, 1e-6)
+
+        return float(P)
 
     def _C_CO2_from_P(self, P_CO2: float) -> float:
         """Линейная кривая CO2: C = offset + slope · P."""
@@ -166,9 +197,14 @@ class GasExchange(OrganModel):
         P_v_CO2 = self._P_CO2_from_C(C_v_CO2)
 
         # === 7. Диагностические выходы ===
-        # Артериальная сатурация — из C_a_O2 через обратную кривую Хилла
-        P_a_O2 = self._P_O2_from_C(C_a_O2)
-        SaO2   = self._SaO2_from_P(P_a_O2)
+        # При отсутствии R→L шунта C_a_O2 = C_pv_O2 → P_a_O2 = P_alv_O2
+        # (равновесие с альвеолой, а не численная инверсия).
+        # При наличии R→L — решаем обратную задачу из смешанного C_a_O2.
+        if Q_shunt >= 0:
+            P_a_O2 = float(self.P_alv_O2)
+        else:
+            P_a_O2 = self._P_O2_from_C(C_a_O2)
+        SaO2 = self._SaO2_from_P(P_a_O2)
 
         # Доля право-левого шунта в системном выбросе
         shunt_fraction_R2L = max(-Q_shunt, 0.0) / Q_s

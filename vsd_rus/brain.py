@@ -21,7 +21,7 @@ class Brain(OrganModel):
                 V_tissue=150.0, RQ=0.85,
                 C_O2_critical=0.08,
                 # Лактат
-                C_lac_norm=0.8, k_lac_prod=0.08, k_lac_clear=0.02, k_lac_release=0.03,
+                C_lac_norm=0.15, k_lac_prod=0.08, k_lac_clear=0.02, k_lac_release=0.03,
                 # Аммиак BBB
                 C_amm_norm=0.3, k_amm_bbb_in=0.02, k_amm_bbb_out=0.01, k_amm_detox=0.01,
                 k_amm_inhibition=0.15):
@@ -93,7 +93,7 @@ class Brain(OrganModel):
         P_sv = float(inputs.get('P_sv', 5.0))
         C_a_O2 = float(inputs.get('C_a_O2', self.C_a_O2_norm))
         C_a_CO2 = float(inputs.get('C_a_CO2', self.C_a_CO2_norm))
-        C_a_lac = float(inputs.get('C_lactate_blood', inputs.get('C_a_lactate', 0.8)))
+        C_a_lac = float(inputs.get('C_lactate_blood', inputs.get('C_a_lactate', 0.1)))
         C_a_amm = float(inputs.get('C_ammonia', inputs.get('C_a_ammonia', self.C_amm_norm)))
         V_blood = float(inputs.get('V_blood', 5800.0))
         V_blood = max(V_blood, 1e-6)
@@ -135,9 +135,19 @@ class Brain(OrganModel):
         dC_O2 = (Q_br * (C_a_O2 - C_O2_tis) - O2_cons_eff) / self.V_tissue
         dC_CO2 = (Q_br * (C_a_CO2 - C_CO2_tis) + CO2_prod) / self.V_tissue
 
-        # лактат — анаэробный при гипоксии
+        # лактат — базальная продукция + анаэробная надбавка при гипоксии
         hypoxia_sev = max(self.C_O2_critical - C_O2_tis, 0.0) / self.C_O2_critical
-        lac_prod = self.k_lac_prod * hypoxia_sev * (1.0 + 0.5*max(C_amm_tis - self.C_amm_norm,0.0))
+        amm_excess = max(C_amm_tis - self.C_amm_norm, 0.0)
+
+        # Базальная продукция подобрана так, чтобы при нормоксии
+        # (hypoxia_sev=0) держать dC_lac = 0 при C_lac = C_lac_norm.
+        # Компенсирует И клиренс, И релиз в кровь.
+        lac_prod_base = (
+            self.k_lac_clear * self.C_lac_norm
+            + self.k_lac_release * max(self.C_lac_norm - C_a_lac, 0.0)
+        )
+        lac_prod_hypoxic = self.k_lac_prod * hypoxia_sev * (1.0 + 0.5 * amm_excess)
+        lac_prod = lac_prod_base + lac_prod_hypoxic
         lac_clear = self.k_lac_clear * C_lac_tis
         lac_release = self.k_lac_release * max(C_lac_tis - C_a_lac, 0.0)
         dC_lac = lac_prod - lac_clear - lac_release
