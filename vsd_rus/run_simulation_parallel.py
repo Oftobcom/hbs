@@ -66,7 +66,7 @@ def simulate_scenario(vsd_resistance,
     blood_params = {'initial_concentrations': initial_conc, 'V0': 5800.0}
 
     if HR_base is None:
-        HR_base = 75 if vsd_resistance != np.inf else 70
+        HR_base = 72 if vsd_resistance != np.inf else 70
     heart_params = {
         'hr': HR_base,
         'R_vsd': vsd_resistance,
@@ -104,7 +104,13 @@ def simulate_scenario(vsd_resistance,
     y0 = model.calibrate_initial_state(t_calib=t_calib_eff)
 
     out0 = model.compute_outputs(0.0, y0)
-    print(f"  [PID {os.getpid()}] [{label}] CHECK P_sa={out0['P_sa']:.1f} P_sv={out0['P_sv']:.1f} HR={out0['HR']:.1f} V_blood={out0['V_blood']:.0f}", flush=True)
+    Qp = out0['Q_pulmonary']
+    Qs = out0['Q_aortic']
+    Qp_Qs = Qp / max(Qs, 1e-6)
+    print(f"  [PID {os.getpid()}] [{label}] CHECK P_sa={out0['P_sa']:.1f} P_pa={out0['P_pa']:.1f} "
+        f"P_sv={out0['P_sv']:.1f} HR={out0['HR']:.1f} V_blood={out0['V_blood']:.0f} "
+        f"Qp={Qp:.1f} Qs={Qs:.1f} Qp/Qs={Qp_Qs:.2f} "
+        f"Q_vsd={out0['Q_vsd']:+.1f} SaO2={out0['SaO2']*100:.1f}%")
 
     n_pts = N_EVAL
     t_eval = np.linspace(t_span[0], t_span[1], n_pts)
