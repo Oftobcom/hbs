@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ml/stage1_identifiability.py — v7 (объединённая версия)
+ml/stage1_identifiability.py
 
 Stage 1: анализ идентифицируемости 8 параметров WholeBodyModel
 по 7 наблюдаемым выходам (ЭхоКГ-подобным).
@@ -16,26 +16,29 @@ Stage 1: анализ идентифицируемости 8 параметро�
     5      — фиксируем ещё один (Fallback A)
     6_alt  — заменяем C_sys_art на k_inotropy (Fallback B)
 
-Объединяет сильные стороны двух предыдущих версий:
-    ✓ корректный вызов select_final_theta(..., sim_cfg=...) в main()
-    ✓ реальный Fallback B (пересчёт J на 9 столбцах с k_inotropy)
-    ✓ compute_jacobian поддерживает param_names / scales_override
-    ✓ НЕ мутирует глобальный PARAM_SCALES (локальные копии)
-    ✓ физиологические sanity-чеки в get_steady_outputs
-    ✓ быстрый Stage 1 (t_end≈1200, t_calib≈300) поверх солвера из YAML
+Уровни логирования:
+    verbose=0 — silent
+    verbose=1 — базовые принты: solver stats, stationarity, X0 (default)
+    verbose=2 — детально: per-param J-матрицы, CONVERGENCE WINDOWS, полный Vt
+
+Все принты дублируются в results/stage1_verbose.log (Tee-логгер).
 
 Запуск:
-    python -m ml.stage1_identifiability
-    python ml/stage1_identifiability.py debug     # диагностика базовой точки
+    python -m ml.stage1_identifiability              # verbose=1
+    python -m ml.stage1_identifiability -v 2         # verbose=2
+    python -m ml.stage1_identifiability -v 0         # тихо
+    python ml/stage1_identifiability.py debug        # диагностика (backward-compat)
 """
 
 from __future__ import annotations
 
 import sys
+import argparse
 import warnings
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -44,7 +47,6 @@ import matplotlib.pyplot as plt
 
 warnings.filterwarnings("ignore")
 
-# --- Корень проекта (там, где whole_body.py) ---
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -107,6 +109,25 @@ PARAM_SCALES_ALT = {**PARAM_SCALES, "k_inotropy": 0.5}
 THETA0_ALT = {**THETA0, "k_inotropy": 0.5}
 
 X_NAMES = ["P_sa", "P_pa", "Q_aortic", "Qp_Qs", "EDV_LV", "EDV_RV", "HR"]
+
+
+# =============================================================================
+# Tee-логгер: дублирование вывода в консоль и в файл
+# =============================================================================
+
+class Tee:
+    """Перенаправляет вывод одновременно в несколько потоков."""
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+            s.flush()
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
 
 
 def d_vsd_to_R_vsd(d_mm: float) -> float:
@@ -208,9 +229,7 @@ def resolve_R_sys(theta: dict) -> float:
 # =============================================================================
 
 def _stage1_sim_cfg(sim_cfg: Optional[dict]) -> dict:
-    """
-    Солвер (method, rtol, atol, max_step) берётся из YAML, если задан.
-    """
+    """Солвер (method, rtol, atol, max_step) берётся из YAML, если задан."""
     out = {
         "method": "LSODA",
         "rtol": 1e-4,
@@ -230,7 +249,6 @@ def _stage1_sim_cfg(sim_cfg: Optional[dict]) -> dict:
     out["atol"] = float(sim_cfg.get("atol", out["atol"]))
     out["max_step"] = float(sim_cfg.get("max_step", out["max_step"]))
 
-    # t_span в YAML может быть длиннее — обрезаем для Stage 1
     t_span = sim_cfg.get("t_span")
     if isinstance(t_span, (list, tuple)) and len(t_span) >= 2:
         out["t_end"] = min(float(t_span[1]), 1200.0)
@@ -260,16 +278,59 @@ def _collect_outputs(model, sol) -> dict:
     return data
 
 
+def _print_window_diagnostics(data: dict, label: str = "WINDOW") -> None:
+    """
+    Печатает 28 диагностических ключей за последние 10 кардиоциклов.
+
+    Единственный инструмент, который явно показывает баланс
+    Q_ven_in / Q_peripheral / Q_aortic — именно здесь ловится расхождение
+    между венозным возвратом и артериальным оттоком.
+    """
+    try:
+        t = data["t"]
+        hr_tail = data["HR"][t > 300] if np.any(t > 300) else data["HR"]
+        mean_hr = max(float(np.mean(hr_tail)), 1.0)
+        win = t > (t[-1] - 10.0 * 60.0 / mean_hr)
+
+        keys_diag = [
+            "P_sa", "P_pa", "P_sv", "P_pv", "P_la", "P_ra",
+            "V_la", "V_lv", "V_ra", "V_rv",
+            "V_sv", "V_sv_target", "V_sv_fraction", "V_blood",
+            "Q_aortic", "Q_pulmonary", "Q_sv_to_ra", "Q_pv_to_la",
+            "Q_peripheral", "Q_ven_in",
+            "R_eff_peripheral", "f_P_myogenic", "f_O2_autoreg",
+            "HR", "GFR", "Q_brain", "Q_liver_out", "Q_renal",
+        ]
+        print(f"\n--- {label} DIAG (last 10 cycles) ---")
+        for k in keys_diag:
+            if k in data:
+                arr = data[k][win]
+                print(f"  {k:22s} mean={np.mean(arr):8.3f} std={np.std(arr):6.3f} "
+                      f"min={np.min(arr):7.2f} max={np.max(arr):7.2f} "
+                      f"last={arr[-1]:7.2f}")
+        if "Q_ven_in" in data and "Q_peripheral" in data:
+            print(f"  BALANCE Q_ven_in={np.mean(data['Q_ven_in'][win]):.2f} "
+                  f"Q_periph={np.mean(data['Q_peripheral'][win]):.2f} "
+                  f"Qa={np.mean(data['Q_aortic'][win]):.2f}")
+    except Exception as e:
+        print(f"  [diag warn] {e}")
+
+
 def get_steady_outputs(model,
                        sim_cfg: Optional[dict] = None,
-                       verbose: bool = False) -> Optional[dict]:
+                       verbose: int = 0) -> Optional[dict]:
     """
     Калибровка → интегрирование → проверка стационара → усреднение
     за последние 10 кардиоциклов.
 
-    Возвращает словарь {P_sa, P_pa, Q_aortic, Qp_Qs, EDV_LV, EDV_RV, HR}
-    или None, если решение не сошлось / нефизиологично.
+    verbose=0 — silent
+    verbose=1 — [CALIB], [solver], CONVERGENCE WINDOWS, [STATIONARITY], [X0 STEADY]
+    verbose=2 — дополнительно _print_window_diagnostics
+
+    Возвращает словарь {P_sa, P_pa, Q_aortic, Qp_Qs, EDV_LV, EDV_RV, HR,
+    _data} или None, если решение не сошлось / нефизиологично.
     """
+    verbose = int(verbose)
     cfg = _stage1_sim_cfg(sim_cfg)
     t_end = float(cfg["t_end"])
     n_samples = int(cfg["n_samples_t"])
@@ -278,6 +339,16 @@ def get_steady_outputs(model,
     method = str(cfg["method"])
 
     y0 = model.calibrate_initial_state(t_calib=t_calib)
+
+    if verbose >= 1:
+        try:
+            print(f"[CALIB] t_calib={t_calib:.1f}s "
+                  f"y0 heart={y0[model.idx['heart']]} "
+                  f"V_blood={y0[model.idx['blood']][0]:.1f} "
+                  f"P_sa0={y0[model.idx['sys_art']][0]:.2f}")
+        except Exception as e:
+            print(f"[CALIB] y0 diag fail {e}")
+
     t_eval = np.linspace(0.0, t_end, n_samples)
     try:
         sol = model.simulate(
@@ -288,12 +359,14 @@ def get_steady_outputs(model,
             max_step=float(cfg["max_step"]),
         )
     except Exception as e:
-        if verbose:
+        if verbose >= 1:
             print(f"  [warn] solver failed: {e}")
         return None
 
-    print(f"[solver, 1] nfev={sol.nfev} njev={getattr(sol,'njev',0)} "
-        f"nlu={getattr(sol,'nlu',0)} t={sol.t[-1]:.1f} y_last={sol.y[:4,-1]}")
+    if verbose >= 1:
+        print(f"[solver] nfev={sol.nfev} njev={getattr(sol,'njev',0)} "
+              f"t={sol.t[-1]:.1f} y_last heart={sol.y[:4,-1]} "
+              f"success={getattr(sol,'success',False)}")
 
     if not getattr(sol, "success", False) or sol.y.shape[1] < 2:
         return None
@@ -302,7 +375,24 @@ def get_steady_outputs(model,
 
     data = _collect_outputs(model, sol)
 
-    # --- Проверка стационарности: два окна по 10 циклов ---
+    # --- CONVERGENCE WINDOWS ---
+    if verbose >= 1:
+        print("\n--- CONVERGENCE WINDOWS ---")
+        for t_lo, t_hi in [(100, 300), (250, 350), (300, 400),
+                           (400, 600), (600, 800)]:
+            m = (data["t"] >= t_lo) & (data["t"] <= t_hi)
+            if not np.any(m):
+                continue
+            print(f"[{t_lo:4d}-{t_hi:4d}] "
+                  f"P_sa={data['P_sa'][m].mean():6.2f}±"
+                  f"{data['P_sa'][m].std():5.2f} "
+                  f"V_lv={data['V_lv'][m].mean():6.1f} "
+                  f"HR={data['HR'][m].mean():5.1f} "
+                  f"P_sv={data['P_sv'][m].mean():5.2f} "
+                  f"Q_periph={data['Q_peripheral'][m].mean():6.2f} "
+                  f"R_eff={data['R_eff_peripheral'][m].mean():5.3f}")
+
+    # --- Проверка стационарности ---
     tail_for_hr = data["t"] > t_start_stationary
     if not np.any(tail_for_hr):
         return None
@@ -323,9 +413,13 @@ def get_steady_outputs(model,
         return None
     rel_diff = abs(mean_late - mean_early) / mean_late
     stat_tol = float(cfg["stationary_rel_tol_stage1"])
+    if verbose >= 1:
+        print(f"[STATIONARITY] early={mean_early:.2f} late={mean_late:.2f} "
+              f"rel={rel_diff:.4f} tol={stat_tol}")
     if rel_diff > stat_tol:
-        if verbose:
-            print(f"  [warn] нестационарен: |ΔP_sa|/P_sa = {rel_diff:.4f} > {stat_tol}")
+        if verbose >= 1:
+            print(f"  [warn] нестационарен: |ΔP_sa|/P_sa = "
+                  f"{rel_diff:.4f} > {stat_tol}")
         return None
 
     # --- Усреднение за последние 10 циклов ---
@@ -342,16 +436,31 @@ def get_steady_outputs(model,
     X["EDV_LV"] = float(np.max(data["V_lv"][window]))
     X["EDV_RV"] = float(np.max(data["V_rv"][window]))
 
+    if verbose >= 1:
+        print(f"\n[X0 STEADY] P_sa={X['P_sa']:.2f} P_pa={X['P_pa']:.2f} "
+              f"Qa={mean_Qa:.2f} Qp={mean_Qp:.2f} Qp/Qs={X['Qp_Qs']:.3f} "
+              f"EDV_LV={X['EDV_LV']:.1f} EDV_RV={X['EDV_RV']:.1f} "
+              f"HR={X['HR']:.2f}")
+        print(f"            P_sv={np.mean(data['P_sv'][window]):.2f} "
+              f"P_pv={np.mean(data['P_pv'][window]):.2f} "
+              f"V_sv={np.mean(data['V_sv'][window]):.1f}/"
+              f"{np.mean(data['V_sv_target'][window]):.1f} "
+              f"Q_periph={np.mean(data['Q_peripheral'][window]):.2f} "
+              f"R_eff={np.mean(data['R_eff_peripheral'][window]):.3f}")
+
     # --- Физиологический sanity-check ---
     if not (40.0 < X["P_sa"] < 180.0
             and 5.0 < X["P_pa"] < 80.0
             and X["EDV_LV"] > 50.0
             and 0.0 < X["Qp_Qs"] < 20.0):
-        if verbose:
+        if verbose >= 1:
             print(f"  [warn] нефизиологично: P_sa={X['P_sa']:.1f}, "
                   f"P_pa={X['P_pa']:.1f}, Qp_Qs={X['Qp_Qs']:.2f}, "
                   f"EDV_LV={X['EDV_LV']:.0f}")
         return None
+
+    if verbose >= 2:
+        _print_window_diagnostics(data, label="STEADY 10 cycles")
 
     X["_data"] = data
     return X
@@ -364,16 +473,21 @@ def get_steady_outputs(model,
 def compute_jacobian(theta0: dict,
                      rel_step: float = 0.01,
                      sim_cfg: Optional[dict] = None,
-                     verbose: bool = True,
+                     verbose: int = 1,
                      param_names: Optional[list] = None,
                      scales_override: Optional[dict] = None,
                      ) -> tuple[np.ndarray, dict, dict]:
     """
     J_ij = (ΔX_i / X0_i) / (Δθ_j / scale_j).
 
-    Возвращает (J, X0_dict, theta0_resolved), где theta0_resolved
-    содержит уже разрешённый R_sys. Глобальный PARAM_SCALES НЕ мутируется.
+    verbose=0 — silent
+    verbose=1 — R_sys summary, X0 baseline, per-param `[ok]` (dX(P_sa), dX(Qp_Qs))
+    verbose=2 — THETA0 RESOLVED, per-param headers, per-X X0/Xp/Xm/dX/J
+
+    Возвращает (J, X0_dict, theta0_resolved). Глобальный PARAM_SCALES НЕ мутируется.
     """
+    verbose = int(verbose)
+
     if param_names is None:
         param_names = PARAM_NAMES
     scales = dict(scales_override) if scales_override is not None else dict(PARAM_SCALES)
@@ -383,7 +497,15 @@ def compute_jacobian(theta0: dict,
         theta0["R_sys"] = resolve_R_sys(theta0)
     scales["R_sys"] = float(theta0["R_sys"])
 
-    if verbose:
+    if verbose >= 2:
+        print("=" * 70 + "\n[Stage1] THETA0 RESOLVED")
+        for k in param_names:
+            print(f"  {k:18s} = {theta0.get(k)} scale={scales.get(k)}")
+        print(f"  R_sys resolved = {theta0['R_sys']:.4f} "
+              f"R_vsd(d_vsd={theta0['d_vsd']}mm) = "
+              f"{d_vsd_to_R_vsd(theta0['d_vsd']):.4f}")
+        print("=" * 70)
+    elif verbose >= 1:
         print(f"[Stage1] R_sys resolved = {theta0['R_sys']:.4f}")
         print(f"[Stage1] R_vsd(d_vsd={theta0['d_vsd']}мм) = "
               f"{d_vsd_to_R_vsd(theta0['d_vsd']):.4f}")
@@ -393,10 +515,10 @@ def compute_jacobian(theta0: dict,
     if X0 is None:
         raise RuntimeError("Базовая точка не вышла на стационар")
 
-    if verbose:
-        print("[Stage1] X0:")
+    if verbose >= 1:
+        print("\n[Stage1] X0 BASELINE:")
         for k in X_NAMES:
-            print(f"    {k:12s} = {X0[k]:.4f}")
+            print(f"    {k:12s} = {X0[k]:.6f}")
 
     n_x, n_p = len(X_NAMES), len(param_names)
     J = np.full((n_x, n_p), np.nan)
@@ -414,18 +536,30 @@ def compute_jacobian(theta0: dict,
         if p == "d_vsd":
             theta_minus[p] = max(theta_minus[p], 0.5)
 
-        Xp = get_steady_outputs(build_model(theta_plus), sim_cfg=sim_cfg, verbose=False)
-        Xm = get_steady_outputs(build_model(theta_minus), sim_cfg=sim_cfg, verbose=False)
+        if verbose >= 2:
+            print(f"\n--- J param {j} {p} scale={scale:.4g} "
+                  f"delta={delta:.4g} theta={theta0[p]:.4g} "
+                  f"-> plus={theta_plus[p]:.4g} minus={theta_minus[p]:.4g} ---")
+
+        # Perturbation points: silent внутри (verbose=0)
+        Xp = get_steady_outputs(build_model(theta_plus), sim_cfg=sim_cfg, verbose=0)
+        Xm = get_steady_outputs(build_model(theta_minus), sim_cfg=sim_cfg, verbose=0)
         if Xp is None or Xm is None:
-            if verbose:
-                print(f"  [warn] {p}: Xp={Xp is not None}, Xm={Xm is not None} → NaN")
+            if verbose >= 1:
+                print(f"  [warn] {p}: Xp={Xp is not None}, "
+                      f"Xm={Xm is not None} → NaN")
             continue
 
         for i, x in enumerate(X_NAMES):
             dX = (Xp[x] - Xm[x]) / (2.0 * delta)
             J[i, j] = dX * scale / max(abs(X0[x]), 1e-9)
 
-        if verbose:
+        if verbose >= 2:
+            for x in X_NAMES:
+                print(f"    dX {x:10s}: X0={X0[x]:8.3f} Xp={Xp[x]:8.3f} "
+                      f"Xm={Xm[x]:8.3f} dX={Xp[x] - Xm[x]:+8.3f} "
+                      f"J={J[X_NAMES.index(x), j]:+8.4f}")
+        elif verbose >= 1:
             print(f"  [ok] {p:18s} delta={delta:.4g}  "
                   f"dX(P_sa)={Xp['P_sa'] - X0['P_sa']:+.4g}  "
                   f"dX(Qp_Qs)={Xp['Qp_Qs'] - X0['Qp_Qs']:+.4g}")
@@ -437,11 +571,23 @@ def compute_jacobian(theta0: dict,
 # 4. SVD и выбор фиксируемых
 # =============================================================================
 
-def analyze_svd(J: np.ndarray, param_names: list, x_names: list) -> dict:
-    """SVD + число обусловленности + последний правый сингулярный вектор."""
+def analyze_svd(J: np.ndarray,
+                param_names: list,
+                x_names: list,
+                verbose: int = 0) -> dict:
+    """
+    SVD + число обусловленности + последний правый сингулярный вектор.
+
+    verbose=0 — только `[warn] NaN` (если есть)
+    verbose>=1 — полный print S, Vt matrix, contrib
+    """
+    verbose = int(verbose)
+
     if np.any(np.isnan(J)):
-        bad = [param_names[j] for j in range(J.shape[1]) if np.any(np.isnan(J[:, j]))]
+        bad = [param_names[j] for j in range(J.shape[1])
+               if np.any(np.isnan(J[:, j]))]
         print(f"[warn] NaN в J по {bad} → 0 для SVD")
+
     J_clean = np.nan_to_num(J, nan=0.0, posinf=0.0, neginf=0.0)
 
     U, S, Vt = np.linalg.svd(J_clean, full_matrices=False)
@@ -449,15 +595,30 @@ def analyze_svd(J: np.ndarray, param_names: list, x_names: list) -> dict:
     v_last = Vt[-1]
     contrib = pd.Series(np.abs(v_last), index=param_names).sort_values(ascending=False)
 
+    if verbose >= 1:
+        print("\n=== SVD FULL ===")
+        print(f"S = {S}\ncond = {cond:.4f} "
+              f"S_max={S[0]:.4f} S_min={S[-1]:.6f}")
+        print("Vt matrix:")
+        for i, row in enumerate(Vt):
+            print(f"  Vt[{i}] S={S[i]:.4f} : "
+                  f"{['%+.3f' % v for v in row]} -> {param_names}")
+        print("|Vt[-1]| contrib:")
+        for k, v in contrib.items():
+            print(f"  {k:18s} : {v:.6f}")
+
     return {"U": U, "S": S, "Vt": Vt, "cond": cond,
             "v_last": v_last, "contrib": contrib, "J_clean": J_clean}
 
 
-def _fix_and_cond(J: np.ndarray, param_names: list, to_fix: list):
+def _fix_and_cond(J: np.ndarray,
+                  param_names: list,
+                  to_fix: list,
+                  verbose: int = 0):
     """Возвращает (cond, v_last, keep_names, svd_res) для урезанной J."""
     keep_idx = [i for i, p in enumerate(param_names) if p not in to_fix]
     keep_names = [param_names[i] for i in keep_idx]
-    res = analyze_svd(J[:, keep_idx], keep_names, X_NAMES)
+    res = analyze_svd(J[:, keep_idx], keep_names, X_NAMES, verbose=verbose)
     return res["cond"], res["v_last"], keep_names, res
 
 
@@ -465,7 +626,12 @@ def _pick_to_fix_by_name(svd_res: dict, param_names: list, priority: list,
                          n_fix: int = 2,
                          thr_priority: float = 0.3,
                          thr_other: float = 0.4) -> list:
-    """Выбор ровно n_fix параметров для фиксации по приоритету и |Vt[-1]|."""
+    """
+    Выбор ровно n_fix параметров для фиксации по приоритету и |Vt[-1]|.
+
+    Если после приоритетных и `thr_other`-кандидатов набралось < n_fix,
+    добираем по убыванию |Vt[-1]|. Гарантирует ровно n_fix.
+    """
     contrib = svd_res["contrib"]
     to_fix = []
     for p in priority:
@@ -487,7 +653,7 @@ def _pick_to_fix_by_name(svd_res: dict, param_names: list, priority: list,
 
 def select_final_theta(J: np.ndarray,
                        param_names: list,
-                       verbose: bool = True,
+                       verbose=1,
                        sim_cfg: Optional[dict] = None) -> dict:
     """
     Логика 6 → 5 → 6_alt.
@@ -496,17 +662,21 @@ def select_final_theta(J: np.ndarray,
     Режим '5':     Fallback A — фиксируем ещё один.
     Режим '6_alt': Fallback B — реальный пересчёт J на 9 параметрах
                    (PARAM_NAMES_ALT) и замена C_sys_art на k_inotropy.
+
+    Возвращает dict {"mode", "theta_final", "to_fix", "cond",
+                     "v_last", "res", "res8"}.
     """
+    verbose_int = int(verbose)
     priority = ["V0_blood", "HR_base", "C_sys_art"]
 
     # --- Режим 6 ---
-    res8 = analyze_svd(J, param_names, X_NAMES)
-    if verbose:
+    res8 = analyze_svd(J, param_names, X_NAMES, verbose=verbose_int)
+    if verbose_int >= 1:
         print(f"\n[Stage1] cond_8 = {res8['cond']:.2f}")
 
     to_fix = _pick_to_fix_by_name(res8, param_names, priority, n_fix=2)
-    cond6, v6, keep6, res6 = _fix_and_cond(J, param_names, to_fix)
-    if verbose:
+    cond6, v6, keep6, res6 = _fix_and_cond(J, param_names, to_fix, verbose=0)
+    if verbose_int >= 1:
         print(f"[Stage1] режим 6: to_fix={to_fix}, cond={cond6:.3f}, "
               f"keep={keep6}")
     if cond6 < 100.0:
@@ -521,8 +691,8 @@ def select_final_theta(J: np.ndarray,
         extra = contrib6.index[0]
     to_fix2 = to_fix + ([extra] if extra is not None else [])
 
-    cond5, v5, keep5, res5 = _fix_and_cond(J, param_names, to_fix2)
-    if verbose:
+    cond5, v5, keep5, res5 = _fix_and_cond(J, param_names, to_fix2, verbose=0)
+    if verbose_int >= 1:
         print(f"[Stage1] Fallback A (5 параметров): to_fix={to_fix2}, "
               f"cond={cond5:.3f}")
     if cond5 < 100.0:
@@ -530,21 +700,23 @@ def select_final_theta(J: np.ndarray,
                 "cond": cond5, "v_last": v5, "res": res5, "res8": res8}
 
     # --- Fallback B (режим 6_alt): реальный пересчёт J на 9 столбцах ---
-    if verbose:
+    if verbose_int >= 1:
         print("[Stage1] Fallback B: пересчёт J с k_inotropy (9 столбцов)...")
 
     J_alt, _, _ = compute_jacobian(
         THETA0_ALT,
         rel_step=0.01,
         sim_cfg=sim_cfg,
-        verbose=False,
+        verbose=0,
         param_names=PARAM_NAMES_ALT,
         scales_override=PARAM_SCALES_ALT,
     )
     # Из 9 параметров фиксируем те же to_fix + C_sys_art (заменён на k_inotropy)
     to_fix_alt = list(to_fix) + ["C_sys_art"]
-    cond6a, v6a, keep6a, res6a = _fix_and_cond(J_alt, PARAM_NAMES_ALT, to_fix_alt)
-    if verbose:
+    cond6a, v6a, keep6a, res6a = _fix_and_cond(
+        J_alt, PARAM_NAMES_ALT, to_fix_alt, verbose=0
+    )
+    if verbose_int >= 1:
         print(f"[Stage1] режим 6_alt: to_fix={to_fix_alt}, "
               f"cond={cond6a:.3f}, keep={keep6a}")
 
@@ -558,6 +730,7 @@ def select_final_theta(J: np.ndarray,
 
 def plot_results(J: np.ndarray, svd_res: dict, param_names: list,
                  x_names: list, out_path: Path) -> None:
+    """2×2 dashboard: тепловая карта J, SVD-спектр, Vt[-1], текстовая сводка."""
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
     # (1) Тепловая карта J
@@ -618,13 +791,9 @@ def plot_results(J: np.ndarray, svd_res: dict, param_names: list,
 # 6. main
 # =============================================================================
 
-def main() -> None:
-    t_start = datetime.now()
-    print(f"[Stage1] Старт: {t_start:%Y-%m-%d %H:%M:%S}")
-
-    out_dir = ROOT / "results"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
+def _main_impl(verbose: int, out_dir: Path, t_start: datetime) -> None:
+    """Основная логика main(). Вызывается из main() внутри Tee-контекста."""
+    print(f"[Stage1] Старт: {t_start:%Y-%m-%d %H:%M:%S} | verbose={verbose}")
     print("=" * 70)
     print("Stage 1: анализ идентифицируемости WholeBodyModel")
     print("=" * 70)
@@ -636,7 +805,7 @@ def main() -> None:
 
     theta0 = dict(THETA0)
     J, X0, theta0_resolved = compute_jacobian(
-        theta0, rel_step=0.01, sim_cfg=sim_cfg, verbose=True
+        theta0, rel_step=0.01, sim_cfg=sim_cfg, verbose=verbose
     )
 
     df_J = pd.DataFrame(J, index=X_NAMES, columns=PARAM_NAMES)
@@ -644,7 +813,7 @@ def main() -> None:
     print(f"\n[Stage1] J сохранён: {out_dir / 'stage1_J.csv'}")
     print(df_J.round(3))
 
-    svd_res = analyze_svd(J, PARAM_NAMES, X_NAMES)
+    svd_res = analyze_svd(J, PARAM_NAMES, X_NAMES, verbose=verbose)
     print(f"\n[Stage1] cond_8 = {svd_res['cond']:.3f}")
     print("[Stage1] |Vt[-1]|:")
     for k, val in svd_res["contrib"].items():
@@ -653,8 +822,11 @@ def main() -> None:
     plot_results(J, svd_res, PARAM_NAMES, X_NAMES, out_dir / "stage1_SVD.png")
     print(f"[Stage1] График: {out_dir / 'stage1_SVD.png'}")
 
-    selection = select_final_theta(J, PARAM_NAMES, verbose=True, sim_cfg=sim_cfg)
+    selection = select_final_theta(
+        J, PARAM_NAMES, verbose=(1 if verbose >= 1 else 0), sim_cfg=sim_cfg
+    )
 
+    # --- Report ---
     lines = []
     lines.append("# STAGE 1 REPORT\n\n")
     lines.append("## Базовая точка θ₀\n")
@@ -699,11 +871,34 @@ def main() -> None:
 
     t_end_dt = datetime.now()
     print(f"\n[Stage1] Финиш: {t_end_dt:%Y-%m-%d %H:%M:%S}")
-    print(f"[Stage1] Длительность: {t_end_dt - t_start}") 
+    print(f"[Stage1] Длительность: {t_end_dt - t_start}")
 
 
-def debug_base_point() -> None:
+def main(verbose: int = 1) -> None:
+    """Обёртка main(): Tee-логгер в results/stage1_verbose.log."""
+    verbose = int(verbose)
+    t_start = datetime.now()
+    out_dir = ROOT / "results"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = out_dir / "stage1_verbose.log"
+
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        original_stdout = sys.stdout
+        sys.stdout = Tee(original_stdout, log_file)
+        try:
+            _main_impl(verbose, out_dir, t_start)
+            print(f"[Stage1] Полный лог: {log_path}")
+        finally:
+            sys.stdout = original_stdout
+
+
+# =============================================================================
+# debug_base_point
+# =============================================================================
+
+def debug_base_point(verbose: int = 1) -> None:
     """Проверка базовой точки: конвергенция, steady-state, один кардиоцикл."""
+    verbose = int(verbose)
     t_start = datetime.now()
     print("=" * 70)
     print(f"[Stage1 DEBUG] Старт: {t_start:%Y-%m-%d %H:%M:%S}")
@@ -735,7 +930,8 @@ def debug_base_point() -> None:
         rtol=1e-4, atol=1e-5, max_step=0.1,
     )
     print(f"[solver, 2] nfev={sol.nfev} njev={getattr(sol,'njev',0)} "
-      f"nlu={getattr(sol,'nlu',0)} t={sol.t[-1]:.1f} y_last={sol.y[:4,-1]}")
+          f"nlu={getattr(sol,'nlu',0)} t={sol.t[-1]:.1f} "
+          f"y_last={sol.y[:4,-1]}")
     data = _collect_outputs(model, sol)
 
     print("\n--- Конвергенция по окнам ---")
@@ -763,10 +959,14 @@ def debug_base_point() -> None:
           f"EDV_LV={np.max(data['V_lv'][win]):.0f} "
           f"EDV_RV={np.max(data['V_rv'][win]):.0f} "
           f"V_blood={data['V_blood'][-1]:.0f}")
+
     # --- Диагностика наполнения (венозный возврат) ---
-    print(f"P_sv={data['P_sv'][win].mean():.1f} P_pv={data['P_pv'][win].mean():.1f} "
-          f"P_la={data['P_la'][win].mean():.1f} P_ra={data['P_ra'][win].mean():.1f} "
-          f"V_sv={data['V_sv'][win].mean():.0f}/{data['V_sv_target'][win].mean():.0f} "
+    print(f"P_sv={data['P_sv'][win].mean():.1f} "
+          f"P_pv={data['P_pv'][win].mean():.1f} "
+          f"P_la={data['P_la'][win].mean():.1f} "
+          f"P_ra={data['P_ra'][win].mean():.1f} "
+          f"V_sv={data['V_sv'][win].mean():.0f}/"
+          f"{data['V_sv_target'][win].mean():.0f} "
           f"({data['V_sv_fraction'][win].mean()*100:.0f}%)")
     print(f"Q_sv_to_ra={data['Q_sv_to_ra'][win].mean():.1f} "
           f"Q_pv_to_la={data['Q_pv_to_la'][win].mean():.1f} "
@@ -784,6 +984,9 @@ def debug_base_point() -> None:
         print(f"  {k:12s}  min={arr.min():7.1f}  "
               f"max={arr.max():7.1f}  mean={arr.mean():7.1f}")
 
+    if verbose >= 2:
+        _print_window_diagnostics(data, label="DEBUG FULL")
+
     t_end_dt = datetime.now()
     print("\n" + "=" * 70)
     print(f"[Stage1 DEBUG] Финиш: {t_end_dt:%Y-%m-%d %H:%M:%S}")
@@ -796,9 +999,23 @@ def debug_base_point() -> None:
 # =============================================================================
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "debug":
-        print("[Stage1] DEBUG MODE")
-        debug_base_point()
+    # Backward-compat: `python stage1_identifiability.py debug` (позиционный)
+    args_list = sys.argv[1:]
+    is_debug = "debug" in args_list
+    args_list = [a for a in args_list if a != "debug"]
+
+    parser = argparse.ArgumentParser(
+        description="Stage 1: анализ идентифицируемости WholeBodyModel",
+    )
+    parser.add_argument(
+        "--verbose", "-v", type=int, default=1, choices=[0, 1, 2],
+        help="0=тихо, 1=базовые принты (default), 2=детально",
+    )
+    args = parser.parse_args(args_list)
+
+    if is_debug:
+        print(f"[Stage1] DEBUG MODE (verbose={args.verbose})")
+        debug_base_point(verbose=args.verbose)
     else:
-        print("[Stage1] RUN MODE")
-        main()
+        print(f"[Stage1] RUN MODE (verbose={args.verbose})")
+        main(verbose=args.verbose)

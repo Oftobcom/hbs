@@ -14,25 +14,30 @@ class Heart4Chambers(OrganModel):
         mitral, aortic, tricuspid, pulmonary.
     VSD — двунаправленный линейный резистор (отверстие, не клапан):
         Q_vsd > 0 — L→R, Q_vsd < 0 — R→L.
+
+    Единицы:
+        P    — мм рт.ст.
+        V    — мл
+        Q    — мл/с
+        R    — мм рт.ст.·с/мл
+        E    — мм рт.ст./мл
+        HR   — уд/мин
     """
 
-    # --- Санити-пороги для валидации конфигурации ---
-    _K_VALVE_MIN = 1.0
-    _K_VALVE_MAX = 100.0
-    _R_VALVE_MIN = 1e-3
-    _R_VALVE_MAX = 10.0
-    _R_VENOUS_MIN = 1e-3
-    _R_VENOUS_MAX = 10.0
-    _HR_MIN = 20.0
-    _HR_MAX = 250.0
-    _E_MIN_LO = 0.0
-    _E_MIN_HI = 1.0
-    _E_MAX_LO = 0.01
-    _E_MAX_HI = 20.0
-    _V0_MIN = 0.0
-    _V0_MAX = 100.0
-    _EDV_MIN = 10.0
-    _EDV_MAX = 500.0
+    # --- Санити-пороги параметров конфигурации ---
+    _K_VALVE_MIN, _K_VALVE_MAX = 1.0, 100.0
+    _R_VALVE_MIN, _R_VALVE_MAX = 1e-3, 10.0
+    _R_VENOUS_MIN, _R_VENOUS_MAX = 1e-3, 10.0
+    _HR_MIN, _HR_MAX = 20.0, 250.0
+    _E_MIN_LO, _E_MIN_HI = 0.0, 1.0
+    _E_MAX_LO, _E_MAX_HI = 0.01, 20.0
+    _V0_MIN, _V0_MAX = 0.0, 100.0
+    _EDV_MIN, _EDV_MAX = 10.0, 500.0
+
+    # --- Санити-границы runtime-факторов (защита от барорефлексных выбросов) ---
+    _HR_FACTOR_MIN, _HR_FACTOR_MAX = 0.1, 5.0
+    _INOTROPY_MIN, _INOTROPY_MAX = 0.1, 5.0
+    _BARO_MIN, _BARO_MAX = 0.5, 5.0
 
     def __init__(self,
                  hr=70,
@@ -102,17 +107,15 @@ class Heart4Chambers(OrganModel):
         E_min = {'LA': E_min_la, 'LV': E_min_lv, 'RA': E_min_ra, 'RV': E_min_rv}
         E_max = {'LA': E_max_la, 'LV': E_max_lv, 'RA': E_max_ra, 'RV': E_max_rv}
         for chamber, val in E_min.items():
-            self_check = _check_range(
+            E_min[chamber] = _check_range(
                 f"E_min_{chamber.lower()}", val, self._E_MIN_LO, self._E_MIN_HI,
                 "типично 0.02–0.10 мм рт.ст./мл."
             )
-            E_min[chamber] = self_check
         for chamber, val in E_max.items():
-            checked = _check_range(
+            E_max[chamber] = _check_range(
                 f"E_max_{chamber.lower()}", val, self._E_MAX_LO, self._E_MAX_HI,
                 "LV ~3.5, RV ~0.8, LA ~0.25, RA ~0.20 мм рт.ст./мл."
             )
-            E_max[chamber] = checked
             if E_max[chamber] <= E_min[chamber]:
                 raise ValueError(
                     f"Heart4Chambers: E_max_{chamber.lower()}={E_max[chamber]} "
@@ -209,16 +212,35 @@ class Heart4Chambers(OrganModel):
     # Обновление параметров (HR, инотропия, бароактивация)
     # ------------------------------------------------------------------
     def _update_parameters(self, inputs):
-        hr_factor = inputs.get('hr_factor', 1.0)
+        """
+        Обновляет HR и E_max по runtime-факторам.
+
+        Runtime-факторы приходят из барорефлекса и могут теоретически
+        выйти за физиологический диапазон при численных сбоях.
+        Soft-clip защищает от этого, не влияя на нормальные значения:
+
+            hr_factor    ∈ [0.1, 5.0]   (HR в [0.1·hr_base, 5.0·hr_base],
+                                         но окончательно клипуется по hr_min/hr_max)
+            inotropy_factor ∈ [0.1, 5.0]  (обычно = 1.0)
+            baro_activation ∈ [0.5, 5.0]  (обычно ∈ [1.0, 1+k_inotropy])
+        """
+        hr_factor = float(inputs.get('hr_factor', 1.0))
+        hr_factor = float(np.clip(hr_factor, self._HR_FACTOR_MIN, self._HR_FACTOR_MAX))
         new_hr = self.hr_base * hr_factor
         new_hr = np.clip(new_hr, self.hr_min, self.hr_max)
         self._current_hr = new_hr
         self._current_T = 60.0 / new_hr
 
-        inotropy_factor = inputs.get('inotropy_factor', 1.0)
+        inotropy_factor = float(inputs.get('inotropy_factor', 1.0))
+        inotropy_factor = float(np.clip(inotropy_factor,
+                                        self._INOTROPY_MIN, self._INOTROPY_MAX))
+
         # Симпатическая активация: при падении P_sa растёт E_max
         # через барорефлексный сигнал
-        baro_activation = inputs.get('baro_activation', 1.0)
+        baro_activation = float(inputs.get('baro_activation', 1.0))
+        baro_activation = float(np.clip(baro_activation,
+                                        self._BARO_MIN, self._BARO_MAX))
+
         for chamber in self.E_max_base:
             factor = 1.0
             if chamber in ('LV', 'RV'):

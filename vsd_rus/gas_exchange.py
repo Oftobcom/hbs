@@ -29,7 +29,24 @@ class GasExchange(OrganModel):
     Модель газообмена O2/CO2 в лёгких.
 
     Состояния нет — алгебраический орган, вызывается через compute_effects.
+
+    Единицы:
+        P         — мм рт.ст.
+        C         — мл газа / мл крови
+        Q         — мл/с
+        Hb        — г/дл
+        alpha_O2  — мл O2 / (дл · мм рт.ст.)
     """
+
+    # --- Санити-пороги для валидации конфигурации ---
+    _P_ALV_O2_MIN, _P_ALV_O2_MAX = 20.0, 600.0
+    _P_ALV_CO2_MIN, _P_ALV_CO2_MAX = 5.0, 100.0
+    _HB_MIN, _HB_MAX = 5.0, 25.0
+    _P50_MIN, _P50_MAX = 10.0, 60.0
+    _N_HILL_MIN, _N_HILL_MAX = 1.0, 5.0
+    _ALPHA_O2_MIN, _ALPHA_O2_MAX = 1e-4, 0.02
+    _C_CO2_OFFSET_MIN, _C_CO2_OFFSET_MAX = 0.0, 1.0
+    _K_CO2_SLOPE_MIN, _K_CO2_SLOPE_MAX = 1e-4, 0.05
 
     def __init__(self,
                 # ---- Альвеолярный газ (фиксирован в MVP) ----
@@ -44,18 +61,66 @@ class GasExchange(OrganModel):
                 C_CO2_offset=0.22,        # мл/мл при P_CO2 = 0
                 k_CO2_slope=0.0065,       # мл/мл на мм рт. ст.
                 ):
-        # Альвеолярный газ
-        self.P_alv_O2 = float(P_alv_O2)
-        self.P_alv_CO2 = float(P_alv_CO2)
-        # Гемоглобин
-        self.Hb = float(Hb)
-        self.P50 = float(P50)
-        self.n_hill = float(n_hill)
-        self.alpha_O2 = float(alpha_O2)
-        # CO2
-        self.C_CO2_offset = float(C_CO2_offset)
-        self.k_CO2_slope = float(k_CO2_slope)
-        # Кэш выходов
+
+        # =================================================================
+        # Валидация конфигурации — fail-fast при инициализации.
+        # Параметры приходят из YAML и не меняются во время симуляции;
+        # ошибки в них должны ловиться один раз, а не в горячем пути RHS.
+        # =================================================================
+        def _check_range(name, v, lo, hi, typical=""):
+            v = float(v)
+            if not np.isfinite(v) or not (lo <= v <= hi):
+                raise ValueError(
+                    f"GasExchange: {name}={v} вне [{lo}, {hi}]. {typical}"
+                )
+            return v
+
+        # --- Альвеолярный газ ---
+        self.P_alv_O2 = _check_range(
+            "P_alv_O2", P_alv_O2,
+            self._P_ALV_O2_MIN, self._P_ALV_O2_MAX,
+            "мм рт.ст., типично 100."
+        )
+        self.P_alv_CO2 = _check_range(
+            "P_alv_CO2", P_alv_CO2,
+            self._P_ALV_CO2_MIN, self._P_ALV_CO2_MAX,
+            "мм рт.ст., типично 40."
+        )
+
+        # --- Гемоглобин ---
+        self.Hb = _check_range(
+            "Hb", Hb, self._HB_MIN, self._HB_MAX,
+            "г/дл, типично 15."
+        )
+
+        # --- Кривая Хилла ---
+        self.P50 = _check_range(
+            "P50", P50, self._P50_MIN, self._P50_MAX,
+            "мм рт.ст., типично 26.8."
+        )
+        self.n_hill = _check_range(
+            "n_hill", n_hill, self._N_HILL_MIN, self._N_HILL_MAX,
+            "безразмерный, типично 2.7 (коэффициент Хилла)."
+        )
+        self.alpha_O2 = _check_range(
+            "alpha_O2", alpha_O2,
+            self._ALPHA_O2_MIN, self._ALPHA_O2_MAX,
+            "мл O2/(дл·мм рт.ст.), типично 0.003."
+        )
+
+        # --- CO2 (линейная аппроксимация) ---
+        self.C_CO2_offset = _check_range(
+            "C_CO2_offset", C_CO2_offset,
+            self._C_CO2_OFFSET_MIN, self._C_CO2_OFFSET_MAX,
+            "мл/мл при P_CO2 = 0, типично 0.22."
+        )
+        self.k_CO2_slope = _check_range(
+            "k_CO2_slope", k_CO2_slope,
+            self._K_CO2_SLOPE_MIN, self._K_CO2_SLOPE_MAX,
+            "мл/мл на мм рт.ст., типично 0.0065."
+        )
+
+        # --- Кэш выходов ---
         self._current_outputs = {}
 
     # =================================================================
@@ -166,7 +231,7 @@ class GasExchange(OrganModel):
         парциальными давлениями (P_a_O2, P_v_O2, P_v_CO2) и диагностикой
         (SaO2, shunt_fraction_R2L, Qp_Qs, O2_uptake, CO2_removal, f_bypass).
         """
-        # --- Защита от некорректных входов ---
+        # --- Защита от некорректных входов (runtime-клипы, не конфиг) ---
         C_v_O2  = float(np.clip(C_v_O2,  0.001, 0.25))
         C_v_CO2 = float(np.clip(C_v_CO2, 0.05,  1.00))
         Q_p     = max(float(Q_p), 1e-6)
