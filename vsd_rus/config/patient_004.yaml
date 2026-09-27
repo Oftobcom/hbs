@@ -1,14 +1,17 @@
 id: patient_004
 label: "Эйзенменгер, компенсированный"
-description: "Хроническая компенсация: ПЖ гипертрофирован, функция сохранена"
+description: "PVR≈SVR, ПЖ гипертрофирован, CO сохранен, R→L, SaO2 85-90%"
 order: 4
 color: "#9b59b6"
 
-vsd_resistance: 0.7
+vsd_resistance: 0.4
 flow_dependent_lungs: true
 pressure_remodel: true
-pressure_sensitivity: 0.06
-R_remodel_max: 4.0
-tau_remodel: 200.0
+flow_sensitivity: 0.15
+pressure_sensitivity: 0.10
+R_remodel_max: 5.5
+tau_remodel: 150.0
+P_pa_threshold: 18.0
 HR_base: 85
-E_max_rv: 1.0
+E_max_rv: 2.5
+E_max_lv: 3.2

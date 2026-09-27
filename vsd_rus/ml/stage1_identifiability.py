@@ -81,10 +81,10 @@ PARAM_NAMES = [
 
 THETA0 = {
     "d_vsd":            4.0,
-    "E_max_lv":         3.0,
+    "E_max_lv":         3.5,
     "E_max_rv":         0.8,
     "R_sys":            None,
-    "flow_sensitivity": 0.1,
+    "flow_sensitivity": 0.15,
     "C_sys_art":        1.5,
     "HR_base":          70.0,
     "V0_blood":         5800.0,
@@ -269,21 +269,24 @@ def _stage1_sim_cfg(sim_cfg: Optional[dict], verbose: int = 0) -> dict:
     out["atol"] = float(sim_cfg.get("atol", out["atol"]))
     out["max_step"] = float(sim_cfg.get("max_step", out["max_step"]))
 
+    STAGE1_T_END_MAX = 800.0
+    STAGE1_N_SAMPLES_MAX = 4000
+
     t_span = sim_cfg.get("t_span")
     if isinstance(t_span, (list, tuple)) and len(t_span) >= 2:
         orig_t_end = float(t_span[1])
-        out["t_end"] = min(orig_t_end, 1200.0)
-        if orig_t_end > 1200.0 and verbose >= 1:
+        out["t_end"] = min(orig_t_end, STAGE1_T_END_MAX)
+        if orig_t_end > STAGE1_T_END_MAX and verbose >= 1:
             print(f"  [warn] Stage1: t_end {orig_t_end:.0f} → "
-                  f"{out['t_end']:.0f} с (ограничение Stage1 = 1200 с)")
+                f"{out['t_end']:.0f} с (ограничение Stage1 = {STAGE1_T_END_MAX:.0f} с)")
 
     n_samples = sim_cfg.get("n_samples_t")
     if n_samples is not None:
         orig_n = int(n_samples)
-        out["n_samples_t"] = min(orig_n, 12000)
-        if orig_n > 12000 and verbose >= 1:
+        out["n_samples_t"] = min(orig_n, STAGE1_N_SAMPLES_MAX)
+        if orig_n > STAGE1_N_SAMPLES_MAX and verbose >= 1:
             print(f"  [warn] Stage1: n_samples_t {orig_n} → "
-                  f"{out['n_samples_t']} (ограничение Stage1 = 12000)")
+                f"{out['n_samples_t']} (ограничение Stage1 = {STAGE1_N_SAMPLES_MAX})")
 
     if "stationary_rel_tol_stage1" in sim_cfg:
         out["stationary_rel_tol_stage1"] = float(sim_cfg["stationary_rel_tol_stage1"])
@@ -294,7 +297,7 @@ def _stage1_sim_cfg(sim_cfg: Optional[dict], verbose: int = 0) -> dict:
 def _collect_outputs(model, sol) -> dict:
     """Прогоняет compute_outputs по всем точкам решения → dict[str, np.ndarray]."""
     keys = None
-    rows = []
+    outputs = []
     for i, ti in enumerate(sol.t):
         try:
             out = model.compute_outputs(ti, sol.y[:, i])
@@ -305,9 +308,10 @@ def _collect_outputs(model, sol) -> dict:
             ) from e
         if keys is None:
             keys = list(out.keys())
-        rows.append([out[k] for k in keys])
-    data = {k: np.array([r[j] for r in rows], dtype=float)
-            for j, k in enumerate(keys)}
+        outputs.append(out)
+    data = {k: np.fromiter((o[k] for o in outputs),
+                        dtype=float, count=len(outputs))
+            for k in keys}
     data["t"] = np.asarray(sol.t, dtype=float)
     return data
 
@@ -710,7 +714,7 @@ def select_final_theta(J: np.ndarray,
     priority = ["V0_blood", "HR_base", "C_sys_art"]
 
     # --- Режим 6 ---
-    res8 = analyze_svd(J, param_names, X_NAMES, verbose=verbose_int)
+    res8 = analyze_svd(J, param_names, X_NAMES, verbose=0)
     if verbose_int >= 1:
         print(f"\n[Stage1] cond_8 = {res8['cond']:.2f}")
 
@@ -858,7 +862,10 @@ def _main_impl(verbose: int, out_dir: Path, t_start: datetime) -> None:
     plot_results(J, svd_res, PARAM_NAMES, X_NAMES, out_dir / "stage1_SVD.png")
     print(f"[Stage1] График: {out_dir / 'stage1_SVD.png'}")
 
-    selection = select_final_theta(J, PARAM_NAMES, verbose=0, sim_cfg=sim_cfg)
+    _selection_verbose = 1 if verbose >= 2 else 0
+    selection = select_final_theta(
+        J, PARAM_NAMES, verbose=_selection_verbose, sim_cfg=sim_cfg
+    )
     if verbose >= 1:
         print(f"[Stage1] Режим: {selection['mode']} | to_fix={selection['to_fix']} | "
             f"cond={selection['cond']:.3f} | keep={selection['theta_final']}")
@@ -876,8 +883,12 @@ def _main_impl(verbose: int, out_dir: Path, t_start: datetime) -> None:
                  f"C_sys_art = {theta0_resolved['C_sys_art']}\n")
     lines.append(f"- HR_base = {theta0_resolved['HR_base']}, "
                  f"V0_blood = {theta0_resolved['V0_blood']}\n\n")
+    lines.append("## PARAM_SCALES (использованы в формуле J)\n")
+    for k, v in PARAM_SCALES.items():
+        lines.append(f"- {k:18s} = {v}\n")
+    lines.append("\n")
 
-    lines.append("## X0 (последние 10 циклов, EDV=max)\n")
+    lines.append("## X0 (mean за 10 циклов; EDV_LV/EDV_RV = max(V_lv)/max(V_rv) за последний цикл)\n")
     for k in X_NAMES:
         lines.append(f"- {k:10s} = {X0[k]:.4f}\n")
     lines.append("\n")
@@ -901,6 +912,10 @@ def _main_impl(verbose: int, out_dir: Path, t_start: datetime) -> None:
     lines.append("- Экстраполяция за R_vsd ∈ [0.5, 15.8] "
                  "(d_vsd ∈ [3.0, 7.11] мм) не гарантируется.\n")
     lines.append("- Формула J использует PARAM_SCALES, а не theta0.\n")
+    lines.append(f"- Параметры `theta_final` в порядке {selection['theta_final']}; "
+                f"должны совпадать с `dataset_generator.VARY_PARAMS`.\n")
+    lines.append(f"- Режим {selection['mode']} означает: "
+                f"Fallback A/B при плохой обусловленности.\n")
 
     (out_dir / "STAGE1_REPORT.md").write_text("".join(lines), encoding="utf-8")
     print(f"[Stage1] Отчёт: {out_dir / 'STAGE1_REPORT.md'}")

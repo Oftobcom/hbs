@@ -29,17 +29,17 @@ SCENARIO_ORDER = [p['label'] for p in sorted(_PATIENTS.values(), key=lambda c: i
 # =====================================================================
 # Константы v4
 # =====================================================================
-T_END   = 1200.0
+T_END   = 800.0
 T_CALIB = 800.0
 T_CALIB_HEALTHY = 400.0
-N_EVAL  = 4000   # v3: было 10000 -> 4000 (для отчетов хватает)
-MAX_STEP = 0.10  # v3: было 0.07 -> 0.10 (-30% RHS вызовов)
+N_EVAL  = 3000
+MAX_STEP = 0.10
 
 PERIPH_VO2_BASE = 1.5
 
 N_PLOT_POINTS = 4000
 N_PLOT_POINTS_DETAIL = 1200
-STEADY_FRAC = 0.75
+STEADY_FRAC = 0.6
 
 # =====================================================================
 # Симуляция одного сценария (оптимизированная)
@@ -53,6 +53,9 @@ def simulate_scenario(vsd_resistance,
                       tau_remodel=200.0,
                       HR_base=None,
                       E_max_rv_override=None,
+                      E_max_lv_override=None,
+                      EDV_rv_override=None,
+                      P_pa_threshold_override=None,
                       flow_sensitivity=0.15,
                       t_span=(0.0, T_END),
                       t_calib=T_CALIB):
@@ -74,6 +77,10 @@ def simulate_scenario(vsd_resistance,
     }
     if E_max_rv_override is not None:
         heart_params['E_max_rv'] = E_max_rv_override
+    if E_max_lv_override is not None:
+        heart_params['E_max_lv'] = E_max_lv_override
+    if EDV_rv_override is not None:
+        heart_params['EDV_rv'] = EDV_rv_override
 
     model = WholeBodyModel(
         baroreflex_params={'P_set': 80.0, 'HR_base': HR_base},
@@ -82,7 +89,9 @@ def simulate_scenario(vsd_resistance,
         lungs_params={
             'flow_sensitivity': flow_sensitivity,
             'pressure_remodel': pressure_remodel,
-            'P_pa_threshold': 25.0,
+            'P_pa_threshold': (P_pa_threshold_override
+                               if P_pa_threshold_override is not None
+                               else 25.0),
             'pressure_sensitivity': pressure_sensitivity,
             'R_remodel_max': R_remodel_max,
             'tau_remodel': tau_remodel,
@@ -96,13 +105,24 @@ def simulate_scenario(vsd_resistance,
     # Адаптивный t_calib
     t_calib_eff = t_calib
     if not pressure_remodel and t_calib >= 600:
-        if t_calib == T_CALIB:
-            t_calib_eff = T_CALIB_HEALTHY
+        t_calib_eff = T_CALIB_HEALTHY
 
     print(f"  [PID {os.getpid()}] [{label}] Калибровка t_calib={t_calib_eff:.0f}с...", flush=True)
-    y0 = model.calibrate_initial_state(t_calib=t_calib_eff)
+    with warnings.catch_warnings(record=True) as calib_warns:
+        warnings.simplefilter("always", category=UserWarning)
+        y0 = model.calibrate_initial_state(t_calib=t_calib_eff)
+    if os.environ.get("HBS_STRICT_CALIB") == "1" and calib_warns:
+        _bad = [w for w in calib_warns if "calibrate:" in str(w.message)]
+        if _bad:
+            raise RuntimeError(
+                f"[{label}] calibration failed: {_bad[0].message}"
+            )
+    for w in calib_warns:
+        if "calibrate:" in str(w.message):
+            print(f"  [PID {os.getpid()}] [{label}] ⚠ CALIBRATION: {w.message}",
+                  flush=True)
 
-    cycle = model.cycle_averaged_flows(0.0, y0)
+    cycle = model.cycle_averaged_flows(0.0, y0, n_pts=24)
     out0  = model.compute_outputs(0.0, y0)   # только для P_sa/P_pa/HR/V_blood
     print(f"  [PID {os.getpid()}] [{label}] CHECK "
         f"P_sa={out0['P_sa']:.1f} P_pa={out0['P_pa']:.1f} "
@@ -116,13 +136,20 @@ def simulate_scenario(vsd_resistance,
 
     n_pts = N_EVAL
     t_eval = np.linspace(t_span[0], t_span[1], n_pts)
-    print(f"  [PID {os.getpid()}] [{label}] Симуляция 0..{t_span[1]:.0f}с LSODA max_step={MAX_STEP} {n_pts} точек...", flush=True)
-    sol = model.simulate(
-        t_span, t_eval, y0=y0,
-        method='LSODA',
-        rtol=1e-4, atol=1e-5,
-        max_step=MAX_STEP,
-    )
+    max_step_eff = max(MAX_STEP, 60.0 / HR_base / 4.0)
+    print(f"  [PID {os.getpid()}] [{label}] Симуляция 0..{t_span[1]:.0f}с "
+        f"LSODA max_step={max_step_eff:.3f} {n_pts} точек...", flush=True)
+    try:
+        sol = model.simulate(
+            t_span, t_eval, y0=y0,
+            method='LSODA',
+            rtol=1e-4, atol=1e-5,
+            max_step=max_step_eff,
+        )
+    except Exception as e:
+        print(f"  [PID {os.getpid()}] [{label}] ⚠ LSODA FAILED: {e}",
+            flush=True)
+        return None
     print(f"  [PID {os.getpid()}] [{label}] готово {sol.t.size} точек, {sol.nfev} RHS, cache_hits={getattr(model, '_flow_cache_hits', 0)}", flush=True)
 
     # --- ОПТИМИЗАЦИЯ 1: только установившееся окно ---
@@ -134,13 +161,13 @@ def simulate_scenario(vsd_resistance,
     else:
         mask_steady = np.array([], dtype=bool)
     idx_steady = np.where(mask_steady)[0]
-
     outputs = [model.compute_outputs(sol.t[i], sol.y[:, i]) for i in idx_steady]
     if len(outputs) == 0:
         raise RuntimeError("Нет точек в установившемся окне")
-    data = {key: np.array([out[key] for out in outputs]) for key in outputs[0].keys()}
+    keys = list(outputs[0].keys())
+    data = {k: np.fromiter((o[k] for o in outputs), dtype=float, count=len(outputs))
+            for k in keys}
     data['t'] = sol.t[idx_steady]
-    data['_t_full'] = sol.t  # для графиков если нужно
     data = clean_nans(data)
     qpq = qp_qs_steady(data)
     data['Qp_Qs_steady'] = np.array([qpq if qpq is not None else np.nan])
@@ -566,15 +593,27 @@ def print_detailed_report(results_dict):
         print(f"  • Сатурация O₂ (SaO2)              : {format_mean_std(data, 'SaO2', scale=100.0, fmt='{:.1f}')} %  — <90% = гипоксемия (R→L)")
         print(f"  • ЧСС (HR)                         : {format_mean_std(data, 'HR')} уд/мин  — текущая частота сердечных сокращений")
         print(f"  • СКФ (GFR)                        : {format_mean_std(data, 'GFR', fmt='{:.2f}')} мл/с  — скорость клубочковой фильтрации почек")
-        print(f"  • Потребление O₂ мозгом            : {format_mean_std(data, 'VO2_brain', fmt='{:.3f}')} мл O₂/с  — утилизация O₂ церебральной тканью")
-        # --- Церебральный O₂-баланс: градиент здоровый ≈ компенс. > декомпенс. ---
-        _sao2_v = format_mean_std(data, 'SaO2', scale=100.0, fmt='{:.1f}')
-        _cao2_v = format_mean_std(data, 'C_a_O2', fmt='{:.3f}')
-        _o2_v   = format_mean_std(data, 'VO2_brain', fmt='{:.3f}')
-        _qbr_v  = format_mean_std(data, 'Q_brain', fmt='{:.2f}')
+        # --- Церебральный O₂-баланс: доставка / потребление / резерв ---
+        _cao2_v  = format_mean_std(data, 'C_a_O2', fmt='{:.3f}')
+        _qbr_v   = format_mean_std(data, 'Q_brain', fmt='{:.2f}')
+        _o2_v    = format_mean_std(data, 'VO2_brain', fmt='{:.3f}')
+        try:
+            _ca = float(_cao2_v.split(' ± ')[0])
+            _qb = float(_qbr_v.split(' ± ')[0])
+            _vo = float(_o2_v.split(' ± ')[0])
+            _do2 = _qb * _ca
+            _er  = _vo / _do2 if _do2 > 0 else float('nan')
+            _res = _do2 - _vo
+            _er_str  = f"{_er:.2f}"
+            _res_str = f"{_res:+.3f}"
+        except Exception:
+            _do2, _er_str, _res_str = float('nan'), "N/A", "N/A"
+
+        print(f"  • Доставка O₂ мозгу (DO₂_br)       : "
+            f"Q_br={_qbr_v} мл/с × C_a_O₂={_cao2_v} мл/мл → "
+            f"DO₂={_do2:.3f} мл O₂/с")
         print(f"  • Церебральный O₂-баланс          : "
-            f"SaO₂={_sao2_v} %  |  C_a_O₂={_cao2_v} мл/мл  |  "
-            f"Q_br={_qbr_v} мл/с  |  CMRO₂={_o2_v} мл/с")        
+            f"CMRO₂={_o2_v} мл O₂/с  |  ER={_er_str}  |  резерв={_res_str} мл O₂/с")
         print(f"  • Потребление O₂ периферией        : {format_mean_std(data, 'O2_consumption_periph', fmt='{:.3f}')} мл O₂/с  — утилизация O₂ периферической тканью")
         print(f"  • Поглощение O₂ лёгкими            : {format_mean_std(data, 'O2_uptake', fmt='{:.3f}')} мл O₂/с  — поглощение O₂ лёгкими")
 
@@ -600,6 +639,9 @@ def simulate_one_scenario(name, params):
         tau_remodel=params.get('tau_remodel', 200.0),
         HR_base=params.get('HR_base', None),
         E_max_rv_override=params.get('E_max_rv', None),
+        E_max_lv_override=params.get('E_max_lv', None),
+        EDV_rv_override=params.get('EDV_rv', None),
+        P_pa_threshold_override=params.get('P_pa_threshold', None),
         flow_sensitivity=params.get('flow_sensitivity', 0.15),
     )
     dt = time.perf_counter() - t0
@@ -615,7 +657,7 @@ def simulate_one_scenario(name, params):
 # main
 # =====================================================================
 
-def main(parallel=True, n_jobs=4):
+def main(parallel=True, n_jobs=0):
     t_start = time.perf_counter()
     dt_start = datetime.now()
     print("="*80)
@@ -627,7 +669,10 @@ def main(parallel=True, n_jobs=4):
     print(f"Загружено пациентов: {list(scenarios.keys())}")
 
     if parallel:
-        n_jobs = min(n_jobs, len(scenarios), os.cpu_count() or 1)
+        if n_jobs <= 0:
+            n_jobs = min(os.cpu_count() or 1, len(scenarios))
+        else:
+            n_jobs = min(n_jobs, len(scenarios), os.cpu_count() or 1)
         print(f"\n🚀 Запуск {len(scenarios)} симуляций параллельно n_jobs={n_jobs} (loky)...")
         results_list = Parallel(n_jobs=n_jobs, backend='loky', verbose=10)(
             delayed(simulate_one_scenario)(name, params) for name, params in scenarios.items()
@@ -638,6 +683,7 @@ def main(parallel=True, n_jobs=4):
 
     results = {}
     per_scenario_times = {}
+    results_list = [r for r in results_list if r is not None and r[1] is not None]
     for name, data, color, dt, fname in results_list:
         results[name] = (data, color, name)
         per_scenario_times[name] = dt
@@ -667,6 +713,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--no-parallel', action='store_true', help='отключить параллель')
-    parser.add_argument('--n-jobs', type=int, default=4, help='число процессов')
+    parser.add_argument('--n-jobs', type=int, default=0,
+                    help='число процессов; 0=auto = min(cpu_count, n_scenarios)')
     args = parser.parse_args()
     main(parallel=not args.no_parallel, n_jobs=args.n_jobs)

@@ -348,7 +348,14 @@ def _validate_patient(cfg: dict, path: Path) -> None:
         _check_finite_range(f"{path.name}.HR_base", cfg["HR_base"], 20.0, 250.0)
     if "E_max_rv" in cfg:
         _check_finite_range(f"{path.name}.E_max_rv", cfg["E_max_rv"], 0.01, 20.0)
-
+    if "E_max_lv" in cfg:
+        _check_finite_range(f"{path.name}.E_max_lv", cfg["E_max_lv"], 0.01, 20.0)
+    if "EDV_rv" in cfg:
+        # Должно совпадать с Heart4Chambers._EDV_MIN/MAX = 10..500
+        _check_finite_range(f"{path.name}.EDV_rv", cfg["EDV_rv"], 10.0, 500.0)
+    if "P_pa_threshold" in cfg:
+        _check_finite_range(f"{path.name}.P_pa_threshold",
+                            cfg["P_pa_threshold"], 5.0, 100.0)
 
 def load_patient(path) -> dict:
     """
