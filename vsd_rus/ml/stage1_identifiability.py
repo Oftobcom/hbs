@@ -178,6 +178,8 @@ def build_model(theta: dict,
     heart_params["R_vsd"] = (
         d_vsd_to_R_vsd(theta["d_vsd"]) if theta["d_vsd"] > 0 else np.inf
     )
+    heart_params["R_venous_sys"]  = 0.08   # вместо 0.05 из YAML
+    heart_params["R_venous_pulm"] = 0.03   # вместо 0.02 из YAML
 
     lungs_params = dict(cfg["lungs"])
     lungs_params["flow_sensitivity"] = theta["flow_sensitivity"]
