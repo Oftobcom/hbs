@@ -12,8 +12,11 @@
     auto_ylim          — устойчивое к выбросам авто-масштабирование оси Y
     steady_mean / steady_mean_std / format_mean_std
                        — установившиеся средние и их форматирование
-    qp_qs_steady       — Qp/Qs из средних потоков
     occlusion_profile  — плавный ramp окклюзии
+
+    Клинический Qp/Qs = mean(Q_pulmonary) / mean(Q_aortic) по установившемуся
+    окну (STEADY_FRAC=0.75). НИКОГДА не использовать np.mean(data['Qp_Qs']):
+    мгновенное отношение в диастоле даёт артефакты 1e5–1e7.
 
 Каноничные дефолты:
     SAFE_SAVGOL_WINDOW  = 101
@@ -407,3 +410,18 @@ def occlusion_profile(t, t_onset, severity=1.0, rise_time=5.0):
         return 1.0
     frac = min((t - t_onset) / rise_time, 1.0)
     return 1.0 - severity * frac
+
+def clinical_qp_qs_series(data, window=501, polyorder=3):
+    """
+    Скользящее клиническое Qp/Qs(t) = savgol(Qp)/savgol(Qs).
+    Окно window >> 1 кардиоцикла — численно совпадает с
+    mean(Qp)/mean(Qs) по скользящему окну.
+    Не заменяет qp_qs_steady для итоговых цифр.
+    """
+    if 'Q_pulmonary' not in data or 'Q_aortic' not in data:
+        return np.array([])
+    qp = np.asarray(data['Q_pulmonary'], dtype=float)
+    qs = np.asarray(data['Q_aortic'], dtype=float)
+    qp_sm = safe_savgol_filter(qp, window, polyorder)
+    qs_sm = safe_savgol_filter(qs, window, polyorder)
+    return qp_sm / np.maximum(qs_sm, 1e-6)

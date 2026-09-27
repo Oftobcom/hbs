@@ -923,7 +923,6 @@ class WholeBodyModel:
         heart_out = f['heart_out']
         Qp = heart_out['Q_pulmonary']
         Qs = heart_out['Q_aortic']
-        Qp_Qs = Qp / max(Qs, 1e-6)
         shunt_fraction_LR = max(heart_out['Q_vsd'], 0.0) / max(Qp, 1e-6)
 
         return {
@@ -940,7 +939,6 @@ class WholeBodyModel:
             'Q_ven_out':  f['Q_ven_out'],
             'Q_sv_to_ra': heart_out['Q_sv_to_ra'],
             'Q_pv_to_la': heart_out['Q_pv_to_la'],
-            'Qp_Qs': Qp_Qs,
             'shunt_fraction_LR': shunt_fraction_LR,
             'shunt_fraction_R2L': f['gas_ex']['shunt_fraction_R2L'],
             'Q_liver_out': f['liver_out']['Q_liver_out'],
@@ -1014,6 +1012,33 @@ class WholeBodyModel:
             'dC_CO2_blood':    f['dC_CO2_blood'],
             'dC_O2_blood':     f['dC_O2_blood'],
             'occlusion_factor': f['brain_out'].get('occlusion_factor', 1.0),
+        }
+
+    def cycle_averaged_flows(self, t_end, y_end, n_pts=60):
+        """
+        Диагностика: усредняет Qp/Qs/Q_vsd за один кардиоцикл,
+        заканчивающийся в t_end. Приближение: объёмы камер берутся
+        как y_end для всех фаз цикла (на стационаре ошибка <10%).
+        """
+        HR = float(self.baroreflex.get_outputs(
+            y_end[self.idx['baroreflex']])['HR'])
+        T  = 60.0 / max(HR, 1.0)
+        t_cycle = np.linspace(t_end - T, t_end, n_pts)
+        Qp, Qs, Qv, SaO2_vals = [], [], [], []
+        for ti in t_cycle:
+            out = self.compute_outputs(ti, y_end)
+            Qp.append(out['Q_pulmonary'])
+            Qs.append(out['Q_aortic'])
+            Qv.append(out['Q_vsd'])
+            SaO2_vals.append(out['SaO2'])
+        Qp_m, Qs_m, Qv_m = float(np.mean(Qp)), float(np.mean(Qs)), float(np.mean(Qv))
+        return {
+            'Qp_cycle_mean':     Qp_m,
+            'Qs_cycle_mean':     Qs_m,
+            'Q_vsd_cycle_mean':  Qv_m,
+            'Qp_Qs_cycle':       Qp_m / max(Qs_m, 1e-6),
+            'mass_balance_error': Qp_m - Qs_m - Qv_m,
+            'SaO2_cycle_mean':    float(np.mean(SaO2_vals))
         }
 
     # ------------------------------------------------------------------

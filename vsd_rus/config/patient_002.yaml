@@ -7,5 +7,5 @@ color: "#f39c12"
 vsd_resistance: 5.0
 flow_dependent_lungs: false
 pressure_remodel: false
-HR_base: 75
+HR_base: 70
 E_max_rv: 0.8

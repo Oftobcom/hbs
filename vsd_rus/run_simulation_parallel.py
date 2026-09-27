@@ -15,12 +15,11 @@ import os
 from datetime import datetime
 from joblib import Parallel, delayed
 from whole_body import WholeBodyModel
-from utils import (safe_savgol_filter, subsample, steady_mask,
-                   clean_nans, steady_mean, steady_mean_std,
+from utils import (subsample, steady_mask,
+                   clean_nans, steady_mean, clinical_qp_qs_series,
                    format_mean_std, qp_qs_steady, auto_ylim,
-                   SUBSAMPLE_N_TARGET, STEADY_FRAC_DEFAULT)
+                   STEADY_FRAC_DEFAULT)
 from physio_config import load_all_patients
-
 warnings.filterwarnings('ignore')
 
 _PATIENTS = load_all_patients()
@@ -103,14 +102,17 @@ def simulate_scenario(vsd_resistance,
     print(f"  [PID {os.getpid()}] [{label}] Калибровка t_calib={t_calib_eff:.0f}с...", flush=True)
     y0 = model.calibrate_initial_state(t_calib=t_calib_eff)
 
-    out0 = model.compute_outputs(0.0, y0)
-    Qp = out0['Q_pulmonary']
-    Qs = out0['Q_aortic']
-    Qp_Qs = Qp / max(Qs, 1e-6)
-    print(f"  [PID {os.getpid()}] [{label}] CHECK P_sa={out0['P_sa']:.1f} P_pa={out0['P_pa']:.1f} "
-        f"P_sv={out0['P_sv']:.1f} HR={out0['HR']:.1f} V_blood={out0['V_blood']:.0f} "
-        f"Qp={Qp:.1f} Qs={Qs:.1f} Qp/Qs={Qp_Qs:.2f} "
-        f"Q_vsd={out0['Q_vsd']:+.1f} SaO2={out0['SaO2']*100:.1f}%")
+    cycle = model.cycle_averaged_flows(0.0, y0)
+    out0  = model.compute_outputs(0.0, y0)   # только для P_sa/P_pa/HR/V_blood
+    print(f"  [PID {os.getpid()}] [{label}] CHECK "
+        f"P_sa={out0['P_sa']:.1f} P_pa={out0['P_pa']:.1f} "
+        f"P_sv={out0['P_sv']:.1f} HR={out0['HR']:.1f} "
+        f"V_blood={out0['V_blood']:.0f} "
+        f"Qp={cycle['Qp_cycle_mean']:.1f} Qs={cycle['Qs_cycle_mean']:.1f} "
+        f"Qp/Qs={cycle['Qp_Qs_cycle']:.2f} "
+        f"Q_vsd={cycle['Q_vsd_cycle_mean']:+.1f} "
+        f"balance={cycle['mass_balance_error']:+.2f} "
+        f"SaO2={cycle['SaO2_cycle_mean']*100:.1f}%")
 
     n_pts = N_EVAL
     t_eval = np.linspace(t_span[0], t_span[1], n_pts)
@@ -140,6 +142,8 @@ def simulate_scenario(vsd_resistance,
     data['t'] = sol.t[idx_steady]
     data['_t_full'] = sol.t  # для графиков если нужно
     data = clean_nans(data)
+    qpq = qp_qs_steady(data)
+    data['Qp_Qs_steady'] = np.array([qpq if qpq is not None else np.nan])
     return data
 
 
@@ -192,14 +196,19 @@ def plot_enhanced_comparison(results_dict):
     # 3. Qp/Qs
     ax = fig.add_subplot(gs[0, 2])
     for name, (data, _, _) in results_dict.items():
-        t, qp_qs = subsample(data, 'Qp_Qs')
-        m = np.isfinite(qp_qs)
+        ratio = clinical_qp_qs_series(data, window=501, polyorder=3)
+        t = data['t']
+        n = min(len(t), len(ratio))
+        m = np.isfinite(ratio[:n])
         if not np.any(m):
             continue
-        vals = qp_qs[m]
-        if len(vals) > 100:
-            vals = safe_savgol_filter(vals, 101, 3)
-        ax.plot(t[m], vals, color=COLORS.get(name, 'gray'), lw=2, label=name)
+        qp_qs_val = qp_qs_steady(data)
+        qp_qs_str = f"{qp_qs_val:.2f}" if qp_qs_val is not None else "N/A"
+        ax.plot(t[:n][m], ratio[:n][m], color=COLORS.get(name, 'gray'),
+                lw=2, label=f"{name} (Qp/Qs={qp_qs_str})")
+        if qp_qs_val is not None:
+            ax.axhline(qp_qs_val, color=COLORS.get(name, 'gray'),
+                    ls='--', alpha=0.4, lw=1)
     ax.set_ylabel('Qp/Qs')
     ax.set_xlabel('Время (с)')
     ax.set_title('Соотношение лёгочного и системного кровотока')
@@ -303,7 +312,7 @@ def plot_enhanced_comparison(results_dict):
     summary_metrics = [
         ('P_sa',   'P_sa, мм Hg',   '{:.0f}',   'mean'),
         ('P_pa',   'P_pa, мм Hg',   '{:.0f}',   'mean'),
-        ('Qp_Qs',  'Qp/Qs',         '{:.2f}',   'qp_qs'),
+        ('__qp_qs__',  'Qp/Qs',  '{:.2f}',  'qp_qs'),
         ('SaO2',   'SaO₂, %',       '{:.1f}',   'mean_scaled'),
         ('V_rv',   'V_rv, мл',      '{:.0f}',   'mean'),
         ('V_blood','V_blood, мл',   '{:.0f}',   'mean'),
@@ -350,18 +359,31 @@ def plot_shunt_effect_analysis(results_dict):
     fig.suptitle('Анализ влияния размера ДМЖП', fontsize=14, fontweight='bold')
 
     # 1. Динамика Qp/Qs
+    # Не рисуем data['Qp_Qs'] (мгновенное отношение → диастолические
+    # пики 1e6). Рисуем скользящее отношение сглаженных Qp и Qs —
+    # клинический эквивалент Qp/Qs, медленно меняющийся во времени.
     ax = axes[0, 0]
     for name, (data, _, _) in results_dict.items():
-        t, q = subsample(data, 'Qp_Qs', N_PLOT_POINTS_DETAIL)
-        m = np.isfinite(q)
-        if np.any(m):
-            ax.plot(t[m], q[m], color=COLORS.get(name, 'gray'), lw=2, label=name)
+        ratio = clinical_qp_qs_series(data, window=501, polyorder=3)
+        t = data['t']
+        n = min(len(t), len(ratio))
+        m = np.isfinite(ratio[:n])
+        if not np.any(m):
+            continue
+        qp_qs_val = qp_qs_steady(data)
+        qp_qs_str = f"{qp_qs_val:.2f}" if qp_qs_val is not None else "N/A"
+        ax.plot(t[:n][m], ratio[:n][m], color=COLORS.get(name, 'gray'),
+                lw=2, label=f"{name} (Qp/Qs={qp_qs_str})")
+        if qp_qs_val is not None:
+            ax.axhline(qp_qs_val, color=COLORS.get(name, 'gray'),
+                    ls='--', alpha=0.4, lw=1)
     ax.axhline(y=1.0, color='black', ls='--', alpha=0.5)
     ax.set_xlabel('Время (с)')
     ax.set_ylabel('Qp/Qs')
-    ax.set_title('Динамика Qp/Qs')
+    ax.set_title('Динамика Qp/Qs (скользящее среднее)')
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
+    ax.set_ylim(0.5, 5.0)
 
     # 2. Давления: bar chart
     ax = axes[0, 1]
@@ -388,7 +410,9 @@ def plot_shunt_effect_analysis(results_dict):
     ax.legend(fontsize=6, loc='upper right')
     ax.grid(True, alpha=0.3, axis='y')
 
-    # 3. Корреляция шунт → Qp/Qs
+    # 3. Корреляция шунт → Qp/Qs (по сценариям, а не временной ряд)
+    # Одна точка на сценарий: X = mean(Q_vsd), Y = qp_qs_steady.
+    # Это клинически интерпретируемо, R² осмыслен по 5 точкам.
     ax = axes[0, 2]
     xs, ys = [], []
     for name, (data, _, _) in results_dict.items():
@@ -399,7 +423,7 @@ def plot_shunt_effect_analysis(results_dict):
         if abs(s) > 1.0:
             xs.append(s); ys.append(q)
             ax.scatter(s, q, s=120, c=COLORS.get(name, 'gray'),
-                       edgecolor='black', linewidth=1.5, label=name)
+                    edgecolor='black', linewidth=1.5, label=name)
     if len(xs) > 1:
         z = np.polyfit(xs, ys, 1)
         p = np.poly1d(z)
@@ -591,7 +615,7 @@ def simulate_one_scenario(name, params):
 # main
 # =====================================================================
 
-def main(parallel=True, n_jobs=5):
+def main(parallel=True, n_jobs=4):
     t_start = time.perf_counter()
     dt_start = datetime.now()
     print("="*80)
@@ -643,6 +667,6 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--no-parallel', action='store_true', help='отключить параллель')
-    parser.add_argument('--n-jobs', type=int, default=5, help='число процессов')
+    parser.add_argument('--n-jobs', type=int, default=4, help='число процессов')
     args = parser.parse_args()
     main(parallel=not args.no_parallel, n_jobs=args.n_jobs)

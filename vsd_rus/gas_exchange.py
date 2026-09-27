@@ -229,7 +229,7 @@ class GasExchange(OrganModel):
         ----------
         Словарь с концентрациями (C_a_O2, C_v_O2, C_pv_O2, C_a_CO2, C_v_CO2, C_pv_CO2),
         парциальными давлениями (P_a_O2, P_v_O2, P_v_CO2) и диагностикой
-        (SaO2, shunt_fraction_R2L, Qp_Qs, O2_uptake, CO2_removal, f_bypass).
+        (SaO2, shunt_fraction_R2L, O2_uptake, CO2_removal, f_bypass).
         """
         # --- Защита от некорректных входов (runtime-клипы, не конфиг) ---
         C_v_O2  = float(np.clip(C_v_O2,  0.001, 0.25))
@@ -245,14 +245,17 @@ class GasExchange(OrganModel):
         C_pv_CO2 = self._C_CO2_from_P(self.P_alv_CO2)
 
         # === 3. Смешивание при право-левом шунте ===
-        if Q_shunt < 0:
+        # Отсечка Q_p > 5 мл/с: формула f_bypass = |Q_shunt|/Q_s выведена из
+        # баланса за цикл. В диастоле Q_p → 0 и Q_s → 0, поэтому без отсечки
+        # получается 0/0 → clip(0.95) → ложная гипоксемия (SaO2 ≈ 68%).
+        if Q_shunt < 0 and Q_p > 5.0:
             # Часть венозной крови из ПЖ идёт напрямую в аорту, минуя лёгкие
             Q_bypass = abs(Q_shunt)
             f_bypass = float(np.clip(Q_bypass / Q_s, 0.0, 0.95))
             C_a_O2  = (1.0 - f_bypass) * C_pv_O2  + f_bypass * C_v_O2
             C_a_CO2 = (1.0 - f_bypass) * C_pv_CO2 + f_bypass * C_v_CO2
         else:
-            # Лево-правый шунт не снижает сатурацию системной крови
+            # Лево-правый шунт или диастола: системная кровь = лёгочная
             f_bypass = 0.0
             C_a_O2  = C_pv_O2
             C_a_CO2 = C_pv_CO2
@@ -265,7 +268,7 @@ class GasExchange(OrganModel):
         # При отсутствии R→L шунта C_a_O2 = C_pv_O2 → P_a_O2 = P_alv_O2
         # (равновесие с альвеолой, а не численная инверсия).
         # При наличии R→L — решаем обратную задачу из смешанного C_a_O2.
-        if Q_shunt >= 0:
+        if Q_shunt >= 0 or Q_p <= 5.0:
             P_a_O2 = float(self.P_alv_O2)
         else:
             P_a_O2 = self._P_O2_from_C(C_a_O2)
@@ -273,8 +276,6 @@ class GasExchange(OrganModel):
 
         # Доля право-левого шунта в системном выбросе
         shunt_fraction_R2L = max(-Q_shunt, 0.0) / Q_s
-        # Отношение лёгочного кровотока к системному
-        Qp_Qs = Q_p / Q_s
 
         # Интегральные показатели газообмена (мл газа / с)
         O2_uptake   = Q_p * max(C_pv_O2  - C_v_O2,  0.0)
@@ -298,7 +299,6 @@ class GasExchange(OrganModel):
             'SaO2':               float(SaO2),           # сатурация артериальной крови
             'oxygenation_index':  float(SaO2),           # алиас для обратной совместимости
             'shunt_fraction_R2L': float(shunt_fraction_R2L),
-            'Qp_Qs':              float(Qp_Qs),
             'O2_uptake':          float(O2_uptake),
             'CO2_removal':        float(CO2_removal),
             'f_bypass':           float(f_bypass),
@@ -317,7 +317,7 @@ if __name__ == "__main__":
     print("=" * 70)
     out = gas.compute_effects(C_v_O2=0.15, C_v_CO2=0.52,
                               Q_p=83.0, Q_shunt=0.0)
-    for k in ('C_a_O2', 'C_v_O2', 'SaO2', 'Qp_Qs', 'shunt_fraction_R2L'):
+    for k in ('C_a_O2', 'C_v_O2', 'SaO2', 'shunt_fraction_R2L'):
         print(f"  {k:22s} = {out[k]:+.6g}")
 
     print("\n" + "=" * 70)

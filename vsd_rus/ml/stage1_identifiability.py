@@ -116,18 +116,37 @@ X_NAMES = ["P_sa", "P_pa", "Q_aortic", "Qp_Qs", "EDV_LV", "EDV_RV", "HR"]
 # =============================================================================
 
 class Tee:
-    """Перенаправляет вывод одновременно в несколько потоков."""
+    """
+    Перенаправляет вывод одновременно в несколько потоков.
+
+    Свойства:
+      • encoding — берётся у первого потока (sys.stdout → UTF-8 на Linux).
+      • fileno() — проксирует fileno первого потока (нужно subprocess,
+                   C-библиотекам, curses и т.п.).
+      • write() — буферизация по строкам: flush только при появлении
+                  '\\n'. Это даёт интерактивность без flush-per-write
+                  и не теряет хвост при аварийном завершении.
+      • flush() — явный сброс всех потоков.
+    """
     def __init__(self, *streams):
+        if not streams:
+            raise ValueError("Tee: нужен хотя бы один поток")
         self.streams = streams
+        self.encoding = getattr(streams[0], 'encoding', 'utf-8')
 
     def write(self, data):
         for s in self.streams:
             s.write(data)
-            s.flush()
+        if '\n' in data:
+            for s in self.streams:
+                s.flush()
 
     def flush(self):
         for s in self.streams:
             s.flush()
+
+    def fileno(self):
+        return self.streams[0].fileno()
 
 
 def d_vsd_to_R_vsd(d_mm: float) -> float:
@@ -185,9 +204,9 @@ def build_model(theta: dict,
 
     sys_cfg = cfg["systemic"]
     if target_MAP is None:
-        target_MAP = sys_cfg["target_MAP"]
+        target_MAP = sys_cfg.get("target_MAP", 85.0)
     if target_CO is None:
-        target_CO = sys_cfg["target_CO"]
+        target_CO = sys_cfg.get("target_CO", 83.0)
 
     return WholeBodyModel(
         heart_params=heart_params,
@@ -228,8 +247,9 @@ def resolve_R_sys(theta: dict) -> float:
 # 2. Симуляция → стационарные выходы
 # =============================================================================
 
-def _stage1_sim_cfg(sim_cfg: Optional[dict]) -> dict:
+def _stage1_sim_cfg(sim_cfg: Optional[dict], verbose: int = 0) -> dict:
     """Солвер (method, rtol, atol, max_step) берётся из YAML, если задан."""
+    verbose = int(verbose)
     out = {
         "method": "LSODA",
         "rtol": 1e-4,
@@ -251,11 +271,19 @@ def _stage1_sim_cfg(sim_cfg: Optional[dict]) -> dict:
 
     t_span = sim_cfg.get("t_span")
     if isinstance(t_span, (list, tuple)) and len(t_span) >= 2:
-        out["t_end"] = min(float(t_span[1]), 1200.0)
+        orig_t_end = float(t_span[1])
+        out["t_end"] = min(orig_t_end, 1200.0)
+        if orig_t_end > 1200.0 and verbose >= 1:
+            print(f"  [warn] Stage1: t_end {orig_t_end:.0f} → "
+                  f"{out['t_end']:.0f} с (ограничение Stage1 = 1200 с)")
 
     n_samples = sim_cfg.get("n_samples_t")
     if n_samples is not None:
-        out["n_samples_t"] = min(int(n_samples), 12000)
+        orig_n = int(n_samples)
+        out["n_samples_t"] = min(orig_n, 12000)
+        if orig_n > 12000 and verbose >= 1:
+            print(f"  [warn] Stage1: n_samples_t {orig_n} → "
+                  f"{out['n_samples_t']} (ограничение Stage1 = 12000)")
 
     if "stationary_rel_tol_stage1" in sim_cfg:
         out["stationary_rel_tol_stage1"] = float(sim_cfg["stationary_rel_tol_stage1"])
@@ -268,7 +296,13 @@ def _collect_outputs(model, sol) -> dict:
     keys = None
     rows = []
     for i, ti in enumerate(sol.t):
-        out = model.compute_outputs(ti, sol.y[:, i])
+        try:
+            out = model.compute_outputs(ti, sol.y[:, i])
+        except Exception as e:
+            raise RuntimeError(
+                f"_collect_outputs: compute_outputs failed at "
+                f"t={ti:.4f} (i={i}, y shape={sol.y.shape}): {e}"
+            ) from e
         if keys is None:
             keys = list(out.keys())
         rows.append([out[k] for k in keys])
@@ -278,7 +312,8 @@ def _collect_outputs(model, sol) -> dict:
     return data
 
 
-def _print_window_diagnostics(data: dict, label: str = "WINDOW") -> None:
+def _print_window_diagnostics(data: dict, label: str = "WINDOW",
+                              t_start_stationary: float = 300.0) -> None:
     """
     Печатает 28 диагностических ключей за последние 10 кардиоциклов.
 
@@ -288,7 +323,8 @@ def _print_window_diagnostics(data: dict, label: str = "WINDOW") -> None:
     """
     try:
         t = data["t"]
-        hr_tail = data["HR"][t > 300] if np.any(t > 300) else data["HR"]
+        mask_hr = t > t_start_stationary
+        hr_tail = data["HR"][mask_hr] if np.any(mask_hr) else data["HR"]
         mean_hr = max(float(np.mean(hr_tail)), 1.0)
         win = t > (t[-1] - 10.0 * 60.0 / mean_hr)
 
@@ -331,7 +367,7 @@ def get_steady_outputs(model,
     _data} или None, если решение не сошлось / нефизиологично.
     """
     verbose = int(verbose)
-    cfg = _stage1_sim_cfg(sim_cfg)
+    cfg = _stage1_sim_cfg(sim_cfg, verbose=verbose)
     t_end = float(cfg["t_end"])
     n_samples = int(cfg["n_samples_t"])
     t_calib = float(cfg["t_calib"])
@@ -460,7 +496,10 @@ def get_steady_outputs(model,
         return None
 
     if verbose >= 2:
-        _print_window_diagnostics(data, label="STEADY 10 cycles")
+        _print_window_diagnostics(
+            data, label="STEADY 10 cycles",
+            t_start_stationary=t_start_stationary,
+        )
 
     X["_data"] = data
     return X
@@ -534,7 +573,8 @@ def compute_jacobian(theta0: dict,
         theta_plus[p] = theta0[p] + delta
         theta_minus[p] = theta0[p] - delta
         if p == "d_vsd":
-            theta_minus[p] = max(theta_minus[p], 0.5)
+            theta_plus[p]  = min(theta_plus[p],  7.1)   # R_vsd ≥ 0.501
+            theta_minus[p] = max(theta_minus[p], 0.5)   # уже было
 
         if verbose >= 2:
             print(f"\n--- J param {j} {p} scale={scale:.4g} "
@@ -689,7 +729,7 @@ def select_final_theta(J: np.ndarray,
     extra = next((p for p in extra_candidates if p in contrib6), None)
     if extra is None and len(contrib6):
         extra = contrib6.index[0]
-    to_fix2 = to_fix + ([extra] if extra is not None else [])
+    to_fix2 = list(dict.fromkeys(to_fix + ([extra] if extra is not None else [])))
 
     cond5, v5, keep5, res5 = _fix_and_cond(J, param_names, to_fix2, verbose=0)
     if verbose_int >= 1:
@@ -712,7 +752,7 @@ def select_final_theta(J: np.ndarray,
         scales_override=PARAM_SCALES_ALT,
     )
     # Из 9 параметров фиксируем те же to_fix + C_sys_art (заменён на k_inotropy)
-    to_fix_alt = list(to_fix) + ["C_sys_art"]
+    to_fix_alt = list(dict.fromkeys(to_fix + ["C_sys_art"]))
     cond6a, v6a, keep6a, res6a = _fix_and_cond(
         J_alt, PARAM_NAMES_ALT, to_fix_alt, verbose=0
     )
@@ -814,17 +854,14 @@ def _main_impl(verbose: int, out_dir: Path, t_start: datetime) -> None:
     print(df_J.round(3))
 
     svd_res = analyze_svd(J, PARAM_NAMES, X_NAMES, verbose=verbose)
-    print(f"\n[Stage1] cond_8 = {svd_res['cond']:.3f}")
-    print("[Stage1] |Vt[-1]|:")
-    for k, val in svd_res["contrib"].items():
-        print(f"   {k:18s} : {val:+.4f}")
 
     plot_results(J, svd_res, PARAM_NAMES, X_NAMES, out_dir / "stage1_SVD.png")
     print(f"[Stage1] График: {out_dir / 'stage1_SVD.png'}")
 
-    selection = select_final_theta(
-        J, PARAM_NAMES, verbose=(1 if verbose >= 1 else 0), sim_cfg=sim_cfg
-    )
+    selection = select_final_theta(J, PARAM_NAMES, verbose=0, sim_cfg=sim_cfg)
+    if verbose >= 1:
+        print(f"[Stage1] Режим: {selection['mode']} | to_fix={selection['to_fix']} | "
+            f"cond={selection['cond']:.3f} | keep={selection['theta_final']}")
 
     # --- Report ---
     lines = []
@@ -884,22 +921,23 @@ def main(verbose: int = 1) -> None:
 
     with open(log_path, "w", encoding="utf-8") as log_file:
         original_stdout = sys.stdout
+        original_stderr = sys.stderr
         sys.stdout = Tee(original_stdout, log_file)
+        sys.stderr = Tee(original_stderr, log_file)
         try:
             _main_impl(verbose, out_dir, t_start)
             print(f"[Stage1] Полный лог: {log_path}")
         finally:
             sys.stdout = original_stdout
+            sys.stderr = original_stderr
 
 
 # =============================================================================
 # debug_base_point
 # =============================================================================
 
-def debug_base_point(verbose: int = 1) -> None:
+def _debug_impl(verbose: int, t_start: datetime) -> None:
     """Проверка базовой точки: конвергенция, steady-state, один кардиоцикл."""
-    verbose = int(verbose)
-    t_start = datetime.now()
     print("=" * 70)
     print(f"[Stage1 DEBUG] Старт: {t_start:%Y-%m-%d %H:%M:%S}")
     print("=" * 70)
@@ -946,7 +984,8 @@ def debug_base_point(verbose: int = 1) -> None:
               f"V_rv={data['V_rv'][m].mean():5.1f}  "
               f"HR={data['HR'][m].mean():4.1f}")
 
-    HR_mean = float(np.mean(data["HR"][data["t"] > 250]))
+    t_start_stat = float(sim_cfg.get("t_start_stationary", 300.0))
+    HR_mean = float(np.mean(data["HR"][data["t"] > t_start_stat]))
     T = 60.0 / max(HR_mean, 1.0)
     win = data["t"] > (data["t"][-1] - 10.0 * T)
     Qp_mean = float(np.mean(data["Q_pulmonary"][win]))
@@ -984,9 +1023,6 @@ def debug_base_point(verbose: int = 1) -> None:
         print(f"  {k:12s}  min={arr.min():7.1f}  "
               f"max={arr.max():7.1f}  mean={arr.mean():7.1f}")
 
-    if verbose >= 2:
-        _print_window_diagnostics(data, label="DEBUG FULL")
-
     t_end_dt = datetime.now()
     print("\n" + "=" * 70)
     print(f"[Stage1 DEBUG] Финиш: {t_end_dt:%Y-%m-%d %H:%M:%S}")
@@ -994,26 +1030,45 @@ def debug_base_point(verbose: int = 1) -> None:
     print("=" * 70)
 
 
+def debug_base_point(verbose: int = 1) -> None:
+    """Обёртка: Tee-логгер для debug-режима → results/stage1_debug.log."""
+    verbose = int(verbose)
+    t_start = datetime.now()
+    out_dir = ROOT / "results"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = out_dir / "stage1_debug.log"
+
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        sys.stdout = Tee(original_stdout, log_file)
+        sys.stderr = Tee(original_stderr, log_file)
+        try:
+            _debug_impl(verbose, t_start)
+            print(f"[Stage1 DEBUG] Полный лог: {log_path}")
+        finally:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+
 # =============================================================================
 # Entry point
 # =============================================================================
 
 if __name__ == "__main__":
-    # Backward-compat: `python stage1_identifiability.py debug` (позиционный)
-    args_list = sys.argv[1:]
-    is_debug = "debug" in args_list
-    args_list = [a for a in args_list if a != "debug"]
-
     parser = argparse.ArgumentParser(
         description="Stage 1: анализ идентифицируемости WholeBodyModel",
+    )
+    parser.add_argument(
+        "mode", nargs="?", default="run", choices=["run", "debug"],
+        help="run (default) — полный анализ; debug — диагностика базовой точки",
     )
     parser.add_argument(
         "--verbose", "-v", type=int, default=1, choices=[0, 1, 2],
         help="0=тихо, 1=базовые принты (default), 2=детально",
     )
-    args = parser.parse_args(args_list)
+    args = parser.parse_args()
 
-    if is_debug:
+    if args.mode == "debug":
         print(f"[Stage1] DEBUG MODE (verbose={args.verbose})")
         debug_base_point(verbose=args.verbose)
     else:

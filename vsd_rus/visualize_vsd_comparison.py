@@ -7,7 +7,6 @@ visualize_vsd_comparison.py
 Загружает .npz, сгенерированные run_simulation.py, и строит набор
 диагностических фигур:
 
-    fig1_hemodynamics_timeseries.png   — временные ряды
     fig2_phase_portraits.png           — фазовые PV-портреты (если есть P_lv/P_rv)
     fig3_bar_comparison.png            — столбчатое сравнение установившихся метрик
     fig4_detailed_cardiac.png          — детальный анализ сердца и регионов
@@ -30,7 +29,8 @@ from matplotlib.patches import Circle
 from scipy.stats import linregress
 from utils import safe_savgol_filter as safe_savgol
 from utils import (subsample, steady_mask, steady_mean,
-                   steady_mean_std, qp_qs_steady)
+                   steady_mean_std, qp_qs_steady,
+                   clinical_qp_qs_series)
 from physio_config import load_all_patients
 
 warnings.filterwarnings("ignore")
@@ -125,30 +125,67 @@ def load_all_results(pattern: str = "vsd_results_*.npz"
     print(f"\nЗагружено сценариев: {list(ordered.keys())}")
     return ordered
 
-
 # ===========================================================================
-# Рис. 1 — Временные ряды
+# Рис. 1 — Временные ряды гемодинамики
 # ===========================================================================
 
 def plot_hemodynamic_timeseries(results: Dict[str, dict]) -> None:
+    """
+    Временные ряды ключевых гемодинамических переменных по сценариям.
+    """
     fig, axes = plt.subplots(3, 3, figsize=(15, 10))
     fig.suptitle("Гемодинамика при ДМЖП: временные ряды",
                  fontsize=14, fontweight="bold")
 
-    metrics = [
-        ("P_sa",        "Системное АД (мм рт. ст.)",  axes[0, 0]),
-        ("P_pa",        "Лёгочное АД (мм рт. ст.)",   axes[0, 1]),
-        ("Q_aortic",    "Системный выброс (мл/с)",    axes[0, 2]),
-        ("Q_pulmonary", "Лёгочный кровоток (мл/с)",   axes[1, 0]),
-        ("Qp_Qs",       "Qp / Qs",                    axes[1, 1]),
-        ("Q_vsd",       "Шунт VSD (мл/с)",            axes[1, 2]),
-        ("V_lv",        "Объём ЛЖ (мл)",              axes[2, 0]),
-        ("V_rv",        "Объём ПЖ (мл)",              axes[2, 1]),
-        ("SaO2",        "SaO₂ (%)",                   axes[2, 2]),
+    # Панели: (metric, ylabel, ax, hlines, ylim)
+    #   metric == "__QpQs__" — спец-обработка через clinical_qp_qs_series
+    #   hlines: [(y, color, ls, label_or_None), ...]
+    #   ylim:   (lo, hi) или None
+    panels = [
+        ("P_sa",        "Системное АД (мм рт. ст.)", axes[0, 0],
+         [(60, "orange", ":", "гипотензия 60"),
+          (85, "green",  "--", "MAP target 85")], None),
+        ("P_pa",        "Лёгочное АД (мм рт. ст.)",  axes[0, 1],
+         [(25, "orange", ":", "ЛГ > 25")], None),
+        ("Q_aortic",    "Системный выброс (мл/с)",   axes[0, 2],
+         [(83, "green",  "--", "CO target 83")], None),
+        ("Q_pulmonary", "Лёгочный кровоток (мл/с)",  axes[1, 0],
+         [(83, "green",  "--", "Qp target 83")], None),
+        ("__QpQs__",    "Qp / Qs",                   axes[1, 1],
+         [(1.0, "black",  "--", "норма 1.0"),
+          (1.5, "orange", ":",  "1.5"),
+          (2.0, "red",    ":",  "2.0")], (0.5, 5.0)),
+        ("Q_vsd",       "Шунт VSD (мл/с)",           axes[1, 2],
+         [(0, "black", "--", None)], None),
+        ("V_lv",        "Объём ЛЖ (мл)",             axes[2, 0], [], None),
+        ("V_rv",        "Объём ПЖ (мл)",             axes[2, 1], [], None),
+        ("SaO2",        "SaO₂ (%)",                  axes[2, 2],
+         [(90, "orange", ":", "SaO₂ = 90 %")], (60, 100)),
     ]
 
-    for metric, ylabel, ax in metrics:
-        for scenario, data in results.items():
+    for metric, ylabel, ax, hlines, ylim in panels:
+        for sc, data in results.items():
+            # ---- Спец-случай: клиническое Qp/Qs ----
+            if metric == "__QpQs__":
+                if not has_field(data, "t", "Q_pulmonary", "Q_aortic"):
+                    continue
+                ratio = clinical_qp_qs_series(data, window=501, polyorder=3)
+                if ratio.size == 0:
+                    continue
+                t = np.asarray(data["t"])
+                n = min(len(t), len(ratio))
+                m = np.isfinite(ratio[:n])
+                if not np.any(m):
+                    continue
+                ax.plot(t[:n][m], ratio[:n][m],
+                        color=_color(sc), lw=1.6, label=sc)
+                rs = qp_qs_steady(data)
+                if rs is not None:
+                    ax.axhline(rs, color=_color(sc), ls="--",
+                               alpha=0.3, lw=0.8)
+                continue
+
+            # ---- Обычный временной ряд ----
             if not has_field(data, "t", metric):
                 continue
             t, y = subsample(data, metric)
@@ -157,36 +194,40 @@ def plot_hemodynamic_timeseries(results: Dict[str, dict]) -> None:
             mask = np.isfinite(y)
             if not np.any(mask):
                 continue
-            # Для Qp/Qs и SaO2 наложим лёгкое сглаживание
-            if metric in ("Qp_Qs", "SaO2") and mask.sum() > 100:
-                y_plot = np.array(y, dtype=float)
-                y_plot[mask] = safe_savgol(y_plot[mask], 101, 3)
-            else:
-                y_plot = y
-            ax.plot(t[mask], y_plot[mask],
-                    color=_color(scenario), lw=1.5, label=scenario)
+            # safe_savgol интерполирует NaN — сглаживаем весь ряд,
+            # а не сжатую маску (см. utils.safe_savgol_filter).
+            if metric == "SaO2":
+                y = safe_savgol(y, 101, 3)
+            ax.plot(t[mask], y[mask], color=_color(sc), lw=1.5, label=sc)
 
         ax.set_xlabel("Время (с)")
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.3)
-        if metric == "SaO2":
-            ax.axhline(90, color="orange", ls=":", alpha=0.6)
-        if metric == "Qp_Qs":
-            ax.axhline(1.0, color="black", ls="--", alpha=0.4)
-            ax.set_ylim(0.5, 5.0)
+        for y0, col, ls, lbl in hlines:
+            ax.axhline(y0, color=col, ls=ls, alpha=0.5,
+                       label=lbl if lbl else "_nolegend_")
+        if ylim is not None:
+            ax.set_ylim(*ylim)
 
-    # Одна общая легенда
-    handles, labels = axes[0, 0].get_legend_handles_labels()
+    # --- Одна общая легенда: собираем со всех осей, дедуплицируем по label ---
+    handles, labels, seen = [], [], set()
+    for ax in axes.flat:
+        h, l = ax.get_legend_handles_labels()
+        for hi, li in zip(h, l):
+            if li in seen:
+                continue
+            seen.add(li)
+            handles.append(hi)
+            labels.append(li)
     if handles:
         fig.legend(handles, labels, loc="upper right",
-           bbox_to_anchor=(0.99, 0.95), fontsize=8, ncol=2)
+                   bbox_to_anchor=(0.99, 0.95), fontsize=8, ncol=2)
 
-    plt.tight_layout(rect=(0, 0, 1, 0.95))
+    plt.tight_layout(rect=(0, 0, 1, 0.93))
     plt.savefig("fig1_hemodynamics_timeseries.png",
                 dpi=150, bbox_inches="tight")
     plt.close(fig)
     print("  ✓ fig1_hemodynamics_timeseries.png")
-
 
 # ===========================================================================
 # Рис. 2 — Фазовые PV-портреты
@@ -310,7 +351,7 @@ def plot_bar_comparison(results: Dict[str, dict]) -> None:
                         color=[_color(s) for s in scenarios],
                         alpha=0.75, edgecolor="black", linewidth=1)
     ax_qp.set_ylabel("Qp / Qs")
-    ax_qp.set_title("Qp_Qs")
+    ax_qp.set_title("Qp / Qs")
     ax_qp.tick_params(axis="x", rotation=40, labelsize=7)
     for lbl in ax_qp.get_xticklabels():
         lbl.set_horizontalalignment("right")
@@ -337,23 +378,32 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
     fig.suptitle("Детальный анализ сердечно-сосудистых параметров",
                  fontsize=14, fontweight="bold")
 
-    # --- 1. Qp/Qs во времени ---
+    # --- 1. Qp/Qs во времени (скользящее клиническое) ---
+    # Не рисуем data['Qp_Qs'] — мгновенное отношение в диастоле даёт
+    # выбросы 1e5–1e7. Рисуем savgol(Qp)/savgol(Qs) с окном ~150 с (≈200
+    # циклов) — клинический эквивалент Qp/Qs за скользящее окно.
+    # Горизонтальная пунктирная линия — qp_qs_steady(data), финальное
+    # число, которое пойдёт в отчёт.
     ax = axes[0, 0]
     for sc, data in results.items():
-        if not has_field(data, "t", "Qp_Qs"):
+        if not has_field(data, "t", "Q_pulmonary", "Q_aortic"):
             continue
-        t, y = subsample(data, "Qp_Qs", 4000)
-        mask = np.isfinite(y)
-        if not np.any(mask):
+        ratio = clinical_qp_qs_series(data, window=501, polyorder=3)
+        if ratio.size == 0:
             continue
-        y_plot = np.array(y, dtype=float)
-        if mask.sum() > 100:
-            y_plot[mask] = safe_savgol(y_plot[mask], 101, 3)
-        ax.plot(t[mask], y_plot[mask], color=_color(sc), lw=1.6, label=sc)
+        t = np.asarray(data['t'])
+        n = min(len(t), len(ratio))
+        m = np.isfinite(ratio[:n])
+        if not np.any(m):
+            continue
+        ax.plot(t[:n][m], ratio[:n][m], color=_color(sc), lw=1.6, label=sc)
+        rs = qp_qs_steady(data)
+        if rs is not None:
+            ax.axhline(rs, color=_color(sc), ls="--", alpha=0.4, lw=1)
     ax.axhline(1.0, color="gray", ls="--", alpha=0.5, label="Норма (1.0)")
     ax.set_xlabel("Время (с)")
     ax.set_ylabel("Qp / Qs")
-    ax.set_title("Соотношение Qp/Qs")
+    ax.set_title("Соотношение Qp/Qs (скользящее)")
     ax.legend(fontsize=7, ncol=2)
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0.5, 5.0)
@@ -396,45 +446,34 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
     ax.legend(fontsize=6, ncol=2)
     ax.grid(True, alpha=0.3)
 
-    # --- 4. Корреляция Q_vsd ↔ Qp/Qs ---
+    # --- 4. Корреляция Q_vsd ↔ Qp/Qs (по сценариям) ---
+    # Не scatter мгновенных пар (Q_vsd(t), Qp/Qs(t)) — X-ось тогда
+    # мгновенное отношение с выбросами 1e5–1e7. Вместо этого — одна
+    # точка на сценарий из устойчивых средних:
+    #   X = steady_mean(Q_vsd), Y = qp_qs_steady = mean(Qp)/mean(Qs).
+    # Так R² считается по 5 точкам и отражает реальную корреляцию.
     ax = axes[1, 0]
     xs, ys = [], []
     for sc, data in results.items():
-        if not has_field(data, "Q_vsd", "Qp_Qs"):
-            continue
-        mask = steady_mask(data) & np.isfinite(data["Q_vsd"]) \
-            & np.isfinite(data["Qp_Qs"])
-        if not np.any(mask):
-            continue
-        q_vsd = np.asarray(data["Q_vsd"])[mask]
-        q_ratio = np.asarray(data["Qp_Qs"])[mask]
-        # Отбрасываем мгновенные выбросы Qp/Qs (диастолические скачки),
-        # чтобы scatter не растягивал ось и не тратил точки впустую.
-        keep = q_ratio < 5.0
-        q_vsd   = q_vsd[keep]
-        q_ratio = q_ratio[keep]
-        if q_vsd.size == 0:
-            continue
-        step = max(1, q_vsd.size // 500)
-        ax.scatter(q_vsd[::step], q_ratio[::step],
-                   c=_color(sc), s=10, alpha=0.5, label=sc)
-
-        # Точка-агрегат: Q_vsd — mean, Qp/Qs — из средних потоков
         s_mean = steady_mean(data, "Q_vsd")
         q_mean = qp_qs_steady(data)
-        if s_mean is not None and q_mean is not None and abs(s_mean) > 1.0:
-            xs.append(s_mean)
-            ys.append(q_mean)
+        if s_mean is None or q_mean is None:
+            continue
+        xs.append(s_mean)
+        ys.append(q_mean)
+        ax.scatter(s_mean, q_mean, s=150, c=_color(sc),
+                   edgecolor="black", linewidth=1.5, label=sc, zorder=5)
+        ax.annotate(_short(sc, 14), (s_mean, q_mean),
+                    xytext=(6, 4), textcoords="offset points", fontsize=7)
     if len(xs) > 1:
         slope, intercept, r_val, _, _ = linregress(xs, ys)
         x_line = np.linspace(min(xs), max(xs), 50)
         ax.plot(x_line, slope * x_line + intercept, "k--", alpha=0.6,
                 label=f"R² = {r_val ** 2:.3f}")
     ax.axvline(0, color="black", ls="--", alpha=0.5)
-    ax.set_xlabel("Шунт VSD (мл/с)")
-    ax.set_ylabel("Qp / Qs")
-    ax.set_title("Корреляция: шунт ↔ Qp/Qs")
-    ax.set_ylim(0.0, 5.0)              # ← ограничиваем окно; выбросы мгновенного Qp/Qs не растягивают ось
+    ax.set_xlabel("Средний шунт VSD (мл/с)")
+    ax.set_ylabel("Qp / Qs (steady)")
+    ax.set_title("Корреляция: шунт → Qp/Qs (по сценариям)")
     ax.legend(fontsize=6, ncol=2)
     ax.grid(True, alpha=0.3)
 
@@ -720,15 +759,40 @@ def plot_comprehensive_dashboard(results: Dict[str, dict]) -> None:
     fig = plt.figure(figsize=(18, 14))
     gs = GridSpec(4, 4, figure=fig, hspace=0.45, wspace=0.35)
 
-    # 1. Qp/Qs
+    # 1. Qp/Qs (скользящее клиническое, не мгновенное)
+    # Не используем _plot_series(..., "Qp_Qs", ...): тот берёт
+    # data['Qp_Qs'] — мгновенное отношение с диастолическими
+    # выбросами 1e5–1e7, и сглаживает их savgol(101). Рисуем
+    # savgol(Qp)/savgol(Qs) с окном ~150 с (≈200 циклов) —
+    # клинический эквивалент; горизонтальная пунктирная линия —
+    # qp_qs_steady(data), финальное число для отчёта.
     ax1 = fig.add_subplot(gs[0, :2])
-    _plot_series(ax1, results, "Qp_Qs", "Qp / Qs",
-             "Соотношение лёгочного и системного кровотока",
-             smooth=True,
-             hlines=[(1.0, "black", "--"),
-                     (1.5, "orange", ":"),
-                     (2.0, "red", ":")],
-             ylim=(0.5, 5.0))
+    for sc, data in results.items():
+        if not has_field(data, "t", "Q_pulmonary", "Q_aortic"):
+            continue
+        ratio = clinical_qp_qs_series(data, window=501, polyorder=3)
+        if ratio.size == 0:
+            continue
+        t = np.asarray(data['t'])
+        n = min(len(t), len(ratio))
+        m = np.isfinite(ratio[:n])
+        if not np.any(m):
+            continue
+        ax1.plot(t[:n][m], ratio[:n][m],
+                 color=_color(sc), lw=1.6, label=sc)
+        rs = qp_qs_steady(data)
+        if rs is not None:
+            ax1.axhline(rs, color=_color(sc), ls='--', alpha=0.4, lw=1)
+    ax1.axhline(1.0, color='black',  ls='--', alpha=0.5)
+    ax1.axhline(1.5, color='orange', ls=':',  alpha=0.5)
+    ax1.axhline(2.0, color='red',    ls=':',  alpha=0.5)
+    ax1.set_ylim(0.5, 5.0)
+    ax1.set_xlabel("Время (с)")
+    ax1.set_ylabel("Qp / Qs")
+    ax1.set_title("Qp/Qs (скользящее клиническое)",
+                  fontsize=11, fontweight="bold")
+    ax1.legend(fontsize=7)
+    ax1.grid(True, alpha=0.3)
 
     # 2. Давления
     ax2 = fig.add_subplot(gs[0, 2])
@@ -783,7 +847,7 @@ def plot_comprehensive_dashboard(results: Dict[str, dict]) -> None:
     ax8 = fig.add_subplot(gs[2, 0])
     xs, ys = [], []
     for sc, data in results.items():
-        if not has_field(data, "Q_vsd", "Qp_Qs"):
+        if not has_field(data, "Q_vsd"):
             continue
         r_vsd = steady_mean_std(data, "Q_vsd")
         q_qp  = qp_qs_steady(data)
@@ -808,27 +872,24 @@ def plot_comprehensive_dashboard(results: Dict[str, dict]) -> None:
     ax8.legend(fontsize=7)
     ax8.grid(True, alpha=0.3)
 
-    # 9. SaO2 vs Qp/Qs
+    # 9. SaO₂ vs Qp/Qs — по сценариям (не облако!)
     ax9 = fig.add_subplot(gs[2, 1])
     for sc, data in results.items():
-        if not has_field(data, "SaO2", "Qp_Qs"):
+        sao2_mean = steady_mean(data, "SaO2", scale=100.0)
+        qp_qs     = qp_qs_steady(data)
+        if sao2_mean is None or qp_qs is None:
             continue
-        mask = steady_mask(data) & np.isfinite(data["SaO2"]) \
-            & np.isfinite(data["Qp_Qs"])
-        if not np.any(mask):
-            continue
-        q = np.asarray(data["Qp_Qs"])[mask]
-        s = np.asarray(data["SaO2"])[mask] * 100.0
-        step = max(1, q.size // 500)
-        ax9.scatter(q[::step], s[::step], c=_color(sc),
-                    s=10, alpha=0.5, label=sc)
-    ax9.axhline(90, color="orange", ls=":", alpha=0.5)
-    ax9.axvline(1.0, color="black", ls="--", alpha=0.5)
-    ax9.set_xlabel("Qp / Qs")
+        ax9.scatter(qp_qs, sao2_mean, s=150, c=_color(sc),
+                    edgecolor="black", linewidth=1.5, label=sc, zorder=5)
+        ax9.annotate(_short(sc, 14), (qp_qs, sao2_mean),
+                    xytext=(6, 4), textcoords="offset points", fontsize=7)
+    ax9.axhline(90, color="orange", ls=":", alpha=0.6, label="SaO₂ = 90%")
+    ax9.axvline(1.0, color="black", ls="--", alpha=0.5, label="Qp/Qs = 1")
+    ax9.set_xlabel("Qp / Qs (steady)")
     ax9.set_ylabel("SaO₂ (%)")
-    ax9.set_title("SaO₂ vs Qp/Qs (Эйзенменгер)",
-                  fontsize=11, fontweight="bold")
-    ax9.legend(fontsize=7)
+    ax9.set_title("SaO₂ vs Qp/Qs (по сценариям)",
+                fontsize=11, fontweight="bold")
+    ax9.legend(fontsize=6, loc="lower right", ncol=2)
     ax9.grid(True, alpha=0.3)
     ax9.set_xlim(0.5, 5.0)
 
