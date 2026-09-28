@@ -25,7 +25,7 @@ TAU     = 2.0
 # Проверяем несколько наборов (gain, k_inotropy):
 # текущий и «физиологический»
 CASES = [
-    {"name": "current (gain=0.002)",   "gain": 0.002, "k_inotropy": 0.5},
+    {"name": "current (gain=0.004)",   "gain": 0.004, "k_inotropy": 0.5},
     {"name": "physiological (gain=0.015)", "gain": 0.015, "k_inotropy": 1.5},
 ]
 
@@ -188,7 +188,7 @@ def summary():
     checks = []
 
     # 1. Gain
-    gain_default = 0.002
+    gain_default = 0.004
     sens = gain_default * HR_BASE
     checks.append(("Gain-чувствительность (0.5–1.5 bpm/mmHg)",
                    sens, 0.5, 1.5, sens >= 0.5))

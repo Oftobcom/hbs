@@ -31,6 +31,7 @@ class Heart4Chambers(OrganModel):
     _HR_MIN, _HR_MAX = 20.0, 250.0
     _E_MIN_LO, _E_MIN_HI = 0.0, 1.0
     _E_MAX_LO, _E_MAX_HI = 0.01, 20.0
+    _RV_CAP_BONUS = 20.0
     _V0_MIN, _V0_MAX = 0.0, 100.0
     _EDV_MIN, _EDV_MAX = 10.0, 500.0
 
@@ -270,15 +271,20 @@ class Heart4Chambers(OrganModel):
 
         for chamber in self.E_max_base:
             factor = 1.0
+            cap = self._E_MAX_HI            # дефолт на случай новой камеры
+
             if chamber == 'LV':
                 factor = baro_activation
             elif chamber == 'RV':
                 factor = baro_activation_rv * rv_hypertrophy
+                # Потолок растёт только у ПЖ: 20 → 40 при полном afterload
+                cap = self._E_MAX_HI + self._RV_CAP_BONUS * rv_afterload
             elif chamber in ('LA', 'RA'):
                 factor = 1.0 + 0.2 * (baro_activation - 1.0)
+
             e_new = self.E_max_base[chamber] * inotropy_factor * factor
             self._current_E_max[chamber] = float(
-                np.clip(e_new, self._E_MAX_LO, self._E_MAX_HI)
+                np.clip(e_new, self._E_MAX_LO, cap)
             )
 
     # ------------------------------------------------------------------
@@ -488,8 +494,8 @@ class Heart4Chambers(OrganModel):
         dV_lv = self._soft_clamp(V_lv, self.V0['LV'], dV_lv)
         dV_ra = self._soft_clamp(V_ra, self.V0['RA'], dV_ra)
         rv_al = min(float(getattr(self, '_rv_afterload', 0.0)), 2.0)
-        V_min_rv_eff = self.V0['RV'] * (1.0 + 0.5 * rv_al)     # 10 → 20 при rv_al=2
-        V_max_rv_eff = 250.0 * (1.0 + 0.5 * rv_al)             # 250 → 500
+        V_min_rv_eff = self.V0['RV'] * max(0.3, 1.0 - 0.3 * rv_al)
+        V_max_rv_eff = 250.0 * (1.0 + 0.5 * rv_al)
         dV_rv = self._soft_clamp(V_rv, V_min_rv_eff, dV_rv)
         dV_rv = self._soft_clamp_upper(V_rv, V_max_rv_eff, dV_rv)
 

@@ -898,6 +898,7 @@ def main(variant: str,
         sys.stdout = Tee(original_stdout, log_file)
         sys.stderr = Tee(original_stderr, log_file)
         try:
+            print(f"[log] Script    : {Path(sys.argv[0]).resolve().name}")
             print(f"[log] Запись в: {log_path}")
             _main_impl(variant)
             print(f"[log] Полный лог: {log_path}")

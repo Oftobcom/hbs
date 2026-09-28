@@ -775,6 +775,7 @@ class WholeBodyModel:
             'C_a_O2': gas_ex['C_a_O2'],
             'C_v_lactate': conc.get('lactate', 0.10),
             'V_blood': Vb,
+            'baro_sys_scale': baroreflex_out.get('R_sys_scale', 1.0),
         }
         d_peripheral = self.peripheral.get_derivatives(t, V_periph, peripheral_inputs)
         periph_out = self.peripheral.get_outputs(V_periph)

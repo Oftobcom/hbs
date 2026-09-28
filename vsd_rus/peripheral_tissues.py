@@ -259,7 +259,7 @@ class PeripheralTissues(OrganModel):
             f_P = 1.0 + self.k_P_myogenic * signed
         return float(np.clip(f_P, self.R_min_factor, self.R_max_factor))
 
-    def _autoregulation_target(self, P_sa: float, C_O2_local: float) -> float:
+    def _autoregulation_target(self, P_sa: float, C_O2_local: float, baro_scale=1.0) -> float:
         """
         Целевое R_eff — комбинация метаболической и миогенной регуляции.
 
@@ -267,7 +267,7 @@ class PeripheralTissues(OrganModel):
         """
         f_O2 = self._autoregulation_factor_O2(C_O2_local)
         f_P = self._autoregulation_factor_P(P_sa)
-        return self.R_base * f_O2 * f_P
+        return self.R_base * f_O2 * f_P * baro_scale
 
     # ------------------------------------------------------------------
     # Производные
@@ -290,7 +290,8 @@ class PeripheralTissues(OrganModel):
         R_eff = max(float(R_eff), 1e-3)
 
         # --- 1. Ауторегуляция: R_eff релаксирует к целевому ---
-        R_target = self._autoregulation_target(P_sa, C_O2_loc)
+        baro_scale = float(inputs.get('baro_sys_scale', 1.0))
+        R_target = self._autoregulation_target(P_sa, C_O2_loc, baro_scale)
         dR_eff = (R_target - R_eff) / self.tau_autoreg
 
         # --- 2. Кровоток через периферию ---

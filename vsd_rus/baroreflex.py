@@ -39,6 +39,7 @@ class Baroreflex(OrganModel):
     _GAIN_MIN, _GAIN_MAX = 0.0, 0.1
     _TAU_MIN, _TAU_MAX = 0.1, 60.0
     _K_INOTROPY_MIN, _K_INOTROPY_MAX = 0.0, 5.0
+    _BARO_SYS_MIN, _BARO_SYS_MAX = 0.5, 2.0
 
     # --- Границы целевой ЧСС (клип HR_target) ---
     _HR_TARGET_MIN = 40.0
@@ -51,7 +52,7 @@ class Baroreflex(OrganModel):
     def __init__(self,
                 P_set=80.0,
                 HR_base=70.0,
-                gain=0.002,
+                gain=0.004,
                 tau=2.0,
                 k_inotropy=0.5,
                 k_inotropy_pulm: float = 0.5):
@@ -154,14 +155,24 @@ class Baroreflex(OrganModel):
         # --- Производная (линейная динамика первого порядка) ---
         dHR = (HR_target - HR) / self.tau
 
-        # --- Системная бароактивация (общая для LV и RV) ---
-        baro_sys = 1.0 + self.k_inotropy * max(
-            1.0 - P_sa / self.P_set, 0.0
-        )
+        # --- Системная бароактивация (двусторонняя) ---
+        # baro_sys > 1 при гипотензии (симпатика: вазоконстрикция + инотропия)
+        # baro_sys < 1 при гипертензии (парасимпатика: вазодилатация + ↓инотропия)
+        baro_raw = 1.0 + self.k_inotropy * (1.0 - P_sa / self.P_set)
 
+        # Хроническое подавление — только для симпатической ветви
+        # (blunted sympathetic response при Эйзенменгере),
+        # парасимпатическая ветвь сохраняется.
         R_rem = float(inputs.get('R_remodel', 1.0))
         suppress = 1.0 / (1.0 + max(R_rem - 2.0, 0.0))
-        baro_sys = 1.0 + (baro_sys - 1.0) * suppress
+        if baro_raw > 1.0:
+            baro_sys = 1.0 + (baro_raw - 1.0) * suppress
+        else:
+            baro_sys = baro_raw
+
+        baro_sys = float(np.clip(
+            baro_sys, self._BARO_SYS_MIN, self._BARO_SYS_MAX
+        ))
 
         # --- Пульмональная бароактивация (специфична для RV) ---
         # При P_pa > P_pa_set пульмональный рефлекс усиливает ПЖ.
@@ -173,8 +184,9 @@ class Baroreflex(OrganModel):
             'HR': HR,
             'HR_target': HR_target,
             'hr_factor': HR / self.HR_base,
-            'baro_activation': baro_sys,           # сохраняем для совместимости
-            'baro_activation_rv': baro_pulm,       # <-- новое
+            'baro_activation': baro_sys,
+            'baro_activation_rv': baro_pulm,
+            'R_sys_scale': baro_sys,
         }
         return np.array([dHR])
 
