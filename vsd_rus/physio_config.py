@@ -20,7 +20,7 @@ from functools import lru_cache
 from pathlib import Path
 import os
 from typing import Optional, List
-
+import warnings
 import numpy as np
 import yaml
 
@@ -309,16 +309,6 @@ def _deep_merge(base: dict, override: dict) -> dict:
 def _validate_patient(cfg: dict, path: Path) -> None:
     """
     Валидация полей одного пациента — fail-fast.
-
-    Проверки:
-      • Все _REQUIRED_PATIENT_KEYS присутствуют
-      • id, label — непустые строки
-      • order — целое > 0
-      • color — hex-строка #RGB или #RRGGBB
-      • vsd_resistance — число > 0 или 'inf'/np.inf
-      • flow_dependent_lungs, pressure_remodel — bool
-      • HR_base (если задан) — ∈ [20, 250]
-      • E_max_rv (если задан) — ∈ [0.01, 20]
     """
     if not isinstance(cfg, dict):
         raise ValueError(
@@ -343,19 +333,74 @@ def _validate_patient(cfg: dict, path: Path) -> None:
     _check_bool(f"{path.name}.flow_dependent_lungs", cfg["flow_dependent_lungs"])
     _check_bool(f"{path.name}.pressure_remodel",     cfg["pressure_remodel"])
 
-    # --- Опциональные ключи ---
-    if "HR_base" in cfg:
-        _check_finite_range(f"{path.name}.HR_base", cfg["HR_base"], 20.0, 250.0)
-    if "E_max_rv" in cfg:
-        _check_finite_range(f"{path.name}.E_max_rv", cfg["E_max_rv"], 0.01, 20.0)
-    if "E_max_lv" in cfg:
-        _check_finite_range(f"{path.name}.E_max_lv", cfg["E_max_lv"], 0.01, 20.0)
-    if "EDV_rv" in cfg:
-        # Должно совпадать с Heart4Chambers._EDV_MIN/MAX = 10..500
-        _check_finite_range(f"{path.name}.EDV_rv", cfg["EDV_rv"], 10.0, 500.0)
-    if "P_pa_threshold" in cfg:
-        _check_finite_range(f"{path.name}.P_pa_threshold",
-                            cfg["P_pa_threshold"], 5.0, 100.0)
+    # --- Поля лёгочного ремоделирования (Цель 1) ---
+    if "R_remodel_max" in cfg:
+        _check_finite_range(f"{path.name}.R_remodel_max",
+                            cfg["R_remodel_max"], 1.0, 20.0)
+    if "pressure_sensitivity" in cfg:
+        _check_finite_range(f"{path.name}.pressure_sensitivity",
+                            cfg["pressure_sensitivity"], 0.0, 2.0)
+    if "tau_remodel" in cfg:
+        _check_finite_range(f"{path.name}.tau_remodel",
+                            cfg["tau_remodel"], 1.0, 1e5)
+    if "flow_sensitivity" in cfg:
+        _check_finite_range(f"{path.name}.flow_sensitivity",
+                            cfg["flow_sensitivity"], 0.0, 5.0)
+    # --- Поля гипертрофии ПЖ (heart.py) ---
+    if "rv_hypertrophy_sensitivity" in cfg:
+        _check_finite_range(f"{path.name}.rv_hypertrophy_sensitivity",
+                            cfg["rv_hypertrophy_sensitivity"], 0.0, 5.0)
+    # --- Поля пульмонального барорефлекса (baroreflex.py) ---
+    if "k_inotropy_pulm" in cfg:
+        _check_finite_range(f"{path.name}.k_inotropy_pulm",
+                            cfg["k_inotropy_pulm"], 0.0, 5.0)
+    if "k_inotropy" in cfg:
+        _check_finite_range(f"{path.name}.k_inotropy",
+                            cfg["k_inotropy"], 0.0, 5.0)
+
+    rv_sens = cfg.get("rv_hypertrophy_sensitivity", 0.0)
+    if rv_sens > 0.0 and not cfg["pressure_remodel"]:
+        raise ValueError(
+            f"physio_config: {path.name} — "
+            f"rv_hypertrophy_sensitivity={rv_sens} > 0, но "
+            f"pressure_remodel=False. Гипертрофия ПЖ без лёгочного "
+            f"ремоделирования физически невозможна и будет "
+            f"молча проигнорирована (rv_afterload ≡ 0)."
+        )
+
+    k_pulm = cfg.get("k_inotropy_pulm", 0.0)
+    if k_pulm > 0.0 and not cfg["pressure_remodel"]:
+        warnings.warn(
+            f"physio_config: {path.name} — "
+            f"k_inotropy_pulm={k_pulm} > 0, но pressure_remodel=False. "
+            f"Без лёгочной гипертензии P_pa ≈ 15 мм рт.ст. и "
+            f"пульмональный барорефлекс не активируется."
+        )
+
+    thr = cfg.get("P_pa_threshold", 25.0)
+    sens = cfg.get("pressure_sensitivity", 0.04)
+    P_pa_ref = 60.0
+    R_target_at_ref = 1.0 + sens * max(P_pa_ref - thr, 0.0)
+    if cfg["pressure_remodel"] and R_target_at_ref < 5.0:
+        warnings.warn(
+            f"physio_config: {path.name} — при P_pa = {P_pa_ref:.0f} "
+            f"(типичное систолическое при Эйзенменгере) "
+            f"R_target = {R_target_at_ref:.2f} < 5.0. "
+            f"Ремоделирование останется слабым; для Эйзенменгера "
+            f"ожидается R_target ≥ 5. Проверьте pressure_sensitivity "
+            f"(текущее {sens}) и P_pa_threshold (текущее {thr})."
+        )
+
+    # R_remodel_max = 1.0 при pressure_remodel=True означает, что
+    # R_remodel никогда не вырастет выше 1.0 → remodeling отключён.
+    rmax = cfg.get("R_remodel_max", 5.0)
+    if cfg["pressure_remodel"] and rmax <= 1.0:
+        warnings.warn(
+            f"physio_config: {path.name} — pressure_remodel=True, "
+            f"но R_remodel_max={rmax}. R_remodel останется 1.0, "
+            f"лёгочное сопротивление не вырастет."
+        )        
+
 
 def load_patient(path) -> dict:
     """

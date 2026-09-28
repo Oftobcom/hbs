@@ -50,7 +50,7 @@ class Lungs2Chamber(OrganModel):
 
     def __init__(self,
                  R1=0.06, R2=0.04,
-                 C1=4.0, C2=8.0,
+                 C1=3.0, C2=5.0,
                  # --- Быстрая вазоконстрикция от потока ---
                  flow_dependent_resistance=False,
                  flow_sensitivity=0.15,
@@ -304,7 +304,8 @@ class Lungs2Chamber(OrganModel):
         if not self.pressure_remodel:
             return 1.0
         excess_p = max(float(P_pa) - self.P_pa_threshold, 0.0)
-        R_target = 1.0 + self.pressure_sensitivity * excess_p
+        # Нелинейный рост: ускоряется при высоком P_pa
+        R_target = 1.0 + self.pressure_sensitivity * excess_p * (1.0 + 0.02 * excess_p)
         return float(min(R_target, self.R_remodel_max))
 
     # ------------------------------------------------------------------
@@ -316,25 +317,33 @@ class Lungs2Chamber(OrganModel):
         # Мягкие клипы (защита от solver retries, не от ошибок конфига)
         P_prox = max(float(P_prox), 0.0)
         P_dist = max(float(P_dist), 0.0)
-        R_remodel = float(np.clip(R_remodel, 0.1, self.R_remodel_max))
+        R_remodel = float(np.clip(R_remodel, 1.0, self.R_remodel_max))
 
         Q_pulm = inputs.get('Q_pulmonary', 0.0)
         P_pv = max(float(inputs.get('P_pv', 5.0)), 0.0)
 
-        # 1. Быстрый активный отклик на поток
         f_flow = self._flow_factor(Q_pulm)
-
-        # 2. Пассивный recruitment / distension
         f_recruit = self._recruit_factor(P_prox)
 
-        # 3. Медленный структурный отклик на давление
-        R_target = self._R_remodel_target(P_prox)
-        dR_remodel = (R_target - R_remodel) / self.tau_remodel
+        # Подавление острого recruitment по мере структурного ремоделирования:
+        #   R_remodel = 1.0      → remodel_frac = 0 → f_recruit_eff = f_recruit (полный ответ)
+        #   R_remodel = R_max    → remodel_frac = 1 → f_recruit_eff = 1.0 (ответ исчерпан)
+        remodel_frac = float(np.clip(
+            (R_remodel - 1.0) / max(self.R_remodel_max - 1.0, 1e-6),
+            0.0, 1.0,
+        ))
+        f_recruit_eff = f_recruit + (1.0 - f_recruit) * remodel_frac
 
-        # 4. Эффективное сопротивление:
-        #    base × passive_recruit × active_flow × chronic_remodel
-        R1_eff = self.R1_base * f_recruit * f_flow * R_remodel
-        R2_eff = self.R2_base * f_recruit * f_flow * R_remodel
+        R_target = self._R_remodel_target(P_prox)
+
+        # Асимметрия: рост за tau_remodel, спад — в 100 раз медленнее.
+        # На масштабе 600–1200 с обратный ход фактически заморожен.
+        # Ремоделирование монотонно (ratchet) на масштабе симуляции
+        dR_remodel = max(R_target - R_remodel, 0.0) / self.tau_remodel
+
+        f_flow_eff = 1.0 + (f_flow - 1.0) * (1.0 - remodel_frac)
+        R1_eff = self.R1_base * f_recruit_eff * f_flow_eff * R_remodel
+        R2_eff = self.R2_base * f_recruit_eff * f_flow_eff * R_remodel
 
         # Мягкий клип R в runtime без exception.
         # R1_eff/R2_eff в норме лежат в [0.002, 0.32] — клип не срабатывает.
@@ -365,6 +374,10 @@ class Lungs2Chamber(OrganModel):
             'recruit_factor': float(f_recruit),
             'Q_int': float(Q_int),
             'Q_out': float(Q_out),
+            'f_recruit_eff': float(f_recruit_eff),
+            'R_target': float(R_target),
+            'dR_remodel': float(dR_remodel),
+            'mode': 'remodeled' if R_remodel > 2.0 else 'healthy',
         }
         return np.array([dP_prox, dP_dist, dR_remodel])
 

@@ -37,7 +37,7 @@ heart:
   R_aortic: 0.10
   R_tricuspid: 0.03
   R_pulmonary: 0.05
-  R_venous_sys:  0.05   # системный венозный возврат (SVC/IVC → RA)
+  R_venous_sys:  0.04   # системный венозный возврат (SVC/IVC → RA)
   R_venous_pulm: 0.02   # пульмональный (PV → LA), низкорезистивный
 
   # --- Клапанная кинетика ---
@@ -46,8 +46,8 @@ heart:
 lungs:
   R1: 0.06
   R2: 0.04
-  C1: 4.0
-  C2: 8.0
+  C1: 3.0
+  C2: 5.0
   flow_dependent_resistance: true
   flow_sensitivity: 0.15
   Q_norm: 80.0
@@ -191,7 +191,7 @@ systemic:
   P_sa0: 85.0
   P_sv0: 12.0
   P_pv0: 12.0
-  SYS_VEN_FRACTION: 0.58
+  SYS_VEN_FRACTION: 0.63
   C_sys_ven_eff: 550.0
   tau_target: 300.0
   VO2_rest: 1.9          # мл/с — сердце + печень + почки + ЖКТ

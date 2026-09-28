@@ -48,12 +48,13 @@ class Heart4Chambers(OrganModel):
                  V0_la=10, V0_lv=10, V0_ra=5, V0_rv=10,
                  EDV_la=80.0, EDV_lv=120.0, EDV_ra=40.0, EDV_rv=120.0,
                  R_mitral=0.02, R_aortic=0.10,
-                 R_tricuspid=0.02, R_pulmonary=0.05,
-                 R_venous_sys=0.08,
+                 R_tricuspid=0.01, R_pulmonary=0.05,
+                 R_venous_sys=0.04,
                  R_venous_pulm=0.03,
                  R_vsd=np.inf,
                  hr_min=30, hr_max=130,
-                 k_valve=9.0):
+                 k_valve=9.0,
+                 rv_hypertrophy_sensitivity: float = 1.5):
 
         # =================================================================
         # Валидация конфигурации — fail-fast при инициализации.
@@ -77,6 +78,14 @@ class Heart4Chambers(OrganModel):
             "k_valve → 0 даёт нефизичную утечку v(0)=δ/(2R); "
             "k_valve > 100 делает клапан численно жёстким."
         )
+
+        self.rv_hypertrophy_sensitivity = _check_range(
+            "rv_hypertrophy_sensitivity", rv_hypertrophy_sensitivity,
+            0.0, 5.0,
+            "безразмерный, типично 1.0–2.0 — прирост E_max_rv "
+            "при полном ремоделировании лёгких."
+        )
+        self._rv_afterload = 0.0
 
         # --- HR и его границы ---
         hr_f = _check_range(
@@ -241,14 +250,35 @@ class Heart4Chambers(OrganModel):
         baro_activation = float(np.clip(baro_activation,
                                         self._BARO_MIN, self._BARO_MAX))
 
+        # Пульмональный барорефлекс — обособленный сигнал для RV.
+        # Fallback на системный, если baroreflex.py ещё не обновлён.
+        baro_activation_rv = float(inputs.get(
+            'baro_activation_rv', baro_activation
+        ))
+        baro_activation_rv = float(np.clip(
+            baro_activation_rv, self._BARO_MIN, self._BARO_MAX
+        ))
+
+        # Постнагрузка ПЖ (0 = норма, 1 = полное ремоделирование лёгких).
+        # Приходит из whole_body.py, где вычисляется из R_remodel лёгких.
+        rv_afterload = float(inputs.get('rv_afterload', 0.0))
+        rv_afterload = float(np.clip(rv_afterload, 0.0, 5.0))
+        self._rv_afterload = rv_afterload
+
+        # Гипертрофия ПЖ от хронической лёгочной гипертензии.
+        rv_hypertrophy = 1.0 + self.rv_hypertrophy_sensitivity * rv_afterload
+
         for chamber in self.E_max_base:
             factor = 1.0
-            if chamber in ('LV', 'RV'):
+            if chamber == 'LV':
                 factor = baro_activation
+            elif chamber == 'RV':
+                factor = baro_activation_rv * rv_hypertrophy
             elif chamber in ('LA', 'RA'):
-                factor = 1.0 + 0.2 * (baro_activation - 1.0)  # предсердия слабее
-            self._current_E_max[chamber] = (
-                self.E_max_base[chamber] * inotropy_factor * factor
+                factor = 1.0 + 0.2 * (baro_activation - 1.0)
+            e_new = self.E_max_base[chamber] * inotropy_factor * factor
+            self._current_E_max[chamber] = float(
+                np.clip(e_new, self._E_MAX_LO, self._E_MAX_HI)
             )
 
     # ------------------------------------------------------------------
@@ -268,8 +298,15 @@ class Heart4Chambers(OrganModel):
             return Emin
 
         # --- Желудочки: асимметричный колокол ---
-        T_PEAK = 0.33
-        T_END = 0.45
+        if chamber == 'RV':
+            # Дилатация/гипертрофия ПЖ сдвигает пик позже и удлиняет изгнание:
+            # возникает окно, где ПЖ ещё сокращён, а ЛЖ уже расслаблен.
+            rv_al = min(float(getattr(self, '_rv_afterload', 0.0)), 2.0)
+            T_PEAK = 0.33 + 0.03 * rv_al    # 0.33 → 0.39
+            T_END  = 0.45 + 0.05 * rv_al    # 0.45 → 0.55
+        else:
+            T_PEAK = 0.33
+            T_END = 0.45
         BETA = 1.1  # медленный старт релаксации, быстрый конец
 
         if tau <= T_PEAK:
@@ -300,8 +337,12 @@ class Heart4Chambers(OrganModel):
         # Желудочки — линейная + пассивная экспонента
         if chamber == 'LV':
             A_v, k_v = 0.03, 0.02
-        else:
-            A_v, k_v = 0.02, 0.015
+        else:  # RV
+            # При дилатации/гипертрофии стенка ПЖ становится жёстче.
+            rv_al = min(float(getattr(self, '_rv_afterload', 0.0)), 2.0)
+            stiffness = 1.0 + 0.4 * rv_al
+            A_v = 0.02 * stiffness
+            k_v = 0.015 * stiffness
         exp_arg = float(np.clip(k_v * dV, 0.0, 8.0))
         P_passive = A_v * (np.exp(exp_arg) - 1.0)
         return E * dV + P_passive
@@ -374,6 +415,20 @@ class Heart4Chambers(OrganModel):
 
         return dV * softness
 
+    def _soft_clamp_upper(self, V, V_max, dV):
+        """
+        Плавно гасит положительный dV у верхней границы V_max.
+        Аналог _soft_clamp, но для дилатации.
+        """
+        if V < 0.7 * V_max:
+            return dV
+        if dV <= 0.0:
+            return dV
+        z = -10.0 * (V_max - V) / V_max
+        z = float(np.clip(z, -60.0, 60.0))
+        softness = 1.0 - float(np.exp(z))
+        return dV * float(np.clip(softness, 0.0, 1.0))
+
     # ------------------------------------------------------------------
     # Основной метод — производные
     # ------------------------------------------------------------------
@@ -432,7 +487,11 @@ class Heart4Chambers(OrganModel):
         dV_la = self._soft_clamp(V_la, self.V0['LA'], dV_la)
         dV_lv = self._soft_clamp(V_lv, self.V0['LV'], dV_lv)
         dV_ra = self._soft_clamp(V_ra, self.V0['RA'], dV_ra)
-        dV_rv = self._soft_clamp(V_rv, self.V0['RV'], dV_rv)
+        rv_al = min(float(getattr(self, '_rv_afterload', 0.0)), 2.0)
+        V_min_rv_eff = self.V0['RV'] * (1.0 + 0.5 * rv_al)     # 10 → 20 при rv_al=2
+        V_max_rv_eff = 250.0 * (1.0 + 0.5 * rv_al)             # 250 → 500
+        dV_rv = self._soft_clamp(V_rv, V_min_rv_eff, dV_rv)
+        dV_rv = self._soft_clamp_upper(V_rv, V_max_rv_eff, dV_rv)
 
         return np.array([dV_la, dV_lv, dV_ra, dV_rv])
 

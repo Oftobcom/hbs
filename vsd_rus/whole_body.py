@@ -196,7 +196,7 @@ class WholeBodyModel:
         target_MAP=85.0, target_CO=83.0,
         C_sys_art=1.5, C_pul_ven=15.0,
         P_sa0=85.0, P_sv0=12.0, P_pv0=12.0,
-        SYS_VEN_FRACTION=0.58,
+        SYS_VEN_FRACTION=0.63,
         C_sys_ven_eff=550.0,
         tau_target=200.0,
         fluid_intake_rate=0.015,
@@ -675,17 +675,34 @@ class WholeBodyModel:
         P_pa         = V_lungs[0]
 
         # --- Барорефлекс ---
-        baroreflex_inputs = {'P_sa': P_sa}
-        d_baroreflex = self.baroreflex.get_derivatives(t, V_baroreflex, baroreflex_inputs)
+        R_remodel_now = float(V_lungs[2])
+        baroreflex_inputs = {
+            'P_sa': P_sa,
+            'P_pa': P_pa,
+            'R_remodel': R_remodel_now,
+        }
+        d_baroreflex = self.baroreflex.get_derivatives(
+            t, V_baroreflex, baroreflex_inputs
+        )
         baroreflex_out = self.baroreflex.get_outputs(V_baroreflex)
         HR = baroreflex_out['HR']
         hr_factor = HR / self.baroreflex.HR_base
+
+        R_remodel_max = float(self.lungs.R_remodel_max)
+        rv_afterload = float(np.clip(
+            (R_remodel_now - 1.0) / max(R_remodel_max - 1.0, 1e-6),
+            0.0, 5.0,
+        ))
 
         # --- Сердце ---
         heart_inputs = {
             'P_sa': P_sa, 'P_sv': P_sv, 'P_pa': P_pa, 'P_pv': P_pv,
             'hr_factor': hr_factor,
             'baro_activation': baroreflex_out['baro_activation'],
+            'baro_activation_rv': baroreflex_out.get(
+                'baro_activation_rv', baroreflex_out['baro_activation']
+            ),
+            'rv_afterload': rv_afterload,
         }
         d_heart = self.heart.get_derivatives(t, V_heart, heart_inputs)
         heart_out = self.heart.get_outputs(V_heart)
@@ -958,8 +975,18 @@ class WholeBodyModel:
             'liver_functional':     f['liver_out'].get('functional', 1.0),
             'R1_lungs': f['lungs_out'].get('R1_eff', self.lungs.R1_base),
             'R2_lungs': f['lungs_out'].get('R2_eff', self.lungs.R2_base),
+            'R_remodel':     f['lungs_out'].get('R_remodel',     1.0),
+            'f_recruit':     f['lungs_out'].get('recruit_factor', 1.0),
+            'f_recruit_eff': f['lungs_out'].get('f_recruit_eff', 1.0),
+            'R_target':      f['lungs_out'].get('R_target',      1.0),
+            'dR_remodel':    f['lungs_out'].get('dR_remodel',    0.0),
+            'mode_remodeled': 1.0 if f['lungs_out'].get('mode') == 'remodeled' else 0.0,
             'HR': f['HR'],
             'HR_target': f['baroreflex_out']['HR_target'],
+            'baro_activation': f['baroreflex_out']['baro_activation'],
+            'baro_activation_rv': f['baroreflex_out'].get(
+                'baro_activation_rv', f['baroreflex_out']['baro_activation']
+            ),
             'SaO2':   f['gas_ex']['SaO2'],
             'C_a_O2': f['gas_ex']['C_a_O2'],
             'C_v_O2': f['gas_ex']['C_v_O2'],
@@ -1016,29 +1043,76 @@ class WholeBodyModel:
 
     def cycle_averaged_flows(self, t_end, y_end, n_pts=60):
         """
-        Диагностика: усредняет Qp/Qs/Q_vsd за один кардиоцикл,
-        заканчивающийся в t_end. Приближение: объёмы камер берутся
-        как y_end для всех фаз цикла (на стационаре ошибка <10%).
+        Усредняет Qp/Qs/Q_vsd за один РЕАЛЬНЫЙ кардиоцикл, интегрируя
+        ODE от y_end вперёд на T.
+
+        Здесь же объёмы камер, P_sa, P_pv, R_remodel эволюционируют
+        через реальный RHS, и только после этого потоки усредняются.
         """
+        # --- HR и период из конечного состояния ---
         HR = float(self.baroreflex.get_outputs(
             y_end[self.idx['baroreflex']])['HR'])
-        T  = 60.0 / max(HR, 1.0)
-        t_cycle = np.linspace(t_end - T, t_end, n_pts)
+        T = 60.0 / max(HR, 1.0)
+
+        # --- Равномерная сетка по одному циклу [t_end, t_end + T) ---
+        # endpoint=False: t_end+T — это уже следующая фаза;
+        # для среднего по [0, T) он не нужен, иначе получим дублирование.
+        n_pts = max(int(n_pts), 20)
+        t_eval = np.linspace(t_end, t_end + T, n_pts, endpoint=False)
+
+        # --- Реальная интеграция ODE вперёд ---
+        try:
+            sol_cycle = solve_ivp(
+                self.derivatives, (t_end, t_end + T), y_end,
+                t_eval=t_eval,
+                method='LSODA',
+                rtol=1e-4, atol=1e-5,
+                max_step=T / max(n_pts, 40),   # достаточно точек на клапанные пики
+            )
+        except Exception as e:
+            warnings.warn(f"cycle_averaged_flows: solver failed ({e}); "
+                        f"returning NaN")
+            nan = float('nan')
+            return {
+                'Qp_cycle_mean': nan, 'Qs_cycle_mean': nan,
+                'Q_vsd_cycle_mean': nan, 'Qp_Qs_cycle': nan,
+                'mass_balance_error': nan, 'SaO2_cycle_mean': nan,
+            }
+
+        if sol_cycle.t.size < 2 or not np.any(np.isfinite(sol_cycle.y)):
+            warnings.warn("cycle_averaged_flows: non-finite cycle solution; "
+                        "returning NaN")
+            nan = float('nan')
+            return {
+                'Qp_cycle_mean': nan, 'Qs_cycle_mean': nan,
+                'Q_vsd_cycle_mean': nan, 'Qp_Qs_cycle': nan,
+                'mass_balance_error': nan, 'SaO2_cycle_mean': nan,
+            }
+
+        # --- Сбор потоков и SaO2 на равномерной сетке ---
         Qp, Qs, Qv, SaO2_vals = [], [], [], []
-        for ti in t_cycle:
-            out = self.compute_outputs(ti, y_end)
-            Qp.append(out['Q_pulmonary'])
-            Qs.append(out['Q_aortic'])
-            Qv.append(out['Q_vsd'])
-            SaO2_vals.append(out['SaO2'])
-        Qp_m, Qs_m, Qv_m = float(np.mean(Qp)), float(np.mean(Qs)), float(np.mean(Qv))
+        for i in range(sol_cycle.t.size):
+            ti = float(sol_cycle.t[i])
+            yi = sol_cycle.y[:, i]
+            out = self.compute_outputs(ti, yi)
+            Qp.append(float(out['Q_pulmonary']))
+            Qs.append(float(out['Q_aortic']))
+            Qv.append(float(out['Q_vsd']))
+            SaO2_vals.append(float(out['SaO2']))
+
+        # --- Средние по равномерной сетке ≈ интегральные средние ---
+        Qp_m = float(np.mean(Qp))
+        Qs_m = float(np.mean(Qs))
+        Qv_m = float(np.mean(Qv))
+        SaO2_m = float(np.mean(SaO2_vals))
+
         return {
-            'Qp_cycle_mean':     Qp_m,
-            'Qs_cycle_mean':     Qs_m,
-            'Q_vsd_cycle_mean':  Qv_m,
-            'Qp_Qs_cycle':       Qp_m / max(Qs_m, 1e-6),
+            'Qp_cycle_mean':      Qp_m,
+            'Qs_cycle_mean':      Qs_m,
+            'Q_vsd_cycle_mean':   Qv_m,
+            'Qp_Qs_cycle':        Qp_m / max(Qs_m, 1e-6),
             'mass_balance_error': Qp_m - Qs_m - Qv_m,
-            'SaO2_cycle_mean':    float(np.mean(SaO2_vals))
+            'SaO2_cycle_mean':    SaO2_m,
         }
 
     # ------------------------------------------------------------------

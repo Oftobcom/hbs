@@ -72,7 +72,7 @@ def simulate_scenario(vsd_resistance,
     heart_params = {
         'hr': HR_base,
         'R_vsd': vsd_resistance,
-        'R_venous_sys':  0.08,
+        'R_venous_sys':  0.04,
         'R_venous_pulm': 0.03,
     }
     if E_max_rv_override is not None:
