@@ -16,3 +16,4 @@ R_remodel_max: 10.0
 tau_remodel: 120.0
 P_pa_threshold: 20.0
 HR_base: 100
+k_vasomotor: 0.02

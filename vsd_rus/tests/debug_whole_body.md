@@ -9,3 +9,6 @@ python debug_whole_body.py --variant healthy
 
 # Только большой ДМЖП
 python debug_whole_body.py --variant vsd_r1
+
+# Синдром Эйзенменгера
+python debug_whole_body.py --variant eisenmenger

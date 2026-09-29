@@ -354,9 +354,30 @@ def _validate_patient(cfg: dict, path: Path) -> None:
     if "k_inotropy_pulm" in cfg:
         _check_finite_range(f"{path.name}.k_inotropy_pulm",
                             cfg["k_inotropy_pulm"], 0.0, 5.0)
+
+    # --- Поля трёхветвевого барорефлекса (baroreflex.py) ---
+    # Эти ключи пробрасываются per-scenario через
+    # run_simulation_parallel.simulate_one_scenario → Baroreflex.
+    # Диапазоны согласованы с _check_range в Baroreflex.__init__:
+    # при выходе за них fail-fast сработает один раз здесь, а не в RHS.
+    if "k_hr" in cfg:
+        _check_finite_range(f"{path.name}.k_hr",
+                            cfg["k_hr"], 0.0, 0.05)
     if "k_inotropy" in cfg:
         _check_finite_range(f"{path.name}.k_inotropy",
-                            cfg["k_inotropy"], 0.0, 5.0)
+                            cfg["k_inotropy"], 0.0, 0.02)
+    if "k_vasomotor" in cfg:
+        _check_finite_range(f"{path.name}.k_vasomotor",
+                            cfg["k_vasomotor"], 0.0, 0.05)
+    if "tau_hr" in cfg:
+        _check_finite_range(f"{path.name}.tau_hr",
+                            cfg["tau_hr"], 0.1, 10.0)
+    if "tau_inotropy" in cfg:
+        _check_finite_range(f"{path.name}.tau_inotropy",
+                            cfg["tau_inotropy"], 0.1, 15.0)
+    if "tau_vaso" in cfg:
+        _check_finite_range(f"{path.name}.tau_vaso",
+                            cfg["tau_vaso"], 1.0, 60.0)        
 
     rv_sens = cfg.get("rv_hypertrophy_sensitivity", 0.0)
     if rv_sens > 0.0 and not cfg["pressure_remodel"]:

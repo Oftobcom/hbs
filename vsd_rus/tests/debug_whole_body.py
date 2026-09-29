@@ -141,7 +141,7 @@ SCENARIOS = {
     },
     "eisenmenger": {
         "label": "Эйзенменгер (R_remodel_max=10)",
-        "R_vsd": 0.4,
+        "R_vsd": 0.6,
         "flow_dependent_lungs": True,
         # --- Ремоделирование лёгких ---
         "pressure_remodel": True,
@@ -152,13 +152,15 @@ SCENARIOS = {
         "flow_sensitivity": 0.15,
         # --- Гипертрофия ПЖ ---
         "rv_hypertrophy_sensitivity": 1.5,
-        "E_max_rv": 2.7,
-        "E_max_lv": 3.2,
+        "E_max_rv": 2.0,
+        "E_max_lv": 3.0,
         # --- Пульмональный барорефлекс ---
         "k_inotropy_pulm": 0.5,
         # --- Прочее ---
-        "HR_base": 85,
-        "EDV_rv": 150.0,
+        "HR_base": 100,
+        "EDV_rv": 200.0,
+        "R_venous_sys": 0.03,
+        "R_tricuspid":  0.015,
     },
 }
 
@@ -170,11 +172,13 @@ SCENARIOS = {
 def _build_model(scenario: dict) -> WholeBodyModel:
     # --- Heart params ---
     heart_params = {
-        'hr': scenario.get("HR_base", 70),
-        'R_vsd': scenario["R_vsd"],
-        'R_venous_sys':  0.04,
-        'R_venous_pulm': 0.03,
+    'hr': scenario.get("HR_base", 70),
+    'R_vsd': scenario["R_vsd"],
+    'R_venous_sys':  scenario.get("R_venous_sys",  0.04),
+    'R_venous_pulm': scenario.get("R_venous_pulm", 0.03),
     }
+    if "R_tricuspid" in scenario:
+        heart_params['R_tricuspid'] = scenario["R_tricuspid"]
     if "rv_hypertrophy_sensitivity" in scenario:
         heart_params['rv_hypertrophy_sensitivity'] = \
             scenario["rv_hypertrophy_sensitivity"]
@@ -792,8 +796,12 @@ def run_scenario(name: str, scenario: dict) -> None:
           f"V_blood={V_blood:.1f}  P_sa={P_sa_0:.2f}")
 
     # --- Симуляция ---
-    t_end_sim = 2500.0 if name == "eisenmenger" else 600.0
-    n_pts = 12000
+    if scenario.get("pressure_remodel", False):
+        t_end_sim = 1500.0
+        n_pts = 30000
+    else:
+        t_end_sim = 600.0
+        n_pts = 8000
     print(f"\n  Симуляция 0..{t_end_sim:.0f} с, LSODA "
           f"(с RHS-счётчиком)")
     t_eval = np.linspace(0.0, t_end_sim, n_pts)

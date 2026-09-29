@@ -66,9 +66,13 @@ lungs:
 baroreflex:
   P_set: 80.0
   HR_base: 70.0
-  gain: 0.015
-  tau: 2.0
-  k_inotropy: 1.5
+  k_hr: 0.008
+  k_inotropy: 0.005
+  k_vasomotor: 0.015
+  tau_hr: 2.0
+  tau_inotropy: 4.0
+  tau_vaso: 10.0
+  k_inotropy_pulm: 0.5
 
 blood:
   V0: 5800.0
@@ -89,7 +93,7 @@ peripheral:
   O2_norm: 0.15
   k_O2_autoreg: 1.0
   R_min_factor: 0.45
-  tau_autoreg: 3.0
+  tau_autoreg: 2.0
   k_P_myogenic: 0.002
   P_sa_norm: 90.0
   R_max_factor: 2.5

@@ -41,6 +41,8 @@ N_PLOT_POINTS = 4000
 N_PLOT_POINTS_DETAIL = 1200
 STEADY_FRAC = 0.6
 
+_BARO_KEYS = ('k_hr', 'k_inotropy', 'k_vasomotor', 'tau_hr', 'tau_inotropy', 'tau_vaso')
+
 # =====================================================================
 # Симуляция одного сценария (оптимизированная)
 # =====================================================================
@@ -57,6 +59,7 @@ def simulate_scenario(vsd_resistance,
                       EDV_rv_override=None,
                       P_pa_threshold_override=None,
                       flow_sensitivity=0.15,
+                      baroreflex_overrides=None,
                       t_span=(0.0, T_END),
                       t_calib=T_CALIB):
 
@@ -82,8 +85,14 @@ def simulate_scenario(vsd_resistance,
     if EDV_rv_override is not None:
         heart_params['EDV_rv'] = EDV_rv_override
 
+    baroreflex_params = {'P_set': 80.0, 'HR_base': HR_base}
+    if baroreflex_overrides:
+        for key in _BARO_KEYS:
+            if key in baroreflex_overrides:
+                baroreflex_params[key] = baroreflex_overrides[key]
+
     model = WholeBodyModel(
-        baroreflex_params={'P_set': 80.0, 'HR_base': HR_base},
+        baroreflex_params=baroreflex_params,
         blood_params=blood_params,
         flow_dependent_lungs=flow_dependent_lungs,
         lungs_params={
@@ -132,7 +141,11 @@ def simulate_scenario(vsd_resistance,
         f"Qp/Qs={cycle['Qp_Qs_cycle']:.2f} "
         f"Q_vsd={cycle['Q_vsd_cycle_mean']:+.1f} "
         f"balance={cycle['mass_balance_error']:+.2f} "
-        f"SaO2={cycle['SaO2_cycle_mean']*100:.1f}%")
+        f"SaO2={cycle['SaO2_cycle_mean']*100:.1f}% "
+        f"baro_vaso={out0['baro_vasomotor']:.2f} "
+        f"baro_ino={out0['baro_inotropy']:.2f} "
+        f"suppress={out0['suppress']:.2f}"        
+        )
 
     n_pts = N_EVAL
     t_eval = np.linspace(t_span[0], t_span[1], n_pts)
@@ -629,6 +642,7 @@ def print_detailed_report(results_dict):
 # =====================================================================
 def simulate_one_scenario(name, params):
     t0 = time.perf_counter()
+    baroreflex_overrides = {k: params[k] for k in _BARO_KEYS if k in params}    
     data = simulate_scenario(
         vsd_resistance=params['vsd_resistance'],
         flow_dependent_lungs=params['flow_dependent_lungs'],
@@ -643,6 +657,7 @@ def simulate_one_scenario(name, params):
         EDV_rv_override=params.get('EDV_rv', None),
         P_pa_threshold_override=params.get('P_pa_threshold', None),
         flow_sensitivity=params.get('flow_sensitivity', 0.15),
+        baroreflex_overrides=baroreflex_overrides,
     )
     dt = time.perf_counter() - t0
     filename = f"vsd_results_{params['id']}.npz"

@@ -344,6 +344,10 @@ class PeripheralTissues(OrganModel):
             # Ауторегуляция — теперь оба фактора согласованы с моделью
             'f_O2_autoreg': float(self._autoregulation_factor_O2(C_O2_loc)),
             'f_P_myogenic': float(self._autoregulation_factor_P(P_sa)),
+            'baro_scale_applied': float(baro_scale),
+            'R_target_pre_baro':  float(self.R_base
+                                        * self._autoregulation_factor_O2(C_O2_loc)
+                                        * self._autoregulation_factor_P(P_sa)),
 
             # Метаболизм
             'C_O2_local':      float(C_O2_loc),

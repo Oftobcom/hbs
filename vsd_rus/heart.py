@@ -36,9 +36,9 @@ class Heart4Chambers(OrganModel):
     _EDV_MIN, _EDV_MAX = 10.0, 500.0
 
     # --- Санити-границы runtime-факторов (защита от барорефлексных выбросов) ---
-    _HR_FACTOR_MIN, _HR_FACTOR_MAX = 0.1, 5.0
-    _INOTROPY_MIN, _INOTROPY_MAX = 0.1, 5.0
-    _BARO_MIN, _BARO_MAX = 0.5, 5.0
+    _HR_FACTOR_MIN, _HR_FACTOR_MAX = 0.2, 3.0
+    _INOTROPY_MIN,  _INOTROPY_MAX  = 0.5, 2.0
+    _BARO_MIN,      _BARO_MAX      = 0.5, 2.0
 
     def __init__(self,
                  hr=70,
@@ -55,7 +55,13 @@ class Heart4Chambers(OrganModel):
                  R_vsd=np.inf,
                  hr_min=30, hr_max=130,
                  k_valve=9.0,
-                 rv_hypertrophy_sensitivity: float = 1.5):
+                 rv_hypertrophy_sensitivity: float = 1.5,
+                 # --- Асимметрия симпатика/парасимпатика для E_max ---
+                 k_lv_sympathetic: float = 1.0,
+                 k_lv_parasympathetic: float = 0.3,
+                 k_rv_sympathetic: float = 1.0,
+                 k_rv_parasympathetic: float = 0.2,
+                 k_atria_inotropy: float = 0.2):
 
         # =================================================================
         # Валидация конфигурации — fail-fast при инициализации.
@@ -87,7 +93,29 @@ class Heart4Chambers(OrganModel):
             "при полном ремоделировании лёгких."
         )
         self._rv_afterload = 0.0
-
+        # --- Асимметрия симпатика/парасимпатика ---
+        # Симпатический отклик ЛЖ/ПЖ сильнее парасимпатического в 3–5 раз.
+        # k_* ∈ [0, 5]: физиологически 0.2–1.5, запас на калибровку.
+        self.k_lv_sympathetic = _check_range(
+            "k_lv_sympathetic", k_lv_sympathetic, 0.0, 5.0,
+            "безразмерный, типично 1.0 — усиление E_max_lv при гипотензии."
+        )
+        self.k_lv_parasympathetic = _check_range(
+            "k_lv_parasympathetic", k_lv_parasympathetic, 0.0, 5.0,
+            "безразмерный, типично 0.3 — ослабление E_max_lv при гипертензии."
+        )
+        self.k_rv_sympathetic = _check_range(
+            "k_rv_sympathetic", k_rv_sympathetic, 0.0, 5.0,
+            "безразмерный, типично 1.0 — усиление E_max_rv при гипотензии."
+        )
+        self.k_rv_parasympathetic = _check_range(
+            "k_rv_parasympathetic", k_rv_parasympathetic, 0.0, 5.0,
+            "безразмерный, типично 0.2 — ослабление E_max_rv при гипертензии."
+        )
+        self.k_atria_inotropy = _check_range(
+            "k_atria_inotropy", k_atria_inotropy, 0.0, 5.0,
+            "безразмерный, типично 0.2 — слабый отклик предсердий."
+        )
         # --- HR и его границы ---
         hr_f = _check_range(
             "hr", hr, self._HR_MIN, self._HR_MAX,
@@ -218,6 +246,26 @@ class Heart4Chambers(OrganModel):
             self.EDV['LA'], self.EDV['LV'], self.EDV['RA'], self.EDV['RV'],
         ])
 
+
+    # ------------------------------------------------------------------
+    # Асимметрия симпатика/парасимпатика
+    # ------------------------------------------------------------------
+    def _asymmetric_inotropy(self, baro: float,
+                             k_sym: float, k_para: float) -> float:
+        """
+        Асимметричный отклик E_max на бароактивацию.
+
+        При baro > 1.0 (симпатика) множитель растёт с коэффициентом k_sym,
+        при baro < 1.0 (парасимпатика) — падает с k_para.
+
+        Физиология: парасимпатическая иннервация желудочков скудная,
+        поэтому k_para << k_sym. При baro = 1.0 (норма) множитель = 1.0.
+        """
+        if baro >= 1.0:
+            return 1.0 + k_sym * (baro - 1.0)
+        return 1.0 + k_para * (baro - 1.0)
+
+
     # ------------------------------------------------------------------
     # Обновление параметров (HR, инотропия, бароактивация)
     # ------------------------------------------------------------------
@@ -227,12 +275,6 @@ class Heart4Chambers(OrganModel):
 
         Runtime-факторы приходят из барорефлекса и могут теоретически
         выйти за физиологический диапазон при численных сбоях.
-        Soft-clip защищает от этого, не влияя на нормальные значения:
-
-            hr_factor    ∈ [0.1, 5.0]   (HR в [0.1·hr_base, 5.0·hr_base],
-                                         но окончательно клипуется по hr_min/hr_max)
-            inotropy_factor ∈ [0.1, 5.0]  (обычно = 1.0)
-            baro_activation ∈ [0.5, 5.0]  (обычно ∈ [1.0, 1+k_inotropy])
         """
         hr_factor = float(inputs.get('hr_factor', 1.0))
         hr_factor = float(np.clip(hr_factor, self._HR_FACTOR_MIN, self._HR_FACTOR_MAX))
@@ -274,13 +316,20 @@ class Heart4Chambers(OrganModel):
             cap = self._E_MAX_HI            # дефолт на случай новой камеры
 
             if chamber == 'LV':
-                factor = baro_activation
+                factor = self._asymmetric_inotropy(
+                    baro_activation,
+                    self.k_lv_sympathetic,
+                    self.k_lv_parasympathetic,
+                )
             elif chamber == 'RV':
-                factor = baro_activation_rv * rv_hypertrophy
-                # Потолок растёт только у ПЖ: 20 → 40 при полном afterload
+                factor = self._asymmetric_inotropy(
+                    baro_activation_rv,
+                    self.k_rv_sympathetic,
+                    self.k_rv_parasympathetic,
+                ) * rv_hypertrophy
                 cap = self._E_MAX_HI + self._RV_CAP_BONUS * rv_afterload
             elif chamber in ('LA', 'RA'):
-                factor = 1.0 + 0.2 * (baro_activation - 1.0)
+                factor = 1.0 + self.k_atria_inotropy * (baro_activation - 1.0)
 
             e_new = self.E_max_base[chamber] * inotropy_factor * factor
             self._current_E_max[chamber] = float(
@@ -483,6 +532,16 @@ class Heart4Chambers(OrganModel):
             'P_lv': P_lv,
             'P_ra': P_ra,
             'P_rv': P_rv,
+            # --- E_max по камерам (для валидации Цели 3) ---
+            'E_max_lv': float(self._current_E_max['LV']),
+            'E_max_rv': float(self._current_E_max['RV']),
+            'E_max_la': float(self._current_E_max['LA']),
+            'E_max_ra': float(self._current_E_max['RA']),
+            # --- HR и период текущего шага ---
+            'HR_current': float(self._current_hr),
+            'T_current':  float(self._current_T),
+            # --- rv_afterload (пробрасывается из whole_body) ---
+            'rv_afterload': float(self._rv_afterload),
         }
 
         dV_la = Q_pv_to_la - Q_mitral

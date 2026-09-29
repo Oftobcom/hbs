@@ -449,7 +449,27 @@ class WholeBodyModel:
         # --- Барорефлекс ---
         baroreflex_params = baroreflex_params or {}
         self.baroreflex = Baroreflex(**baroreflex_params)
-
+        # --- Валидация контракта Baroreflex — fail-fast ---
+        if self.baroreflex.get_state_size() < 1:
+            raise RuntimeError(
+                "WholeBodyModel: Baroreflex.get_state_size() < 1 — "
+                "барорефлекс обязан иметь хотя бы одно состояние."
+            )
+        required_out = {'HR', 'HR_target', 'hr_factor',
+                        'baro_activation', 'baro_activation_rv',
+                        'R_sys_scale'}
+        # get_outputs уже имеет fallback на пустой кэш, поэтому
+        # проверка безопасна и на первом вызове.
+        _probe = self.baroreflex.get_outputs(
+            self.baroreflex.get_initial_state()
+        )
+        missing = required_out - set(_probe.keys())
+        if missing:
+            raise RuntimeError(
+                f"WholeBodyModel: Baroreflex не выдаёт обязательные "
+                f"ключи {sorted(missing)}."
+            )
+        
         # --- Системные артерии и лёгочные вены (P-mode) ---
         self.sys_art = WindkesselVessel(C=C_sys_art, P0=P_sa0, mode='P')
         self.pul_ven = WindkesselVessel(C=C_pul_ven, P0=P_pv0, mode='P')
@@ -608,7 +628,8 @@ class WholeBodyModel:
 
         if sol.t.size >= 3:
             P_sa_traj = sol.y[self.idx['sys_art'].start, :]
-            HR_end = y_steady[self.idx['baroreflex']][0]
+            br_out = self.baroreflex.get_outputs(y_steady[self.idx['baroreflex']])
+            HR_end = float(br_out.get('HR', self.baroreflex.HR_base))
             T = 60.0 / max(HR_end, 1e-6)
             mask = sol.t >= (sol.t[-1] - T)
             if mask.sum() >= 3:
@@ -661,6 +682,11 @@ class WholeBodyModel:
         V_brain      = y[sl['brain']]
         V_periph     = y[sl['peripheral']]
         V_baroreflex = y[sl['baroreflex']]
+        if not np.all(np.isfinite(V_baroreflex)):
+            V_baroreflex = np.where(
+                np.isfinite(V_baroreflex), V_baroreflex,
+                self.baroreflex.get_initial_state(),
+            )
         P_sa         = y[sl['sys_art']][0]
         V_sv         = y[sl['sys_ven']][0]
         P_pv         = y[sl['pul_ven']][0]
@@ -685,9 +711,10 @@ class WholeBodyModel:
             t, V_baroreflex, baroreflex_inputs
         )
         baroreflex_out = self.baroreflex.get_outputs(V_baroreflex)
-        HR = baroreflex_out['HR']
-        hr_factor = HR / self.baroreflex.HR_base
-
+        HR = float(baroreflex_out['HR'])
+        hr_factor = float(baroreflex_out.get(
+            'hr_factor', HR / self.baroreflex.HR_base
+        ))
         R_remodel_max = float(self.lungs.R_remodel_max)
         rv_afterload = float(np.clip(
             (R_remodel_now - 1.0) / max(R_remodel_max - 1.0, 1e-6),
@@ -988,6 +1015,11 @@ class WholeBodyModel:
             'baro_activation_rv': f['baroreflex_out'].get(
                 'baro_activation_rv', f['baroreflex_out']['baro_activation']
             ),
+            'baro_inotropy':         f['baroreflex_out'].get('baro_activation', 1.0),
+            'baro_vasomotor':        f['baroreflex_out'].get('R_sys_scale', 1.0),
+            'baro_inotropy_target':  f['baroreflex_out'].get('baro_inotropy_target', 1.0),
+            'baro_vasomotor_target': f['baroreflex_out'].get('baro_vasomotor_target', 1.0),
+            'suppress':              f['baroreflex_out'].get('suppress', 1.0),
             'SaO2':   f['gas_ex']['SaO2'],
             'C_a_O2': f['gas_ex']['C_a_O2'],
             'C_v_O2': f['gas_ex']['C_v_O2'],
@@ -1040,6 +1072,14 @@ class WholeBodyModel:
             'dC_CO2_blood':    f['dC_CO2_blood'],
             'dC_O2_blood':     f['dC_O2_blood'],
             'occlusion_factor': f['brain_out'].get('occlusion_factor', 1.0),
+            'E_max_lv': heart_out.get('E_max_lv'),
+            'E_max_rv': heart_out.get('E_max_rv'),
+            'E_max_la': heart_out.get('E_max_la'),
+            'E_max_ra': heart_out.get('E_max_ra'),
+            'HR_current': heart_out.get('HR_current'),
+            'T_current': heart_out.get('T_current'),
+            'baro_scale_periph': f['periph_out'].get('baro_scale_applied', 1.0),
+            'R_target_periph':   f['periph_out'].get('R_target', None),
         }
 
     def cycle_averaged_flows(self, t_end, y_end, n_pts=60):
@@ -1051,8 +1091,8 @@ class WholeBodyModel:
         через реальный RHS, и только после этого потоки усредняются.
         """
         # --- HR и период из конечного состояния ---
-        HR = float(self.baroreflex.get_outputs(
-            y_end[self.idx['baroreflex']])['HR'])
+        _out = self.compute_outputs(t_end, y_end)
+        HR = float(_out['HR'])
         T = 60.0 / max(HR, 1.0)
 
         # --- Равномерная сетка по одному циклу [t_end, t_end + T) ---
