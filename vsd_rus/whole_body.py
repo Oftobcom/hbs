@@ -114,11 +114,6 @@ class WindkesselVessel(OrganModel):
         V = state[0]
         dV = Q_in - Q_out
         dV += float(inputs.get('dV_external', 0.0))
-        # Мягкий пол: ниже 50% V0 гасим отток
-        if V < 0.5 * self.V0 and dV < 0:
-            softness = (V - 0.5 * self.V0) / (0.5 * self.V0)
-            softness = float(np.clip(softness, 0.0, 1.0))
-            dV *= softness
 
         P = self.P0 + (V - self.V0) / self.C
         P = max(P, 0.0)
@@ -173,7 +168,7 @@ class WholeBodyModel:
         R_sys_peripheral=None,
         target_MAP=85.0, target_CO=83.0,
         C_sys_art=1.5, C_pul_ven=15.0,
-        P_sa0=85.0, P_sv0=12.0, P_pv0=12.0,
+        P_sa0=85.0, P_sv0=6.0, P_pv0=12.0,
         SYS_VEN_FRACTION=0.63,
         C_sys_ven_eff=550.0,
         fluid_intake_rate=0.015,
@@ -234,11 +229,11 @@ class WholeBodyModel:
         )
         P_sv0 = _check_range(
             "P_sv0", P_sv0, self._P_SYS_MIN, self._P_SYS_MAX,
-            "мм рт.ст., типично 12."
+            "мм рт.ст."
         )
         P_pv0 = _check_range(
             "P_pv0", P_pv0, self._P_PV_MIN, self._P_PV_MAX,
-            "мм рт.ст., типично 12."
+            "мм рт.ст."
         )
 
         # --- Доли объёма (строго внутри (0, 1)) ---
@@ -523,6 +518,8 @@ class WholeBodyModel:
         self._flow_cache_hits = 0
         self._flow_cache_misses = 0
 
+        self._negative_vol_warned = False
+
     # ------------------------------------------------------------------
     # Калибровка начального состояния
     # ------------------------------------------------------------------
@@ -659,7 +656,11 @@ class WholeBodyModel:
         # --- Полный циркулирующий объём: сумма всех физических V ---
         # Все давления уже доступны из y (P-mode и pressure-states),
         # V_sv и V_jv — direct states. Ничего не зависит от order.
-        V_heart_phys = float(np.maximum(y[sl['heart']], 0.0).sum())
+        _V_heart_raw = y[sl['heart']]
+        if np.any(_V_heart_raw < -1e-6) and not self._negative_vol_warned:
+            warnings.warn(f"Negative heart volume: {_V_heart_raw}", RuntimeWarning)
+            self._negative_vol_warned = True
+        V_heart_phys = float(np.maximum(_V_heart_raw, 0.0).sum())
 
         _lungs_state = y[sl['lungs']]
         V_lungs_phys = (self.lungs.C1 * max(float(_lungs_state[0]), 0.0)
@@ -718,10 +719,11 @@ class WholeBodyModel:
             'P_sa': P_sa, 'P_sv': P_sv, 'P_pa': P_pa, 'P_pv': P_pv,
             'hr_factor': hr_factor,
             'baro_activation': baroreflex_out['baro_activation'],
-            'baro_activation_rv': baroreflex_out.get(
-                'baro_activation_rv', baroreflex_out['baro_activation']
-            ),
+            'baro_activation_rv': baroreflex_out.get('baro_activation_rv',
+                                                    baroreflex_out['baro_activation']),
             'rv_afterload': rv_afterload,
+            'V_sv':  V_sv,
+            'V0_sv': self.sys_ven.V0,
         }
         d_heart = self.heart.get_derivatives(t, V_heart, heart_inputs)
         heart_out = self.heart.get_outputs(V_heart)
@@ -799,7 +801,7 @@ class WholeBodyModel:
 
         # --- Яремная вена ---
         jugular_inputs = {
-            'Q_in':     brain_out.get('Q_out', brain_out['Q_br']),
+            'Q_in':     brain_out['Q_out'],
             'C_in_O2':  brain_out['C_v_O2_brain'],
             'C_in_CO2': brain_out['C_v_CO2_brain'],
             'P_sv':     P_sv,
@@ -845,7 +847,7 @@ class WholeBodyModel:
         Q_peripheral = periph_out['Q_peripheral']
         Q_ha         = liver_out.get('Q_ha', 0.0)
         Q_renal      = kidney_effects['Q_renal']
-        Q_gitract_in = (P_sa - V_gitract[0]) / self.gitract.R_art
+        Q_gitract_in = gitract_out['Q_in']
         Q_brain      = brain_out['Q_br']
         Q_jv_out     = jugular_out.get('Q_jv_out', Q_brain)
         Q_art_out    = Q_peripheral + Q_ha + Q_renal + Q_gitract_in + Q_brain
@@ -941,7 +943,7 @@ class WholeBodyModel:
         )
 
         # Лёгочные вены
-        Q_from_lungs = (f['V_lungs'][1] - f['P_pv']) / f['lungs_out']['R2_eff']
+        Q_from_lungs = f['lungs_out']['Q_out']
         Q_pul_ven_out = f['heart_out']['Q_pv_to_la']
         d_pul_ven = self.pul_ven.get_derivatives(
             t, np.array([f['P_pv']]),

@@ -193,7 +193,7 @@ systemic:
   C_sys_art: 1.5
   C_pul_ven: 15.0
   P_sa0: 85.0
-  P_sv0: 12.0
+  P_sv0: 6.0
   P_pv0: 12.0
   SYS_VEN_FRACTION: 0.63
   C_sys_ven_eff: 550.0

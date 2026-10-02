@@ -139,17 +139,14 @@ class JugularVein(OrganModel):
         P_jv = max(P_jv, 0.0)
 
         # --- Отток в системные вены ---
-        Q_out = (P_jv - P_sv) / self.R_out
-        Q_out = max(Q_out, 0.0)
-
-        # --- Масс-баланс ---
+        Q_out = max((P_jv - P_sv) / self.R_out, 0.0)
+        if V_jv < 0.5 * self.V0:
+            factor = float(np.clip(
+                (V_jv - 0.5 * self.V0) / (0.5 * self.V0) + 1.0,
+                0.0, 1.0
+            ))
+            Q_out *= factor
         dV = Q_in - Q_out
-
-        # --- Мягкий пол: ниже 50% V0 гасим отток ---
-        if V_jv < 0.5 * self.V0 and dV < 0:
-            softness = (V_jv - 0.5 * self.V0) / (0.5 * self.V0)
-            softness = float(np.clip(softness, 0.0, 1.0))
-            dV *= softness
 
         # --- Газовый баланс — полное перемешивание ---
         V_safe = max(V_jv, 1.0)   # защита от деления на 0

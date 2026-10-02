@@ -446,43 +446,15 @@ class Heart4Chambers(OrganModel):
     # ------------------------------------------------------------------
     # Мягкий клип объёма у нижней границы
     # ------------------------------------------------------------------
-    def _soft_clamp(self, V, V_min, dV):
-        """
-        Плавно обнуляет dV у нижней границы V_min.
-
-        При V > 1.5·V_min        — возвращает dV без изменений.
-        При V_min < V ≤ 1.5·V_min — плавное затухание: softness ∈ (0, 1).
-        При V ≤ V_min             — softness = 0, dV вниз обнуляется.
-
-        Численно устойчивая реализация: аргумент экспоненты клиппится
-        в [-60, 60], а softness — в [0, 1].
-        """
-        if V > 1.5 * V_min:
-            return dV
-
-        if dV >= 0.0:
-            return dV
-
+    def _floor_factor(self, V, V_min):
         z = -10.0 * (V - V_min) / V_min
         z = float(np.clip(z, -60.0, 60.0))
-        softness = 1.0 - float(np.exp(z))
-        softness = float(np.clip(softness, 0.0, 1.0))
+        return float(np.clip(1.0 - np.exp(z), 0.0, 1.0))
 
-        return dV * softness
-
-    def _soft_clamp_upper(self, V, V_max, dV):
-        """
-        Плавно гасит положительный dV у верхней границы V_max.
-        Аналог _soft_clamp, но для дилатации.
-        """
-        if V < 0.7 * V_max:
-            return dV
-        if dV <= 0.0:
-            return dV
+    def _ceil_factor(self, V, V_max):
         z = -10.0 * (V_max - V) / V_max
         z = float(np.clip(z, -60.0, 60.0))
-        softness = 1.0 - float(np.exp(z))
-        return dV * float(np.clip(softness, 0.0, 1.0))
+        return float(np.clip(1.0 - np.exp(z), 0.0, 1.0))
 
     # ------------------------------------------------------------------
     # Основной метод — производные
@@ -516,8 +488,35 @@ class Heart4Chambers(OrganModel):
         else:
             Q_vsd = 0.0
 
-        Q_sv_to_ra = (P_sv - P_ra) / self.R_venous_sys
-        Q_pv_to_la = (P_pv - P_la) / self.R_venous_pulm
+        Q_sv_to_ra = self._valve_flow(P_sv - P_ra, self.R_venous_sys)
+        V_sv_in  = inputs.get('V_sv', None)
+        V0_sv_in = inputs.get('V0_sv', None)
+        if V_sv_in is not None and V0_sv_in is not None and V0_sv_in > 0.0:
+            V_sv_in = max(float(V_sv_in), 0.0)
+            if V_sv_in < 0.5 * V0_sv_in:
+                factor = float(np.clip(V_sv_in / (0.5 * V0_sv_in), 0.0, 1.0))
+                Q_sv_to_ra *= factor
+        Q_pv_to_la = self._valve_flow(P_pv - P_la, self.R_venous_pulm)
+
+        rv_al = min(float(getattr(self, '_rv_afterload', 0.0)), 2.0)
+        V_min_rv_eff = self.V0['RV'] * max(0.3, 1.0 - 0.3 * rv_al)
+        V_max_rv_eff = 250.0 * (1.0 + 0.5 * rv_al)
+
+        s_la = self._floor_factor(V_la, self.V0['LA'])
+        s_lv = self._floor_factor(V_lv, self.V0['LV'])
+        s_ra = self._floor_factor(V_ra, self.V0['RA'])
+        s_rv = self._floor_factor(V_rv, V_min_rv_eff)
+        c_rv = self._ceil_factor(V_rv, V_max_rv_eff)
+
+        Q_mitral    *= s_la
+        Q_aortic    *= s_lv
+        Q_tricuspid *= s_ra * c_rv
+        Q_pulmonary *= s_rv
+
+        if Q_vsd > 0:
+            Q_vsd *= s_lv * c_rv
+        else:
+            Q_vsd *= s_rv
 
         self._current_flows = {
             'Q_aortic': Q_aortic,
@@ -548,15 +547,6 @@ class Heart4Chambers(OrganModel):
         dV_lv = Q_mitral - Q_aortic - Q_vsd
         dV_ra = Q_sv_to_ra - Q_tricuspid
         dV_rv = Q_tricuspid - Q_pulmonary + Q_vsd
-
-        dV_la = self._soft_clamp(V_la, self.V0['LA'], dV_la)
-        dV_lv = self._soft_clamp(V_lv, self.V0['LV'], dV_lv)
-        dV_ra = self._soft_clamp(V_ra, self.V0['RA'], dV_ra)
-        rv_al = min(float(getattr(self, '_rv_afterload', 0.0)), 2.0)
-        V_min_rv_eff = self.V0['RV'] * max(0.3, 1.0 - 0.3 * rv_al)
-        V_max_rv_eff = 250.0 * (1.0 + 0.5 * rv_al)
-        dV_rv = self._soft_clamp(V_rv, V_min_rv_eff, dV_rv)
-        dV_rv = self._soft_clamp_upper(V_rv, V_max_rv_eff, dV_rv)
 
         return np.array([dV_la, dV_lv, dV_ra, dV_rv])
 

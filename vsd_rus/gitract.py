@@ -171,9 +171,9 @@ class GITract(OrganModel):
         intake_nutrients = float(inputs.get('intake_nutrients', 0.0))
 
         # --- Гемодинамика ---
-        Q_in  = (P_sa   - P_art) / self.R_art
-        Q_cap = (P_art  - P_cap) / self.R_cap
-        Q_out = (P_cap  - P_portal) / self.R_venous
+        Q_in  = max((P_sa - P_art) / self.R_art, 0.0)
+        Q_cap = (P_art - P_cap) / self.R_cap
+        Q_out = max((P_cap - P_portal) / self.R_venous, 0.0)
 
         # --- Всасывание ---
         abs_factor = self._absorption_factor(P_portal)
@@ -190,6 +190,7 @@ class GITract(OrganModel):
             'absorption_water': absorption_water,
             'absorption_nutrients': absorption_nutrients,
             'portal_pressure_factor': abs_factor,
+            'Q_in': Q_in,
         }
         return np.array([dP_art, dP_cap])
 

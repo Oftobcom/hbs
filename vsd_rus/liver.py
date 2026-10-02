@@ -224,9 +224,9 @@ class Liver(OrganModel):
         Q_gut_out = inputs.get('Q_gut_out', inputs.get('Q_portal', 8.0))
 
         # --- Гемодинамика ---
-        Q_pv = (P_portal - P_hv) / self.R_pv_base   # portal vein → liver
-        Q_ha = (P_sa - P_hv) / self.R_ha            # hepatic artery → liver
-        Q_out = (P_hv - P_sv) / self.R_hv_base      # hepatic vein → systemic
+        Q_pv  = max((P_portal - P_hv) / self.R_pv_base, 0.0)
+        Q_ha  = max((P_sa - P_hv) / self.R_ha, 0.0)
+        Q_out = max((P_hv - P_sv) / self.R_hv_base, 0.0)
 
         dP_hv = (Q_ha + Q_pv - Q_out) / self.C
         dP_portal = (Q_gut_out - Q_pv) / self.C_portal   # Windkessel портальной вены
