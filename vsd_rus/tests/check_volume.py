@@ -12,7 +12,7 @@ model = WholeBodyModel(
     baroreflex_params={'P_set': 80.0, 'HR_base': HR_base},
 )
 y0 = model.calibrate_initial_state(t_calib=800)
-sol = model.simulate((0, 600), y0=y0, method='LSODA', max_step=0.07,
+sol = model.simulate((0, 600), y0=y0, method='LSODA', max_step=0.05,
                         t_eval=np.arange(0.0, 600.005, 0.05))
 
 

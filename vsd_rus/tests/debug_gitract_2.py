@@ -159,7 +159,7 @@ def test_dynamics():
     inputs = {'P_sa':85,'P_portal':8,'intake_water':0,'intake_nutrients':0}
     def rhs(t,y):
         return gi.get_derivatives(t,y,inputs)
-    sol = solve_ivp(rhs, (0,600), y0, method='LSODA', rtol=1e-4, atol=1e-5, max_step=0.1)
+    sol = solve_ivp(rhs, (0,600), y0, method='LSODA', rtol=1e-4, atol=1e-5, max_step=0.05)
     y_end = sol.y[:,-1]
     gi.get_derivatives(600, y_end, inputs)
     out = gi.get_outputs(y_end)

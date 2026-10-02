@@ -256,7 +256,7 @@ def _stage1_sim_cfg(sim_cfg: Optional[dict], verbose: int = 0) -> dict:
         "method": "LSODA",
         "rtol": 1e-4,
         "atol": 1e-5,
-        "max_step": 0.1,
+        "max_step": 0.05,
         "t_calib": 600.0,
         "t_end": 800.0,
         "n_samples_t": 4000,
@@ -982,7 +982,7 @@ def _debug_impl(verbose: int, t_start: datetime) -> None:
     sol = model.simulate(
         (0.0, t_end), t_eval=t_eval, y0=y0,
         method=str(sim_cfg.get("method", "LSODA")),
-        rtol=1e-4, atol=1e-5, max_step=0.1,
+        rtol=1e-4, atol=1e-5, max_step=0.05,
     )
     print(f"[solver, 2] nfev={sol.nfev} njev={getattr(sol,'njev',0)} "
           f"nlu={getattr(sol,'nlu',0)} t={sol.t[-1]:.1f} "

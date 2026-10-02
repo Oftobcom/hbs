@@ -56,7 +56,7 @@ class WindkesselVessel(OrganModel):
     Два режима работы (выбирается через mode):
       mode='P'  — состояние это давление P, dP/dt = (Qin − Qout)/C.
                   Используется для артерий и лёгочных вен.
-      mode='V'  — состояние это объём V, dV/dt = Qin − Qout.
+      mode='V'  — состояние это объём V, dV/dt = Qin − Qout + dV_external.
                   Давление выводится: P = P0 + (V − V0)/C.
                   Используется для системных вен — «буфера» крови.
     """
@@ -64,10 +64,8 @@ class WindkesselVessel(OrganModel):
     _C_MIN, _C_MAX = 1e-3, 1e5
     _P0_MIN, _P0_MAX = 0.0, 300.0
     _V0_MIN, _V0_MAX = 0.0, 1e5
-    _TAU_MIN, _TAU_MAX = 1.0, 1e5
 
-    def __init__(self, C, P0, mode='P', V0=None,
-                 target_fraction=None, tau_target=200.0):
+    def __init__(self, C, P0, mode='P', V0=None):
         if mode not in ('P', 'V'):
             raise ValueError(
                 f"WindkesselVessel: mode={mode!r} должен быть 'P' или 'V'."
@@ -92,19 +90,6 @@ class WindkesselVessel(OrganModel):
         else:
             self.V0 = self.C * self.P0
 
-        if target_fraction is not None:
-            self.target_fraction = _check_fraction(
-                "Windkessel.target_fraction", target_fraction,
-                "типично 0.05–0.6."
-            )
-        else:
-            self.target_fraction = None
-
-        self.tau_target = _check_range(
-            "Windkessel.tau_target", tau_target, self._TAU_MIN, self._TAU_MAX,
-            "с, типично 200–300."
-        )
-
         self._current_outputs = {}
 
     def get_state_size(self):
@@ -128,13 +113,7 @@ class WindkesselVessel(OrganModel):
         # mode == 'V'
         V = state[0]
         dV = Q_in - Q_out
-
-        if self.target_fraction is not None:
-            V_blood = inputs.get('V_blood', None)
-            if V_blood is not None:
-                V_target = self.target_fraction * float(V_blood)
-                dV += (V_target - V) / self.tau_target
-
+        dV += float(inputs.get('dV_external', 0.0))
         # Мягкий пол: ниже 50% V0 гасим отток
         if V < 0.5 * self.V0 and dV < 0:
             softness = (V - 0.5 * self.V0) / (0.5 * self.V0)
@@ -171,7 +150,6 @@ class WholeBodyModel:
     _P_SYS_MIN, _P_SYS_MAX = 0.0, 200.0
     _P_PV_MIN, _P_PV_MAX = 0.0, 100.0
 
-    _TAU_TARGET_MIN, _TAU_TARGET_MAX = 1.0, 1e5
 
     _FLUID_RATE_MIN, _FLUID_RATE_MAX = 0.0, 1.0
     _VO2_REST_MIN, _VO2_REST_MAX = 0.0, 20.0
@@ -198,7 +176,6 @@ class WholeBodyModel:
         P_sa0=85.0, P_sv0=12.0, P_pv0=12.0,
         SYS_VEN_FRACTION=0.63,
         C_sys_ven_eff=550.0,
-        tau_target=200.0,
         fluid_intake_rate=0.015,
         insensible_loss_rate=0.0,
         peripheral_params=None,
@@ -277,12 +254,6 @@ class WholeBodyModel:
                 f"JUG_VEN_FRACTION={JUG_VEN_FRACTION} ≥ 1.0 — "
                 f"венозные компартменты не могут занимать ≥ 100% V_blood."
             )
-
-        # --- Времена релаксации ---
-        tau_target = _check_range(
-            "tau_target", tau_target,
-            self._TAU_TARGET_MIN, self._TAU_TARGET_MAX, "с, типично 200–300."
-        )
 
         # --- Жидкостный баланс ---
         fluid_intake_rate = _check_range(
@@ -478,8 +449,6 @@ class WholeBodyModel:
         V_sv0 = SYS_VEN_FRACTION * blood_init['V0']
         self.sys_ven = WindkesselVessel(
             C=C_sys_ven_eff, P0=P_sv0, mode='V', V0=V_sv0,
-            target_fraction=SYS_VEN_FRACTION,
-            tau_target=tau_target,
         )
 
         # --- Яремная вена ---
@@ -489,8 +458,6 @@ class WholeBodyModel:
         jp.setdefault('P0', P_jv0)
         jp.setdefault('V0', V_jv0)
         jp.setdefault('R_out', R_jv_out)
-        jp.setdefault('target_fraction', JUG_VEN_FRACTION)
-        jp.setdefault('tau_target', tau_target)
         self.jugular_vein = JugularVein(**jp)
 
         self.VO2_rest = VO2_rest
@@ -606,7 +573,7 @@ class WholeBodyModel:
             sol = solve_ivp(
                 self.derivatives, (0.0, t_calib), y0,
                 t_eval=t_eval, method='LSODA',
-                rtol=rtol, atol=atol, max_step=0.1,
+                rtol=rtol, atol=atol, max_step=0.05,
             )
         except Exception as e:
             warnings.warn(f"calibrate: solver failed ({e}); using analytic y0")
@@ -657,9 +624,6 @@ class WholeBodyModel:
             return self.calibrate_initial_state()
         return y0
 
-    # ------------------------------------------------------------------
-    # _compute_organ_flows — единая точка расчёта (без изменений по логике)
-    # ------------------------------------------------------------------
     def _compute_organ_flows(self, t, y):
         # --- Кэш ---
         if (self._flow_cache_t is not None
@@ -692,11 +656,39 @@ class WholeBodyModel:
         P_pv         = y[sl['pul_ven']][0]
         V_jv_state   = y[sl['jugular_vein']]
 
+        # --- Полный циркулирующий объём: сумма всех физических V ---
+        # Все давления уже доступны из y (P-mode и pressure-states),
+        # V_sv и V_jv — direct states. Ничего не зависит от order.
+        V_heart_phys = float(np.maximum(y[sl['heart']], 0.0).sum())
+
+        _lungs_state = y[sl['lungs']]
+        V_lungs_phys = (self.lungs.C1 * max(float(_lungs_state[0]), 0.0)
+                    + self.lungs.C2 * max(float(_lungs_state[1]), 0.0))
+
+        V_sv_phys = max(float(y[sl['sys_ven']][0]), 0.0)
+        V_jv_phys = max(float(V_jv_state[0]), 0.0)
+        V_sys_art_phys = self.sys_art.C * max(float(y[sl['sys_art']][0]), 0.0)
+        V_pul_ven_phys = self.pul_ven.C * max(float(y[sl['pul_ven']][0]), 0.0)
+
+        _liver_state = y[sl['liver']]
+        V_liver_phys = (self.liver.C * max(float(_liver_state[0]), 0.0)
+                    + self.liver.C_portal * max(float(_liver_state[5]), 0.0))
+
+        _git_state = y[sl['gitract']]
+        V_gitract_phys = (self.gitract.C_art * max(float(_git_state[0]), 0.0)
+                        + self.gitract.C_cap * max(float(_git_state[1]), 0.0))
+
+        V_brain_phys = self.brain.C * max(float(y[sl['brain']][0]), 0.0)
+
+        V_blood_total = (V_heart_phys + V_lungs_phys + V_sv_phys + V_jv_phys
+                    + V_sys_art_phys + V_pul_ven_phys + V_liver_phys
+                    + V_gitract_phys + V_brain_phys)
+
         P_sv = self.sys_ven.P0 + (V_sv - self.sys_ven.V0) / self.sys_ven.C
         P_sv = max(P_sv, 0.0)
 
-        Vb           = V_blood[0]
-        C_blood      = V_blood[1:]
+        Vb           = V_blood_total
+        C_blood      = V_blood
         conc         = dict(zip(self.substance_names, C_blood))
         P_pa         = V_lungs[0]
 
@@ -776,10 +768,8 @@ class WholeBodyModel:
         )
 
         # --- Яремная вена: извлечение P_jv ---
-        V_jv = float(V_jv_state[0])
-        P_jv = self.jugular_vein.P0 + (
-            (V_jv - self.jugular_vein.V0) / self.jugular_vein.C
-        )
+        # V_jv_phys уже посчитан выше (в блоке V_blood_total)
+        P_jv = self.jugular_vein.P0 + (V_jv_phys - self.jugular_vein.V0) / self.jugular_vein.C
         P_jv = max(P_jv, 0.0)
 
         # --- Мозг ---
@@ -813,7 +803,6 @@ class WholeBodyModel:
             'C_in_O2':  brain_out['C_v_O2_brain'],
             'C_in_CO2': brain_out['C_v_CO2_brain'],
             'P_sv':     P_sv,
-            'V_blood':  Vb,
         }
         d_jugular = self.jugular_vein.get_derivatives(t, V_jv_state, jugular_inputs)
         jugular_out = self.jugular_vein.get_outputs(V_jv_state)
@@ -891,9 +880,8 @@ class WholeBodyModel:
             'V_periph': V_periph, 'V_baroreflex': V_baroreflex, 'V_jugular': V_jv_state,
             'P_sa': P_sa, 'P_sv': P_sv, 'P_pv': P_pv, 'P_pa': P_pa,
             'V_sv': V_sv, 'Vb': Vb, 'C_blood': C_blood, 'conc': conc,
-            'V_sv_target': self.sys_ven.target_fraction * Vb if self.sys_ven.target_fraction else V_sv,
             'V_sv_fraction': V_sv / max(Vb, 1e-6) if Vb > 0 else 0.0,
-            'V_jv': V_jv_state[0], 'C_jv_O2': V_jv_state[1], 'C_jv_CO2': V_jv_state[2],
+            'V_jv': V_jv_phys, 'C_jv_O2': V_jv_state[1], 'C_jv_CO2': V_jv_state[2],
             'HR': HR, 'hr_factor': hr_factor, 'baroreflex_out': baroreflex_out,
             'baro_activation': baroreflex_out['baro_activation'],
             'd_heart': d_heart, 'd_lungs': d_lungs, 'd_liver': d_liver,
@@ -915,6 +903,7 @@ class WholeBodyModel:
             'dC_O2_blood':  float(dC_O2_blood),
             'dC_CO2_blood': float(dC_CO2_blood),
             'P_jv':         float(P_jv),
+            'dV_external': dV_total,
         }
         self._flow_cache_t = t
         self._flow_cache_y = y.copy()
@@ -927,9 +916,13 @@ class WholeBodyModel:
     def derivatives(self, t, y):
         f = self._compute_organ_flows(t, y)
 
-        # Кровь
-        blood_inputs = {'dV': f['dV_total'], 'dC': f['dC_blood_arr']}
-        d_blood = self.blood.get_derivatives(t, f['V_blood'], blood_inputs)
+        # Кровь: state = только концентрации, V/dV — извне
+        blood_inputs = {
+            'V_blood':  f['Vb'],          # derived total
+            'dV_blood': f['dV_total'],    # = absorption + intake − urine − insensible
+            'dC':       f['dC_blood_arr'],
+        }
+        d_blood = self.blood.get_derivatives(t, f['C_blood'], blood_inputs)
 
         # Системные артерии
         d_sys_art = self.sys_art.get_derivatives(
@@ -937,10 +930,14 @@ class WholeBodyModel:
             {'Q_in': f['heart_out']['Q_aortic'], 'Q_out': f['Q_art_out']},
         )
 
-        # Системные вены
+        # Системные вены: получают dV_external как сток
         d_sys_ven = self.sys_ven.get_derivatives(
             t, np.array([f['V_sv']]),
-            {'Q_in': f['Q_ven_in'], 'Q_out': f['Q_ven_out'], 'V_blood': f['Vb']},
+            {
+                'Q_in':        f['Q_ven_in'],
+                'Q_out':       f['Q_ven_out'],
+                'dV_external': f['dV_total'],   # ← новый вход
+            },
         )
 
         # Лёгочные вены
@@ -973,7 +970,7 @@ class WholeBodyModel:
         return {
             'P_sa': f['P_sa'], 'P_sv': f['P_sv'], 'P_pa': f['P_pa'], 'P_pv': f['P_pv'],
             'V_la': f['V_heart'][0], 'V_lv': f['V_heart'][1],
-            'V_sv': f['V_sv'], 'V_sv_target': f['V_sv_target'],
+            'V_sv': f['V_sv'],
             'V_sv_fraction': f['V_sv_fraction'],
             'V_ra': f['V_heart'][2], 'V_rv': f['V_heart'][3],
             'Q_aortic': Qs, 'Q_pulmonary': Qp,
@@ -1108,7 +1105,7 @@ class WholeBodyModel:
                 t_eval=t_eval,
                 method='LSODA',
                 rtol=1e-4, atol=1e-5,
-                max_step=T / max(n_pts, 40),   # достаточно точек на клапанные пики
+                max_step= 0.05 # T / max(n_pts, 40),   # достаточно точек на клапанные пики
             )
         except Exception as e:
             warnings.warn(f"cycle_averaged_flows: solver failed ({e}); "
@@ -1162,7 +1159,7 @@ class WholeBodyModel:
     def simulate(self, t_span, t_eval=None, y0=None, method='LSODA', **kwargs):
         if y0 is None:
             y0 = self.calibrate_initial_state()
-        kwargs.setdefault('max_step', 0.1)
+        kwargs.setdefault('max_step', 0.05)
         return solve_ivp(
             self.derivatives, t_span, y0,
             t_eval=t_eval, method=method, **kwargs,

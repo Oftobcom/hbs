@@ -30,7 +30,6 @@ debug_whole_body.py — изолированная диагностика WholeB
     • Динамику P_sa, V_lv, Qp, Qa, Q_vsd по окнам времени
     • Знак и величину Q_vsd (проверка направления шунта)
     • P_lv vs P_rv на систолическом пике (причина направления шунта)
-    • Сравнение V_sv и V_sv_target (проверка Windkessel-релаксации)
     • Разбивку объёмов по компартментам (volume breakdown)
     • Физиологичность итоговой точки
 """
@@ -429,7 +428,6 @@ def _print_goal1_check(data: dict, label: str, model=None, sol=None) -> None:
 
     # --- 1. R_remodel в steady ---
     R_rem = _window_mean(data, "R_remodel", win)
-    mode_v = _window_mean(data, "mode_remodeled", win)
 
     # --- 2. P_pa в steady ---
     P_pa = _window_mean(data, "P_pa", win)
@@ -446,9 +444,6 @@ def _print_goal1_check(data: dict, label: str, model=None, sol=None) -> None:
 
     # --- 4. Q_vsd среднее за цикл ---
     Q_vsd = _window_mean(data, "Q_vsd", win)
-
-    # --- 5. baro_activation_rv (если проброшен) ---
-    baro_rv = _window_mean(data, "baro_activation_rv", win)
 
     # --- 6. Печать критериев ---
     def check(cond, name, value, target):
@@ -467,10 +462,16 @@ def _print_goal1_check(data: dict, label: str, model=None, sol=None) -> None:
     check(Q_vsd < 0.0,
           "Q_vsd (среднее, мл/с)",
           Q_vsd, "< 0")
+
+    # --- 5. Пульмональная бароактивация ПЖ ---
+    # compute_outputs пробрасывает baro_activation_rv из
+    # baroreflex_out['baro_activation_rv']; при P_pa > P_pa_set
+    # (лёгочная гипертензия) сигнал > 1.0, при норме ≈ 1.0.
+    baro_rv = _window_mean(data, "baro_activation_rv", win)
     if np.isfinite(baro_rv):
         check(baro_rv > 1.5,
               "baro_activation_rv",
-              baro_rv, "> 1.5")
+              baro_rv, "> 1.5")    
 
     # --- Проверка периодичности: y_end vs y(t_end − T) ---
     if sol is not None and len(sol.t) >= 2:
@@ -485,7 +486,14 @@ def _print_goal1_check(data: dict, label: str, model=None, sol=None) -> None:
                   f"Периодичность ‖y(t_end) − y(t_end−T)‖ = {dy:.3f}")
 
     # --- Итоговый вердикт ---
-    all_ok = (R_rem > 4.0 and P_pa > 40.0 and dP < 0.0 and Q_vsd < 0.0)
+    # baro_activation_rv проверяем только при активном ремоделировании,
+    # т.к. без лёгочной гипертензии P_pa ≈ P_pa_set и сигнал ≡ 1.0
+    if R_rem > 2.0:
+        all_ok = (R_rem > 4.0 and P_pa > 40.0 and dP < 0.0
+                  and Q_vsd < 0.0 and baro_rv > 1.5)
+    else:
+        all_ok = (R_rem > 4.0 and P_pa > 40.0 and dP < 0.0
+                  and Q_vsd < 0.0)
     print()
     if all_ok:
         print(f"  ►►► ЦЕЛЬ 1 ДОСТИГНУТА: устойчивый R→L шунт ◄◄◄")
@@ -500,7 +508,7 @@ def _print_goal1_check(data: dict, label: str, model=None, sol=None) -> None:
 
 def _volume_breakdown(model: WholeBodyModel, y: np.ndarray) -> dict:
     """
-    Разбивает общий объём крови на компартменты для диагностики утечек.
+    Разбивает общий объём крови на компартменты.
     Все объёмы в мл. Считается из сырого состояния y.
     """
     sl = model.idx
@@ -548,18 +556,10 @@ def _volume_breakdown(model: WholeBodyModel, y: np.ndarray) -> dict:
     P_br = max(float(y[sl['brain']][0]), 0.0)
     V_brain = model.brain.C * P_br
 
-    # --- BloodPool: [V_blood, C_0, ..., C_n] ---
-    V_blood = max(float(y[sl['blood']][0]), 0.0)
-
     return {
-        'V_blood (BloodPool)':               V_blood,
         'V_sv (systemic veins)':             V_sv,
         'V_jv (jugular vein)':               V_jv,
         'V_heart (LA+LV+RA+RV)':             V_la + V_lv + V_ra + V_rv,
-        '  V_la':                            V_la,
-        '  V_lv':                            V_lv,
-        '  V_ra':                            V_ra,
-        '  V_rv':                            V_rv,
         'V_lungs (C1*P_prox + C2*P_dist)':   V_lungs,
         'V_sys_art (C*P_sa)':                V_sys_art,
         'V_pul_ven (C*P_pv)':                V_pul_ven,
@@ -572,9 +572,7 @@ def _volume_breakdown(model: WholeBodyModel, y: np.ndarray) -> dict:
 def _print_volume_breakdown(model: WholeBodyModel, sol, label: str,
                             n_cycles: float = 10.0) -> None:
     """
-    Разбивка общего объёма крови по компартментам.
-    Сравнивает сумму с эталоном V_blood из BloodPool.
-    Расхождение — признак утечки или несогласованности модели.
+    Разбивка физического объёма по 9 компартментам; сумма = V_blood_total
     """
     # --- Определяем окно последних ~n_cycles циклов ---
     HR_end = float(model.baroreflex.get_outputs(
@@ -604,32 +602,10 @@ def _print_volume_breakdown(model: WholeBodyModel, sol, label: str,
     for k in keys:
         print(f"  {k:42s} = {means[k]:9.2f} мл")
 
-    V_blood = means['V_blood (BloodPool)']
-    V_total = sum(means.values())   # включая V_blood
-
+    V_total = sum(means.values())
     print(f"  {'-' * 58}")
-    print(f"  {'SUM (all compartments, incl. V_blood)':42s} = "
-          f"{V_total:9.2f} мл")
-    print(f"  {'V_blood (reference from BloodPool)':42s} = "
-          f"{V_blood:9.2f} мл")
-    print(f"  {'SUM − V_blood':42s} = {V_total - V_blood:+9.2f} мл")
-    print(f"  {'Expected total (≈ blood.V0)':42s} = "
-          f"{model.blood.V0:9.2f} мл")
-
-    # --- Диагностические пороги ---
-    if abs(V_total - model.blood.V0) > 200.0:
-        print(f"  ⚠ Сумма компартментов {V_total:.0f} ≠ blood.V0 "
-              f"{model.blood.V0:.0f} → возможна утечка "
-              f"({V_total - model.blood.V0:+.0f} мл)")
-    else:
-        print(f"  ✓ Сумма компартментов согласована с blood.V0")
-
-    # --- Отдельно: сколько крови «вне» BloodPool ---
-    V_outside = V_total - V_blood
-    print(f"  {'V_outside (SUM − V_blood)':42s} = "
-          f"{V_outside:9.2f} мл  "
-          f"({100.0 * V_outside / max(V_total, 1e-6):.1f}% от SUM)")
-
+    print(f"  {'V_blood_total (SUM всех компартментов)':42s} = "
+        f"{V_total:9.2f} мл")
 
 def _print_steady(data: dict, label: str, model=None, sol=None) -> None:
     """Средние за последние 10 циклов + ключевые физиологические метрики."""
@@ -649,7 +625,6 @@ def _print_steady(data: dict, label: str, model=None, sol=None) -> None:
     EDV_LV = float(np.max(data["V_lv"][win])) if np.any(win) else float("nan")
     EDV_RV = float(np.max(data["V_rv"][win])) if np.any(win) else float("nan")
     V_sv = _window_mean(data, "V_sv", win)
-    V_sv_target = _window_mean(data, "V_sv_target", win)
     Qp_Qs = Qp / max(Qa, 1e-6)
 
     print(f"\n--- {label}: STEADY (last 10 cycles, T={T:.3f} s) ---")
@@ -663,7 +638,6 @@ def _print_steady(data: dict, label: str, model=None, sol=None) -> None:
     print(f"  HR            = {HR_mean:7.2f} уд/мин")
     print(f"  EDV_LV        = {EDV_LV:7.1f} мл")
     print(f"  EDV_RV        = {EDV_RV:7.1f} мл")
-    print(f"  V_sv          = {V_sv:7.1f} мл        (target {V_sv_target:.1f})")
     print(f"  P_lv (mean)   = {P_lv:7.2f} мм рт.ст.")
     print(f"  P_rv (mean)   = {P_rv:7.2f} мм рт.ст.")
 
@@ -719,11 +693,6 @@ def _print_steady(data: dict, label: str, model=None, sol=None) -> None:
         warnings.append(f"Qp/Qs={Qp_Qs:.2f} < 0.5 (нефизиологичная инверсия)")
     if EDV_LV < 50.0:
         warnings.append(f"EDV_LV={EDV_LV:.1f} < 50 (недонаполнение ЛЖ)")
-    if abs(V_sv - V_sv_target) > 0.1 * max(V_sv_target, 1.0):
-        warnings.append(
-            f"V_sv={V_sv:.0f} ≠ target {V_sv_target:.0f} "
-            f"(Windkessel не сошёлся)"
-        )
     if warnings:
         print("  ⚠ ФИЗИОЛОГИЧЕСКИЕ ПРЕДУПРЕЖДЕНИЯ:")
         for w in warnings:
@@ -790,10 +759,8 @@ def run_scenario(name: str, scenario: dict) -> None:
         return
 
     heart_slc = model.idx['heart']
-    V_blood = y0[model.idx['blood']][0]
     P_sa_0 = y0[model.idx['sys_art']][0]
-    print(f"  y0: heart={y0[heart_slc]}  "
-          f"V_blood={V_blood:.1f}  P_sa={P_sa_0:.2f}")
+    print(f"  y0: heart={y0[heart_slc]}  P_sa={P_sa_0:.2f}")
 
     # --- Симуляция ---
     if scenario.get("pressure_remodel", False):
@@ -810,7 +777,7 @@ def run_scenario(name: str, scenario: dict) -> None:
         sol, rhs_counter = simulate_with_counter(
             model, (0.0, t_end_sim), t_eval=t_eval, y0=y0,
             bin_size=max(t_end_sim / 2000.0, 0.1),
-            method='LSODA', rtol=1e-4, atol=1e-5, max_step=0.15,
+            method='LSODA', rtol=1e-4, atol=1e-5, max_step=0.05,
         )
     except Exception as e:
         print(f"  ✗ simulate FAILED: {e}")

@@ -63,6 +63,34 @@ class Lungs2Chamber(OrganModel):
         shunt = self.shunt_base + self.shunt_sensitivity * damage
         return min(shunt, 0.5)   # ограничим разумным пределом
 
+    def _recruit_factor(self, P_pa: float, R_remodel: float) -> float:
+        if not self.recruitment_enabled:
+            return 1.0
+        P = float(np.clip(P_pa, 1.0, 200.0))
+        ratio = (P / self.P_recruit_50) ** self.n_recruit
+        f_sigmoid = 1.0 / (1.0 + ratio)
+        f_healthy = self.f_recruit_min + (1.0 - self.f_recruit_min) * f_sigmoid
+
+        # Исчерпание рекруитмента по мере ремоделирования — нелинейно
+        remodel_frac = float(np.clip(
+            (R_remodel - 1.0) / max(self.R_remodel_max - 1.0, 1e-6), 0.0, 1.0))
+        # При remodel_frac=0 → f_healthy; при remodel_frac=1 → f=1.0 (нет дилатации)
+        return float(f_healthy + (1.0 - f_healthy) * (remodel_frac ** 0.5))
+
+    def _R_remodel_target(self, P_pa: float) -> float:
+        if not self.pressure_remodel:
+            return 1.0
+        excess = max(float(P_pa) - self.P_pa_threshold, 0.0)
+        if excess <= 0.0:
+            return 1.0
+        # Стимул ремоделирования пропорционален ПРЕВЫШЕНИЮ и растёт нелинейно
+        # (не как exp, а как excess^1.5 — быстрее выходит на целевое PVR)
+        stimulus = self.pressure_sensitivity * excess * (1.0 + 0.03 * excess)
+        R_target = 1.0 + (self.R_remodel_max - 1.0) * (
+            1.0 - np.exp(-stimulus / max(self.R_remodel_max - 1.0, 1e-6))
+        )
+        return float(np.clip(R_target, 1.0, self.R_remodel_max))
+
     def get_derivatives(self, t, state, inputs):
         P_prox, P_dist = state
         Q_pulm = inputs.get('Q_pulmonary', 0.0)

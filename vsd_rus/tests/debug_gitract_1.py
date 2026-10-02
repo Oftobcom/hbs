@@ -95,7 +95,7 @@ def simulate_steady(git: GITract, inputs: dict, t_end=300.0,
         return git.get_derivatives(t, y, inputs)
 
     return solve_ivp(rhs, (0.0, t_end), y0, method=method,
-                     rtol=rtol, atol=atol, max_step=0.5)
+                     rtol=rtol, atol=atol, max_step=0.05)
 
 
 def extract_steady(sol, git, inputs):

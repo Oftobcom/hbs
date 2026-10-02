@@ -115,7 +115,7 @@ def print_banner():
 # =====================================================================
 
 def integrate_cycles(heart, inputs, n_cycles=30, n_avg=10,
-                     method="LSODA", rtol=1e-7, atol=1e-9, max_step=0.005):
+                     method="LSODA", rtol=1e-7, atol=1e-9, max_step=0.05):
     """
     Интегрирует heart на n_cycles кардиоциклов.
     Возвращает sol, T (длительность цикла), t_avg_start (начало усреднения).
@@ -403,7 +403,7 @@ def test_integration_accuracy():
                                           n_cycles=20, n_avg=5,
                                           method="RK45",
                                           rtol=1e-8, atol=1e-10,
-                                          max_step=0.003)
+                                          max_step=0.05)
     m_R = extract_steady(sol_R, heart_R, INPUTS_HEALTHY, T, t_start)
 
     heart_L = make_heart()
@@ -411,7 +411,7 @@ def test_integration_accuracy():
                                           n_cycles=20, n_avg=5,
                                           method="LSODA",
                                           rtol=1e-8, atol=1e-10,
-                                          max_step=0.003)
+                                          max_step=0.05)
     m_L = extract_steady(sol_L, heart_L, INPUTS_HEALTHY, T, t_start)
 
     keys = ("Q_aortic", "Q_mitral", "EDV_LV", "ESV_LV",
@@ -441,7 +441,7 @@ def test_drift():
     print("=" * 70)
     heart = make_heart()
     sol, T, _ = integrate_cycles(heart, INPUTS_HEALTHY,
-                                  n_cycles=30, n_avg=10, max_step=0.005)
+                                  n_cycles=30, n_avg=10, max_step=0.05)
 
     w1 = (sol.t > 8*T) & (sol.t < 13*T)
     w2 = (sol.t > 23*T) & (sol.t < 28*T)
@@ -493,7 +493,7 @@ def test_conservation_laws():
     sol, T, t_start = integrate_cycles(
         heart, INPUTS_HEALTHY,
         n_cycles=30, n_avg=10,
-        method="LSODA", rtol=1e-9, atol=1e-11, max_step=0.002,
+        method="LSODA", rtol=1e-9, atol=1e-11, max_step=0.05,
     )
 
     # --- Возьмём последний полный цикл ---

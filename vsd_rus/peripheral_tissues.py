@@ -259,15 +259,22 @@ class PeripheralTissues(OrganModel):
             f_P = 1.0 + self.k_P_myogenic * signed
         return float(np.clip(f_P, self.R_min_factor, self.R_max_factor))
 
-    def _autoregulation_target(self, P_sa: float, C_O2_local: float, baro_scale=1.0) -> float:
+    def _autoregulation_target(self, P_sa: float, C_O2_local: float,
+                            baro_scale: float = 1.0) -> float:
         """
-        Целевое R_eff — комбинация метаболической и миогенной регуляции.
+        R_target = R_base · f_O2 · f_P · baro_scale.
 
-        R_target = R_base · f_O2(C_O2_local) · f_P(P_sa)
+        Все три фактора — независимые мультипликативные модуляции
+        радиуса сосуда (Пуазейль: R ∝ 1/r⁴).
         """
         f_O2 = self._autoregulation_factor_O2(C_O2_local)
         f_P = self._autoregulation_factor_P(P_sa)
-        return self.R_base * f_O2 * f_P * baro_scale
+        R_target = self.R_base * f_O2 * f_P * baro_scale
+        return float(np.clip(
+            R_target,
+            self.R_base * self.R_min_factor,
+            self.R_base * self.R_max_factor,
+        ))
 
     # ------------------------------------------------------------------
     # Производные
@@ -384,7 +391,7 @@ if __name__ == "__main__":
         return pt.get_derivatives(t, y, INPUTS)
 
     sol = solve_ivp(rhs, (0, 60), pt.get_initial_state(),
-                    method='LSODA', rtol=1e-6, atol=1e-8, max_step=0.1)
+                    method='LSODA', rtol=1e-6, atol=1e-8, max_step=0.05)
     y_end = sol.y[:, -1]
     pt.get_derivatives(sol.t[-1], y_end, INPUTS)
     out = pt.get_outputs(y_end)
@@ -400,7 +407,7 @@ if __name__ == "__main__":
     inputs_hyp = dict(INPUTS, P_sa=60.0, C_a_O2=0.12)
     def rhs2(t, y): return pt2.get_derivatives(t, y, inputs_hyp)
     sol2 = solve_ivp(rhs2, (0, 60), pt2.get_initial_state(),
-                     method='LSODA', rtol=1e-6, atol=1e-8, max_step=0.1)
+                     method='LSODA', rtol=1e-6, atol=1e-8, max_step=0.05)
     pt2.get_derivatives(sol2.t[-1], sol2.y[:, -1], inputs_hyp)
     out2 = pt2.get_outputs(sol2.y[:, -1])
     for k in ('Q_peripheral', 'R_eff', 'C_O2_local',

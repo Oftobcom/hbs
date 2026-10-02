@@ -83,7 +83,7 @@ def simulate_beats(R_vsd=np.inf, P_sa=85, P_sv=12, P_pa=15, P_pv=12, hr=70, t_be
     t_span = (0, t_beats*T)
     def rhs(t,y):
         return h.get_derivatives(t,y,inputs)
-    sol = solve_ivp(rhs, t_span, y0, method='LSODA', rtol=1e-4, atol=1e-5, max_step=0.01)
+    sol = solve_ivp(rhs, t_span, y0, method='LSODA', rtol=1e-4, atol=1e-5, max_step=0.05)
     t = sol.t
     flows = {k: [] for k in ['Q_aortic','Q_pulmonary','Q_mitral','Q_tricuspid','Q_vsd','Q_sv_to_ra','Q_pv_to_la']}
     pressures = {k: [] for k in ['P_la','P_lv','P_ra','P_rv']}
@@ -187,7 +187,7 @@ def test_drift():
     y0 = h.get_initial_state()
     inputs={'P_sa':85,'P_sv':12,'P_pa':15,'P_pv':12}
     def rhs(t,y): return h.get_derivatives(t,y,inputs)
-    sol=solve_ivp(rhs,(0,600),y0,method='LSODA',rtol=1e-4,atol=1e-5,max_step=0.1)
+    sol=solve_ivp(rhs,(0,600),y0,method='LSODA',rtol=1e-4,atol=1e-5,max_step=0.05)
     V_lv=sol.y[1]
     mean_580=np.mean(V_lv[sol.t>=580])
     mean_590=np.mean(V_lv[sol.t>=590])

@@ -39,7 +39,7 @@ y0 = model.calibrate_initial_state(t_calib=800.0)
 model.insensible_loss_rate = 5.0    # включаем отток ПОСЛЕ калибровки
 
 sol = model.simulate((0, 600), y0=y0, method='LSODA',
-                     max_step=0.1, t_eval=np.linspace(0, 600, 3000))
+                     max_step=0.05, t_eval=np.linspace(0, 600, 3000))
 
 V_sv_arr = sol.y[model.idx['sys_ven']][0]
 print(f"V_sv: min = {V_sv_arr.min():.2f}, max = {V_sv_arr.max():.2f}")

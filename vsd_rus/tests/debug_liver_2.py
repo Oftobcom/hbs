@@ -95,7 +95,7 @@ def banner():
     print(f"  → {RESULT_FILE}")
     print("="*70)
 
-def integrate(liver, inputs, t_end=600, max_step=0.5):
+def integrate(liver, inputs, t_end=600, max_step=0.05):
     y0=liver.get_initial_state()
     def rhs(t,y): return liver.get_derivatives(t,y,inputs)
     sol=solve_ivp(rhs,(0.0,t_end),y0,method="LSODA",rtol=1e-7,atol=1e-9,max_step=max_step)
@@ -242,7 +242,7 @@ def test_drift():
 def test_strict():
     print("\n"+"="*70+"\nTEST 10: Строгий — положительность, Q>=0, P>=0, finite\n"+"="*70)
     liv=make_liver()
-    sol,out,_=integrate(liv, INPUTS_HEALTHY, t_end=600, max_step=0.2)
+    sol,out,_=integrate(liv, INPUTS_HEALTHY, t_end=600, max_step=0.05)
     P_hv=sol.y[0,:]; P_port=sol.y[5,:]; C_bil=sol.y[1,:]; C_amm=sol.y[2,:]; C_alb=sol.y[3,:]
     checks=[
         ("P_hv>0", np.all(P_hv>0)),

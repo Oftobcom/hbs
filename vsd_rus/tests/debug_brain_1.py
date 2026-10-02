@@ -83,7 +83,7 @@ def simulate_steady(brain: Brain, inputs: dict,
         return brain.get_derivatives(t, y, inputs)
 
     sol = solve_ivp(rhs, (0.0, t_end), y0, method=method,
-                    rtol=rtol, atol=atol, max_step=0.5)
+                    rtol=rtol, atol=atol, max_step=0.05)
     return sol
 
 

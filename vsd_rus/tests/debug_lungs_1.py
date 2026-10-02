@@ -69,7 +69,7 @@ INPUTS_NORM = {
 }
 
 
-def integrate(lungs, inputs, t_end=30.0, y0=None, max_step=0.02):
+def integrate(lungs, inputs, t_end=30.0, y0=None, max_step=0.05):
     if y0 is None:
         y0 = lungs.get_initial_state()
     def rhs(t, y): return lungs.get_derivatives(t, y, inputs)
@@ -376,7 +376,7 @@ def test_mass_balance():
 
     def rhs(t, y): return lungs.get_derivatives(t, y, INPUTS_NORM)
     sol = solve_ivp(rhs, (0, 30), y0, method="LSODA",
-                    rtol=1e-9, atol=1e-12, max_step=0.02, dense_output=True)
+                    rtol=1e-9, atol=1e-12, max_step=0.05, dense_output=True)
 
     # Вычисляем Q_out(t) вдоль траектории
     t_arr = sol.t
@@ -449,7 +449,7 @@ def test_pressure_remodel():
                         R_remodel_max=3.0,
                         tau_remodel=10.0)             # быстрый
     inp2 = dict(INPUTS_NORM, Q_pulmonary=400.0)
-    sol2 = integrate(lungs2, inp2, t_end=500.0, max_step=0.5)
+    sol2 = integrate(lungs2, inp2, t_end=500.0, max_step=0.05)
     o2 = out_at(lungs2, sol2.y[:, -1], inp2)
     print(f"  P_pa={o2['P_pa']:.2f}, R_remodel={o2['R_remodel']:.4f} "
           f"(клип на R_remodel_max=3.0)")

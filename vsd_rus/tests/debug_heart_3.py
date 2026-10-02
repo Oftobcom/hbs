@@ -252,7 +252,7 @@ def test_conservation_strict():
     print("TEST 9: Conservation laws & periodicity (СТРОГИЙ NEW)")
     print("="*70)
     h=make_heart()
-    sol,T,t_avg=integrate_cycles(h,INPUTS,n_cycles=30,n_avg=10,rtol=1e-9,atol=1e-12,max_step=0.002)
+    sol,T,t_avg=integrate_cycles(h,INPUTS,n_cycles=30,n_avg=10,rtol=1e-9,atol=1e-12,max_step=0.05)
     t_last = sol.t[-1]-T
     mask = sol.t>=t_last
     t_c=sol.t[mask]; y_c=sol.y[:,mask]

@@ -61,7 +61,7 @@ def integrate(pt, inputs, t_end=60.0, y0=None):
     if y0 is None:
         y0 = pt.get_initial_state()
     def rhs(t,y): return pt.get_derivatives(t,y,inputs)
-    sol = solve_ivp(rhs,(0,t_end),y0,method="LSODA",rtol=1e-7,atol=1e-9,max_step=0.5)
+    sol = solve_ivp(rhs,(0,t_end),y0,method="LSODA",rtol=1e-7,atol=1e-9,max_step=0.05)
     pt.get_derivatives(sol.t[-1], sol.y[:,-1], inputs)
     out = pt.get_outputs(sol.y[:,-1])
     return sol,out

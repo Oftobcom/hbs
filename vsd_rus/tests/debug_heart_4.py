@@ -195,7 +195,7 @@ def test_drift():
 def test_strict():
     print("\n"+"="*70+"\nTEST 10: Conservation strict NEW\n"+"="*70)
     h=make_heart()
-    sol,T,_=integrate_cycles(h,INPUTS,n_cycles=30,n_avg=10,rtol=1e-9,atol=1e-12,max_step=0.002)
+    sol,T,_=integrate_cycles(h,INPUTS,n_cycles=30,n_avg=10,rtol=1e-9,atol=1e-12,max_step=0.005)
     mask=sol.t>=sol.t[-1]-T; t_c=sol.t[mask]; y_c=sol.y[:,mask]
     Q_a=[]; Q_m=[]; Q_p=[]; Q_tr=[]
     for i in range(len(t_c)):

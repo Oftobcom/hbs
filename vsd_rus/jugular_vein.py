@@ -10,7 +10,6 @@
 Гемодинамика:
   Q_in  = Q_brain (из мозга)
   Q_out = (P_jv - P_sv)/R_out   → в системные вены / ПП
-  dV/dt = Q_in - Q_out + (V_target - V)/tau
 
 Газовый баланс (полное перемешивание):
   d(C_jv_O2)/dt  = Q_in · (C_v_brain_O2  - C_jv_O2 ) / V_jv
@@ -41,7 +40,6 @@ class JugularVein(OrganModel):
     _P0_MIN, _P0_MAX = 0.0, 30.0
     _V0_MIN, _V0_MAX = 10.0, 2000.0
     _R_OUT_MIN, _R_OUT_MAX = 1e-3, 20.0
-    _TAU_TARGET_MIN, _TAU_TARGET_MAX = 1.0, 1e5
 
     _C_O2_INIT_MIN, _C_O2_INIT_MAX = 0.0, 0.25
     _C_CO2_INIT_MIN, _C_CO2_INIT_MAX = 0.0, 1.0
@@ -52,8 +50,6 @@ class JugularVein(OrganModel):
                  P0=6.0,                  # мм рт.ст., базовое давление
                  V0=150.0,                # мл, объем при P0
                  R_out=0.5,               # мм рт.ст.·с/мл, сопротивление оттока
-                 target_fraction=0.05,    # доля V_blood, которую стремится занять V_jv
-                 tau_target=200.0,        # с, время релаксации к V_target
                  C_O2_init=0.12,          # мл/мл, начальная O2 (венозная мозга)
                  C_CO2_init=0.56,         # мл/мл, начальная CO2
                  Hb=15.0):                # г/дл, для расчета сатурации
@@ -87,21 +83,6 @@ class JugularVein(OrganModel):
         self.R_out = _check_range(
             "R_out", R_out, self._R_OUT_MIN, self._R_OUT_MAX,
             "мм рт.ст.·с/мл, типично 0.5."
-        )
-
-        # --- Масс-баланс к целевой доле V_blood ---
-        tf = float(target_fraction)
-        if not np.isfinite(tf) or not (0.0 < tf < 1.0):
-            raise ValueError(
-                f"JugularVein: target_fraction={target_fraction} вне (0, 1). "
-                f"Типично 0.05 (5% V_blood)."
-            )
-        self.target_fraction = tf
-
-        self.tau_target = _check_range(
-            "tau_target", tau_target,
-            self._TAU_TARGET_MIN, self._TAU_TARGET_MAX,
-            "с, типично 200–300."
         )
 
         # --- Начальные концентрации газов ---
@@ -152,7 +133,6 @@ class JugularVein(OrganModel):
         C_in_O2   = float(inputs.get('C_in_O2', self.C_O2_init))
         C_in_CO2  = float(inputs.get('C_in_CO2', self.C_CO2_init))
         P_sv      = float(inputs.get('P_sv', 5.0))
-        V_blood   = inputs.get('V_blood', None)
 
         # --- Давление из объёма ---
         P_jv = self.P0 + (V_jv - self.V0) / self.C
@@ -162,11 +142,8 @@ class JugularVein(OrganModel):
         Q_out = (P_jv - P_sv) / self.R_out
         Q_out = max(Q_out, 0.0)
 
-        # --- Масс-баланс: медленная релаксация к целевой доле V_blood ---
+        # --- Масс-баланс ---
         dV = Q_in - Q_out
-        if self.target_fraction is not None and V_blood is not None:
-            V_target = self.target_fraction * float(V_blood)
-            dV += (V_target - V_jv) / self.tau_target
 
         # --- Мягкий пол: ниже 50% V0 гасим отток ---
         if V_jv < 0.5 * self.V0 and dV < 0:
@@ -194,7 +171,6 @@ class JugularVein(OrganModel):
         self._current_outputs = {
             'P_jv':       float(P_jv),
             'V_jv':       float(V_jv),
-            'V':          float(V_jv),   # алиас для Windkessel-совместимости
             'C_jv_O2':    float(C_jv_O2),
             'C_jv_CO2':   float(C_jv_CO2),
             'SjvO2':      float(SjvO2),
@@ -220,7 +196,7 @@ if __name__ == "__main__":
     for i in range(10):
         dy = jv.get_derivatives(0, y, {
             'Q_in': 5.0, 'C_in_O2': 0.10, 'C_in_CO2': 0.56,
-            'P_sv': 5.0, 'V_blood': 5800,
+            'P_sv': 5.0,
         })
         y = y + dy * 0.1
     print("After 1s", jv.get_outputs(y))

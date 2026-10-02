@@ -23,13 +23,6 @@ class Lungs2Chamber(OrganModel):
         P_dist     — давление в дистальном сегменте, мм рт. ст.
         R_remodel  — безразмерный множитель структурного ремоделирования,
                      стартует с 1.0, растёт до R_remodel_max.
-
-    Эффективное сопротивление:
-        R_eff = R_base × f_recruit(P_pa) × f_flow(Q_pulm) × R_remodel
-
-    В покое (P_pa ≈ 15, Q ≈ 83):      f_recruit ≈ 0.87, f_flow = 1.0
-    При нагрузке (P_pa ≈ 30, Q ≈ 350): f_recruit ≈ 0.65, f_flow ≈ 1.5
-    Произведение почти не меняется — лёгкие стабилизируют PVR.
     """
 
     # --- Санити-пороги для валидации конфигурации ---
@@ -66,6 +59,7 @@ class Lungs2Chamber(OrganModel):
                  P_pa_threshold=25.0,      # мм рт. ст., порог запуска
                  pressure_sensitivity=0.04,# прирост R_remodel на 1 мм рт. ст. превышения
                  R_remodel_max=5.0,
+                 k_rarefaction: float = 0.5, 
                  tau_remodel=200.0):       # с, время выхода на R_target
 
         # =================================================================
@@ -173,6 +167,11 @@ class Lungs2Chamber(OrganModel):
             "типично 3–10 (кратное превышение нормы PVR)."
         )
 
+        self.k_rarefaction = _check_range(
+            "k_rarefaction", k_rarefaction, 0.0, 2.0,
+            "безразмерный, типично 0.5 — дополнительный рост PVR от запустевания капилляров."
+        )
+
         self.tau_remodel = _check_range(
             "tau_remodel", tau_remodel,
             self._TAU_REMODEL_MIN, self._TAU_REMODEL_MAX,
@@ -217,33 +216,17 @@ class Lungs2Chamber(OrganModel):
     # ------------------------------------------------------------------
     # 1b. Гладкий односторонний поток (виртуальный клапан)
     # ------------------------------------------------------------------
-    def _valve_flow(self, dP: float, R: float) -> float:
+    def _valve_flow(self, dP: float, R: float, P_operating: float = 15.0) -> float:
         """
-        Гладкий односторонний клапан (сдвинутый smooth ReLU).
+        Гладкий односторонний клапан.
 
-            v(dP) = max( 0, (dP + sqrt(dP² + δ²) − δ) / (2R) )
-            где δ = 1/k_flow — ширина сглаживания.
+        v(dP) = max(0, (dP + hypot(dP, δ) − δ) / (2R))
+        δ = (1/k_flow) · (1 + 0.04·max(P_operating − 15, 0))  — ширина
+            сглаживания растёт с рабочим давлением, чтобы при высоких
+            P_pa (ремоделирование, Эйзенменгер) клапан не «дребезжал»
+            вблизи dP = 0.
 
-        Свойства:
-            dP = 0     →  v = 0              (клапан полностью закрыт, утечки нет)
-            dP >> δ    →  v ≈ dP/R − δ/(2R)  (ламинарный поток)
-            dP << −δ   →  v = 0              (обратного тока нет)
-
-        Гарантированно ≥ 0 при любом dP. Гладкая C¹ (излом производной
-        только в dP = 0). Монотонно не убывает.
-
-        Параметр δ вычитается, чтобы v(0) = 0. Без него v(0) = δ/(2R) > 0 —
-        постоянная «утечка» из P_dist в P_pv, которая при Q=0 и P_pv=0
-        уводит P_dist в глубокий минус. Именно этот дефект был в старой
-        версии и ловился в debug_lungs (TEST 9, TEST 11).
-
-        Численная защита:
-          • R клипуется к 1e-6 — от solver retries, не от ошибок конфига
-            (конфиг валидируется в __init__).
-          • R=NaN/Inf тоже отлавливается: max(NaN, 1e-6) в Python даёт NaN,
-            поэтому сначала проверяем np.isfinite.
-          • np.hypot(dP, δ) вместо sqrt(dP²+δ²) — не переполняется при
-            больших |dP|.
+        v(0) = 0  (δ вычитается, утечки через закрытый клапан нет)
         """
         # Мягкий клип R в runtime (без exception)
         if not np.isfinite(R):
@@ -251,63 +234,66 @@ class Lungs2Chamber(OrganModel):
         else:
             R_safe = max(float(R), 1e-6)
 
-        delta = 1.0 / self.k_flow          # k_flow ≥ 1 (валидировано в __init__)
+        delta = (1.0 / self.k_flow) * (1.0 + 0.04 * max(P_operating - 15.0, 0.0))
         q_raw = (float(dP) + np.hypot(float(dP), delta) - delta) / (2.0 * R_safe)
         return float(q_raw) if q_raw > 0.0 else 0.0
 
     # ------------------------------------------------------------------
     # 2. Пассивный recruitment + distension
     # ------------------------------------------------------------------
-    def _recruit_factor(self, P_pa: float) -> float:
+    def _recruit_factor(self, P_pa: float, R_remodel: float) -> float:
         """
-        Passive recruitment + distension лёгочных сосудов.
+        Множитель сопротивления от рекруитмента и рарефакции.
 
-        При росте P_pa раскрываются закрытые капилляры и расширяются
-        уже открытые — эффективное сопротивление падает.
-
-        Сигмоида:
-            f(P) = f_min + (1 − f_min) / (1 + (P/P50)^n)
-
-        Пределы:
-            P << P50  →  f → 1.0          (только базовые капилляры)
-            P >> P50  →  f → f_min         (полный рекруитмент)
-
-        Типичные значения для здорового взрослого:
-            P_pa = 10 → 0.95
-            P_pa = 15 → 0.87
-            P_pa = 20 → 0.78
-            P_pa = 30 → 0.65
-            P_pa = 40 → 0.60
-        """
+        R_remodel = 1     → f_healthy(P_pa) ∈ [f_recruit_min, 1]
+        R_remodel = R_max → f_rarefaction = 1 + k_rarefaction (PVR выше структурного)
+        Между             → линейная интерполяция по remodel_frac.
+        """        
         if not self.recruitment_enabled:
             return 1.0
-
-        # Клип давления в разумных пределах, чтобы exp/степень не взорвались
         P = float(np.clip(P_pa, 1.0, 200.0))
-
         ratio = (P / self.P_recruit_50) ** self.n_recruit
         f_sigmoid = 1.0 / (1.0 + ratio)
+        f_healthy = self.f_recruit_min + (1.0 - self.f_recruit_min) * f_sigmoid
 
-        return self.f_recruit_min + (1.0 - self.f_recruit_min) * f_sigmoid
+        remodel_frac = self._remodel_frac(R_remodel)
+
+        # При полном фиброзе капилляры не только теряют способность
+        # к дилатации, но и частично запустевают (rarefaction).
+        # f_target > 1 → PVR выше «структурного» предсказания R_base · R_remodel.
+        f_rarefaction = self._f_rarefaction(remodel_frac)
+
+        return float(f_healthy * (1.0 - remodel_frac) + f_rarefaction * remodel_frac)
 
     # ------------------------------------------------------------------
     # 3. Медленное структурное ремоделирование
     # ------------------------------------------------------------------
     def _R_remodel_target(self, P_pa: float) -> float:
-        """
-        Целевой множитель структурного ремоделирования.
-
-        При pressure_remodel=False — всегда 1.0.
-        При True — растёт линейно при P_pa > P_pa_threshold,
-        ограничен R_remodel_max.
-        """
         if not self.pressure_remodel:
             return 1.0
-        excess_p = max(float(P_pa) - self.P_pa_threshold, 0.0)
-        # Нелинейный рост: ускоряется при высоком P_pa
-        R_target = 1.0 + self.pressure_sensitivity * excess_p * (1.0 + 0.02 * excess_p)
-        return float(min(R_target, self.R_remodel_max))
+        excess = max(float(P_pa) - self.P_pa_threshold, 0.0)
+        if excess <= 0.0:
+            return 1.0
+        stimulus = self.pressure_sensitivity * excess * (1.0 + 0.03 * excess)
+        R_target = 1.0 + (self.R_remodel_max - 1.0) * (1.0 - np.exp(-stimulus))
+        return float(np.clip(R_target, 1.0, self.R_remodel_max))
 
+    def _mode_from_R_remodel(self, R_remodel: float) -> str:
+        if R_remodel < 1.5:
+            return 'healthy'
+        if R_remodel < 4.0:
+            return 'compensated'
+        return 'decompensated'
+
+    def _remodel_frac(self, R_remodel: float) -> float:
+        return float(np.clip(
+            (R_remodel - 1.0) / max(self.R_remodel_max - 1.0, 1e-6),
+            0.0, 1.0,
+        ))
+
+    def _f_rarefaction(self, remodel_frac: float) -> float:
+        return 1.0 + self.k_rarefaction * remodel_frac
+    
     # ------------------------------------------------------------------
     # Основной метод
     # ------------------------------------------------------------------
@@ -322,28 +308,15 @@ class Lungs2Chamber(OrganModel):
         Q_pulm = inputs.get('Q_pulmonary', 0.0)
         P_pv = max(float(inputs.get('P_pv', 5.0)), 0.0)
 
+        f_recruit = self._recruit_factor(P_prox, R_remodel)
+        # Структурная компонента — ремоделирование
+        R1_struct = self.R1_base * R_remodel
+        R2_struct = self.R2_base * R_remodel
         f_flow = self._flow_factor(Q_pulm)
-        f_recruit = self._recruit_factor(P_prox)
-
-        # Подавление острого recruitment по мере структурного ремоделирования:
-        #   R_remodel = 1.0      → remodel_frac = 0 → f_recruit_eff = f_recruit (полный ответ)
-        #   R_remodel = R_max    → remodel_frac = 1 → f_recruit_eff = 1.0 (ответ исчерпан)
-        remodel_frac = float(np.clip(
-            (R_remodel - 1.0) / max(self.R_remodel_max - 1.0, 1e-6),
-            0.0, 1.0,
-        ))
-        f_recruit_eff = f_recruit + (1.0 - f_recruit) * remodel_frac
-
-        R_target = self._R_remodel_target(P_prox)
-
-        # Асимметрия: рост за tau_remodel, спад — в 100 раз медленнее.
-        # На масштабе 600–1200 с обратный ход фактически заморожен.
-        # Ремоделирование монотонно (ratchet) на масштабе симуляции
-        dR_remodel = max(R_target - R_remodel, 0.0) / self.tau_remodel
-
-        f_flow_eff = 1.0 + (f_flow - 1.0) * (1.0 - remodel_frac)
-        R1_eff = self.R1_base * f_recruit_eff * f_flow_eff * R_remodel
-        R2_eff = self.R2_base * f_recruit_eff * f_flow_eff * R_remodel
+        remodel_frac = self._remodel_frac(R_remodel)
+        f_flow_eff = 1.0 + (f_flow - 1.0) * (1.0 - remodel_frac) ** 2
+        R1_eff = R1_struct * f_recruit * f_flow_eff
+        R2_eff = R2_struct * f_recruit * f_flow_eff
 
         # Мягкий клип R в runtime без exception.
         # R1_eff/R2_eff в норме лежат в [0.002, 0.32] — клип не срабатывает.
@@ -357,11 +330,14 @@ class Lungs2Chamber(OrganModel):
         else:
             R2_safe = max(float(R2_eff), 1e-6)
 
-        Q_int = (P_prox - P_dist) / R1_safe                          # внутри лёгких — без клапана
-        Q_out = self._valve_flow(P_dist - P_pv, R2_safe)             # односторонний к P_pv
+        Q_int = (P_prox - P_dist) / R1_safe
+        Q_out = self._valve_flow(P_dist - P_pv, R2_safe, P_operating=P_prox)
 
         dP_prox = (Q_pulm - Q_int) / self.C1
         dP_dist = (Q_int - Q_out) / self.C2
+
+        R_target = self._R_remodel_target(P_prox)
+        dR_remodel = max(R_target - R_remodel, 0.0) / self.tau_remodel
 
         # Диагностика
         self._current_outputs = {
@@ -369,17 +345,43 @@ class Lungs2Chamber(OrganModel):
             'P_pa_dist': float(P_dist),
             'R1_eff': float(R1_eff),
             'R2_eff': float(R2_eff),
-            'R_remodel': float(R_remodel),
             'flow_factor': float(f_flow),
             'recruit_factor': float(f_recruit),
             'Q_int': float(Q_int),
             'Q_out': float(Q_out),
-            'f_recruit_eff': float(f_recruit_eff),
             'R_target': float(R_target),
             'dR_remodel': float(dR_remodel),
-            'mode': 'remodeled' if R_remodel > 2.0 else 'healthy',
+            'mode': self._mode_from_R_remodel(R_remodel),
+            'R_pulm_total': float(R1_eff + R2_eff),
+            'f_rarefaction': self._f_rarefaction(remodel_frac),
+            'R_remodel': float(R_remodel),
         }
         return np.array([dP_prox, dP_dist, dR_remodel])
 
     def get_outputs(self, state):
-        return self._current_outputs.copy()
+        if self._current_outputs:
+            return self._current_outputs.copy()
+        # fallback: вычисляем из state без побочных эффектов на кэш
+        P_prox = max(float(state[0]), 0.0)
+        P_dist = max(float(state[1]), 0.0)
+        R_rem = float(np.clip(state[2], 1.0, self.R_remodel_max))
+        f_rec = self._recruit_factor(P_prox, R_rem)
+
+        R_target = self._R_remodel_target(P_prox)
+        dR = max(R_target - R_rem, 0.0) / self.tau_remodel
+        remodel_frac = self._remodel_frac(R_rem)
+        return {
+            'P_pa': P_prox,
+            'P_pa_dist': P_dist,
+            'R_remodel': R_rem,
+            'R1_eff': self.R1_base * R_rem * f_rec,
+            'R2_eff': self.R2_base * R_rem * f_rec,
+            'recruit_factor': f_rec,
+            'flow_factor': 1.0,
+            'R_pulm_total': (self.R1_base + self.R2_base) * R_rem * f_rec,
+            'R_target': float(R_target),
+            'dR_remodel': float(dR),
+            'mode': self._mode_from_R_remodel(R_rem),
+            'Q_int': 0.0, 'Q_out': 0.0,
+            'f_rarefaction': self._f_rarefaction(remodel_frac),
+        }

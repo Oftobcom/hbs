@@ -81,7 +81,7 @@ def banner():
     print(f"  → {RESULT_FILE}")
     print("="*70)
 
-def integrate(lungs, inputs, t_end=600, max_step=0.5, rtol=1e-7, atol=1e-9):
+def integrate(lungs, inputs, t_end=600, max_step=0.05, rtol=1e-7, atol=1e-9):
     y0=lungs.get_initial_state()
     def rhs(t,y): return lungs.get_derivatives(t,y,inputs)
     sol=solve_ivp(rhs,(0.0,t_end),y0,method="LSODA",rtol=rtol,atol=atol,max_step=max_step)
@@ -139,7 +139,7 @@ def test_valve_strict():
     # проверка всех точек траектории Q_out>=0
     y0=lung.get_initial_state()
     def rhs(t,y): return lung.get_derivatives(t,y,inputs_high_pv)
-    sol2=solve_ivp(rhs,(0,400),y0,method="LSODA",rtol=1e-7,atol=1e-9,max_step=0.5)
+    sol2=solve_ivp(rhs,(0,400),y0,method="LSODA",rtol=1e-7,atol=1e-9,max_step=0.05)
     q_outs=[]
     for i in range(sol2.y.shape[1]):
         lung.get_derivatives(sol2.t[i], sol2.y[:,i], inputs_high_pv)
@@ -286,7 +286,7 @@ def test_drift_strict():
 def test_strict_final():
     print("\n"+"="*70+"\nTEST 11 STRICT: Final — P_prox>=P_dist>=P_pv, R>0, finite, V_lungs\n"+"="*70)
     lung=make_lungs()
-    sol,out,_=integrate(lung, INPUTS_HEALTHY, t_end=600, max_step=0.2)
+    sol,out,_=integrate(lung, INPUTS_HEALTHY, t_end=600, max_step=0.05)
     P_prox=sol.y[0,:]; P_dist=sol.y[1,:]; R_rem=sol.y[2,:]
     V_lungs=LUNGS_CFG.get("C1",4.0)*P_prox + LUNGS_CFG.get("C2",8.0)*P_dist
     checks=[

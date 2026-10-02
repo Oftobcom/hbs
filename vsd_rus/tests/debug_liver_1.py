@@ -60,7 +60,7 @@ INPUTS_STD = {
 }
 
 
-def integrate(liver, inputs, t_end=200.0, max_step=0.5):
+def integrate(liver, inputs, t_end=200.0, max_step=0.05):
     y0 = liver.get_initial_state()
     def rhs(t, y): return liver.get_derivatives(t, y, inputs)
     return solve_ivp(rhs, (0.0, t_end), y0, method="LSODA",

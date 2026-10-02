@@ -32,8 +32,6 @@ class Baroreflex(OrganModel):
     # --- Санити-пороги для валидации конфигурации ---
     _P_SET_MIN, _P_SET_MAX = 40.0, 200.0
     _HR_BASE_MIN, _HR_BASE_MAX = 30.0, 200.0
-    _GAIN_MIN, _GAIN_MAX = 0.0, 0.1
-    _TAU_MIN, _TAU_MAX = 0.1, 60.0
     _K_INOTROPY_MIN, _K_INOTROPY_MAX = 0.0, 5.0
     _BARO_SYS_MIN, _BARO_SYS_MAX = 0.5, 2.0
 
@@ -60,9 +58,6 @@ class Baroreflex(OrganModel):
     def __init__(self,
                 P_set=80.0,
                 HR_base=70.0,
-                # --- legacy-алиасы (обратная совместимость) ---
-                gain=None,           # → k_hr
-                tau=None,            # → tau_hr
                 # --- хронотропная ветвь (быстрая) ---
                 k_hr=0.008,
                 tau_hr=2.0,
@@ -78,9 +73,6 @@ class Baroreflex(OrganModel):
         Параметры:
             P_set      – заданное давление (мм рт.ст.), при котором ЧСС = HR_base
             HR_base    – базовая ЧСС (уд/мин)
-            gain       – коэффициент усиления (относительное изменение ЧСС
-                        на 1 мм рт.ст.)
-            tau        – постоянная времени рефлекса (с)
             k_inotropy – коэффициент симпатической инотропии
                         (множитель baro_activation)
         """
@@ -107,25 +99,6 @@ class Baroreflex(OrganModel):
             "HR_base", HR_base, self._HR_BASE_MIN, self._HR_BASE_MAX,
             "уд/мин, типично 70."
         )
-
-        # --- Legacy-алиасы: gain → k_hr, tau → tau_hr ---
-        # Если переданы старые имена, они переопределяют новые дефолты.
-        # Это позволяет старым вызовам Baroreflex(gain=0.015, tau=2.0)
-        # продолжать работать без изменений.
-        if gain is not None:
-            gain_v = _check_range(
-                "gain (legacy → k_hr)", gain,
-                self._GAIN_MIN, self._GAIN_MAX,
-                "безразмерный, типично 0.002–0.015."
-            )
-            k_hr = gain_v
-        if tau is not None:
-            tau_v = _check_range(
-                "tau (legacy → tau_hr)", tau,
-                self._TAU_MIN, self._TAU_MAX,
-                "с, типично 2.0."
-            )
-            tau_hr = tau_v
 
         # --- Хронотропная ветвь ---
         self.k_hr = _check_range(
