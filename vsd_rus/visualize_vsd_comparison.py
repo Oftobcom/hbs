@@ -43,7 +43,7 @@ from utils import safe_savgol_filter as safe_savgol
 from utils import (subsample, steady_mean,
                    steady_mean_std, qp_qs_steady,
                    clinical_qp_qs_series)
-from physio_config import load_all_patients
+from physio_config import load_all_patients, load_physiology
 
 warnings.filterwarnings("ignore")
 
@@ -138,7 +138,8 @@ def _setup_style() -> None:
     })
 
 _setup_style()
-_PATIENTS = load_all_patients()
+_PHYSIOLOGY = load_physiology()
+_PATIENTS = load_all_patients(base_physiology=_PHYSIOLOGY)
 COLORS: Dict[str, str] = {p['label']: p['color'] for p in _PATIENTS.values()}
 SCENARIO_ORDER = [p['label'] for p in
                   sorted(_PATIENTS.values(), key=lambda c: int(c['order']))]
