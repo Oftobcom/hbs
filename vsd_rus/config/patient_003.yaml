@@ -3,7 +3,7 @@ label: "Большой ДМЖП (R=1.0)"
 description: "Большой дефект (d≈6 мм), выраженный L→R шунт"
 order: 3
 color: "#e74c3c"
-
+aliases: [vsd_r1]
 vsd_resistance: 1.0
 flow_dependent_lungs: true
 pressure_remodel: false

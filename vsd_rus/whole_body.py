@@ -154,6 +154,18 @@ class WholeBodyModel:
     _R_SYS_PERIPH_MIN, _R_SYS_PERIPH_MAX = 0.1, 100.0
     _BLOOD_V0_MIN, _BLOOD_V0_MAX = 1000.0, 15000.0
 
+    # --- Пол объёма крови для расчёта концентраций ---
+    # Ниже этого порога модель выходит за пределы физиологической
+    # применимости (массивная кровопотеря, ошибка интегрирования).
+    # Пол задаётся как доля от BloodPool.V0 — номинального объёма крови.
+    _VB_FLOOR_FRAC  = 0.5      # доля V0_blood
+    _VB_SOFT_WIDTH  = 0.1      # ширина перехода soft-plus, доля V0_blood
+    _VB_SOFT_CLIP   = 30.0     # ограничение аргумента exp для защиты от overflow
+
+    _VALID_METHODS = frozenset({
+        'RK45', 'RK23', 'DOP853', 'Radau', 'BDF', 'LSODA',
+    })
+
     def __init__(self,
         heart_params=None,
         lungs_params=None,
@@ -182,6 +194,7 @@ class WholeBodyModel:
         VO2_rest: float = 1.9,
         RQ: float = 0.8,
         occlusion_factor: float = 1.0,
+        method,
         substance_names=None):
 
         # =================================================================
@@ -277,6 +290,15 @@ class WholeBodyModel:
             self._OCCLUSION_MIN, self._OCCLUSION_MAX,
             "0 — полная окклюзия, 1 — норма."
         )
+
+        if not isinstance(method, str) or method not in self._VALID_METHODS:
+            raise ValueError(
+                f"WholeBodyModel: method={method!r} не входит в "
+                f"{sorted(self._VALID_METHODS)}. "
+                f"Задаётся в physiology.yaml: simulation.method. "
+                f"Через sim_builder пробрасывается автоматически."
+            )
+        self.method = method
 
         # --- Яремная вена: доп. параметры (не в jugular_params) ---
         P_jv0 = _check_range(
@@ -519,6 +541,7 @@ class WholeBodyModel:
         self._flow_cache_misses = 0
 
         self._negative_vol_warned = False
+        self._low_vol_warned = False
 
     # ------------------------------------------------------------------
     # Калибровка начального состояния
@@ -557,7 +580,10 @@ class WholeBodyModel:
         y0 = self.get_initial_state()
         heart_slc = self.idx['heart']
         V0_arr = np.array([self.heart.V0[c] for c in ('LA', 'LV', 'RA', 'RV')])
-        y0[heart_slc] = np.maximum(y0[heart_slc], 1.5 * V0_arr)
+        # heart-срез теперь длины 5: [V_la, V_lv, V_ra, V_rv, phi].
+        # Маскируем только первые 4 объёмных слота; phi (phi0) не трогаем.
+        vol_slc = slice(heart_slc.start, heart_slc.start + 4)
+        y0[vol_slc] = np.maximum(y0[vol_slc], 1.5 * V0_arr)
 
         # Санитизация t_eval
         if t_eval is not None:
@@ -569,7 +595,7 @@ class WholeBodyModel:
         try:
             sol = solve_ivp(
                 self.derivatives, (0.0, t_calib), y0,
-                t_eval=t_eval, method='LSODA',
+                t_eval=t_eval, method=self.method,
                 rtol=rtol, atol=atol, max_step=0.05,
             )
         except Exception as e:
@@ -607,6 +633,9 @@ class WholeBodyModel:
                     )
                     return y0
 
+        phi_idx = self.idx['heart'].start + 4
+        y_steady[phi_idx] = y_steady[phi_idx] % 1.0
+
         return y_steady
 
     # ------------------------------------------------------------------
@@ -620,6 +649,23 @@ class WholeBodyModel:
         if calibrated:
             return self.calibrate_initial_state()
         return y0
+
+    def _effective_blood_volume(self, Vb: float) -> float:
+        """
+        Гладкий физиологический пол для объёма крови.
+
+        При Vb >> V_floor возвращает Vb с экспоненциально малой поправкой.
+        При Vb → 0 возвращает V_floor — конечное, физиологически осмысленное
+        значение. Формула C∞-гладкая.
+
+            soft_floor(V) = V_floor + w · log(1 + exp((V − V_floor)/w))
+        """
+        V0 = self.blood.V0
+        V_floor = self._VB_FLOOR_FRAC * V0
+        w       = self._VB_SOFT_WIDTH * V0
+        x = (Vb - V_floor) / w
+        x = float(np.clip(x, -self._VB_SOFT_CLIP, self._VB_SOFT_CLIP))
+        return V_floor + w * float(np.log1p(np.exp(x)))
 
     def _compute_organ_flows(self, t, y):
         # --- Кэш ---
@@ -656,11 +702,14 @@ class WholeBodyModel:
         # --- Полный циркулирующий объём: сумма всех физических V ---
         # Все давления уже доступны из y (P-mode и pressure-states),
         # V_sv и V_jv — direct states. Ничего не зависит от order.
-        _V_heart_raw = y[sl['heart']]
-        if np.any(_V_heart_raw < -1e-6) and not self._negative_vol_warned:
-            warnings.warn(f"Negative heart volume: {_V_heart_raw}", RuntimeWarning)
+        # heart-состояние теперь 5: [V_la, V_lv, V_ra, V_rv, phi].
+        # φ — безразмерная фаза (накопленные циклы), НЕ объём.
+        _V_heart_full = y[sl['heart']]
+        _V_heart_vol  = _V_heart_full[:4]      # только физические объёмы
+        if np.any(_V_heart_vol < -1e-6) and not self._negative_vol_warned:
+            warnings.warn(f"Negative heart volume: {_V_heart_vol}", RuntimeWarning)
             self._negative_vol_warned = True
-        V_heart_phys = float(np.maximum(_V_heart_raw, 0.0).sum())
+        V_heart_phys = float(np.maximum(_V_heart_vol, 0.0).sum())
 
         _lungs_state = y[sl['lungs']]
         V_lungs_phys = (self.lungs.C1 * max(float(_lungs_state[0]), 0.0)
@@ -821,6 +870,8 @@ class WholeBodyModel:
         C_jv_CO2  = jugular_out['C_jv_CO2']
         VO2_brain  = brain_out['VO2_brain']
         VO2_periph = periph_out['O2_consumption_periph']
+        # VO2_other сохраняется ТОЛЬКО для диагностики VO2_total.
+        # В сам баланс O2 крови он больше не входит (см. ниже).
         VO2_other  = VO2_periph + self.VO2_rest
         VO2_total  = VO2_brain + VO2_other
         VCO2_brain  = brain_out['CO2_production']
@@ -830,12 +881,41 @@ class WholeBodyModel:
         )
         VCO2_total  = VCO2_brain + VCO2_periph + self.VO2_rest * self.RQ
 
-        Vb_safe = max(Vb, 1e-6)
+        # Гладкий физиологический пол вместо max(Vb, 1e-6).
+        # См. _effective_blood_volume — soft-plus с шириной 0.1·V0.
+        Vb_safe = self._effective_blood_volume(Vb)
+
+        # Однократное предупреждение при выходе за пределы применимости
+        if Vb < self._VB_FLOOR_FRAC * self.blood.V0 and not self._low_vol_warned:
+            warnings.warn(
+                f"V_blood={Vb:.1f} mL ниже физиологического пола "
+                f"{self._VB_FLOOR_FRAC * self.blood.V0:.0f} mL — модель вне "
+                f"области применимости. Концентрации считаются по Vb_safe="
+                f"{Vb_safe:.0f} mL.",
+                RuntimeWarning,
+            )
+            self._low_vol_warned = True
+
+        # --- Баланс O2 крови: двухкомпартментное сопряжение ---
+        # Разделяем Q_other на периферию (имеет собственный C_O2_loc)
+        # и остальные органы (печень, почки, ЖКТ, «покой» — без
+        # тканевого O2-состояния, для них well-mixed приближение).
+        #
+        # Для периферии потребление O2 уже выражено через разницу
+        # (C_v_O2_periph − C_bulk_O2) в её тканевом ОДУ. Отдельный
+        # член «− VO2_periph» был бы двойным счётом и разрывал бы
+        # масс-баланс в переходных процессах (см. O2_1.md §1.2).
+        Q_periph_flow   = float(periph_out['Q_peripheral'])
+        Q_other_non_per = max(Q_other - Q_periph_flow, 0.0)
+        # Fallback на C_bulk_O2 — обратная совместимость со старыми
+        # сборками peripheral_tissues без ключа 'C_v_O2_periph'.
+        C_v_O2_periph   = float(periph_out.get('C_v_O2_periph', C_bulk_O2))
 
         dC_O2_blood = (
-            Q_other * (C_a_O2 - C_bulk_O2)
-            - VO2_other
-            + Q_br * (C_jv_O2 - C_bulk_O2)
+            Q_other_non_per * (C_a_O2 - C_bulk_O2)
+            + Q_periph_flow * (C_v_O2_periph - C_bulk_O2)
+            + Q_br          * (C_jv_O2 - C_bulk_O2)
+            - self.VO2_rest
         ) / Vb_safe
 
         dC_CO2_blood = (
@@ -1052,6 +1132,7 @@ class WholeBodyModel:
             'SjvO2': f['jugular_out']['SjvO2'],
             'P_jv_O2': f['jugular_out']['P_jv_O2'],
             'C_v_O2_brain': f['brain_out'].get('C_v_O2_brain', f['brain_out'].get('C_v_O2')),
+            'C_v_O2_periph': f['periph_out'].get('C_v_O2_periph'),
             'C_v_CO2_brain': f['brain_out'].get('C_v_CO2_brain'),
             'C_v_lactate_brain': f['brain_out'].get('C_v_lactate_brain'),
             'C_v_ammonia_brain': f['brain_out'].get('C_v_ammonia_brain'),
@@ -1077,6 +1158,10 @@ class WholeBodyModel:
             'E_max_ra': heart_out.get('E_max_ra'),
             'HR_current': heart_out.get('HR_current'),
             'T_current': heart_out.get('T_current'),
+            # текущая фаза ∈ [0, 1)
+            'phi_heart':     heart_out.get('phi'),
+            # накопленное число циклов
+            'phi_raw_heart': heart_out.get('phi_raw'),
             'baro_scale_periph': f['periph_out'].get('baro_scale_applied', 1.0),
             'R_target_periph':   f['periph_out'].get('R_target', None),
         }
@@ -1105,7 +1190,7 @@ class WholeBodyModel:
             sol_cycle = solve_ivp(
                 self.derivatives, (t_end, t_end + T), y_end,
                 t_eval=t_eval,
-                method='LSODA',
+                method=self.method,
                 rtol=1e-4, atol=1e-5,
                 max_step= 0.05 # T / max(n_pts, 40),   # достаточно точек на клапанные пики
             )
@@ -1158,7 +1243,7 @@ class WholeBodyModel:
     # ------------------------------------------------------------------
     # simulate / set_occlusion
     # ------------------------------------------------------------------
-    def simulate(self, t_span, t_eval=None, y0=None, method='LSODA', **kwargs):
+    def simulate(self, t_span, t_eval=None, y0=None, method=None, **kwargs):
         if y0 is None:
             y0 = self.calibrate_initial_state()
         kwargs.setdefault('max_step', 0.05)

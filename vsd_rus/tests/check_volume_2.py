@@ -19,7 +19,7 @@ def check_volume_invariant(seed=0, n_samples=20, tol=1e-8):
         y = np.maximum(y, 1e-3)
         d = model.derivatives(0.0, y)
         dV = (
-            d[s['heart']].sum()
+            d[s['heart']][:4].sum()
             + model.lungs.C1 * d[s['lungs']][0]
             + model.lungs.C2 * d[s['lungs']][1]
             + d[s['sys_ven']][0] + d[s['jugular_vein']][0]

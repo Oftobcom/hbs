@@ -31,9 +31,9 @@ from utils import (subsample, steady_mask,
                    clean_nans, steady_mean, clinical_qp_qs_series,
                    format_mean_std, qp_qs_steady, auto_ylim,
                    STEADY_FRAC_DEFAULT)
-from physio_config import load_all_patients
+from physio_config import load_all_patients, load_physiology
 warnings.filterwarnings('ignore')
-
+from sim_builder import build_model_from_params, extract_simulation_config
 
 # =====================================================================
 # Tee-логгер: дублирование вывода в консоль и в файл
@@ -135,104 +135,58 @@ def _resolve_log_path(explicit, flat: bool, no_log: bool):
 # Глобальные константы и пациенты
 # =====================================================================
 
-_PATIENTS = load_all_patients()
+_PHYSIOLOGY = load_physiology()
+_PATIENTS = load_all_patients(base_physiology=_PHYSIOLOGY)
 COLORS = {p['label']: p['color'] for p in _PATIENTS.values()}
 SCENARIO_ORDER = [p['label'] for p in sorted(_PATIENTS.values(),
                                               key=lambda c: int(c['order']))]
 
-# --- Константы v4 ---
-T_END   = 800.0
-T_CALIB = 800.0
-T_CALIB_HEALTHY = 400.0
-N_EVAL  = 3000
-MAX_STEP = 0.05
-
-PERIPH_VO2_BASE = 1.5
-
 N_PLOT_POINTS = 4000
 N_PLOT_POINTS_DETAIL = 1200
-STEADY_FRAC = 0.6
-
-_BARO_KEYS = ('k_hr', 'k_inotropy', 'k_vasomotor',
-              'tau_hr', 'tau_inotropy', 'tau_vaso')
 
 
 # =====================================================================
 # Симуляция одного сценария
 # =====================================================================
 
-def simulate_scenario(vsd_resistance,
-                      flow_dependent_lungs,
-                      label,
-                      pressure_remodel=False,
-                      pressure_sensitivity=0.06,
-                      R_remodel_max=5.0,
-                      tau_remodel=200.0,
-                      HR_base=None,
-                      E_max_rv_override=None,
-                      E_max_lv_override=None,
-                      EDV_rv_override=None,
-                      P_pa_threshold_override=None,
-                      flow_sensitivity=0.15,
-                      baroreflex_overrides=None,
-                      t_span=(0.0, T_END),
-                      t_calib=T_CALIB):
+def simulate_scenario(label: str, params: dict,
+                      t_span=None, t_calib=None):
+    """
+    Одна симуляция сценария.
 
-    initial_conc = {
-        'tox': 0.0, 'bilirubin': 0.5, 'ammonia': 0.3,
-        'albumin': 4.5, 'glucose': 5.0, 'oxygen': 0.15,
-        'co2': 0.52, 'lactate': 0.10,
-    }
-    blood_params = {'initial_concentrations': initial_conc, 'V0': 5800.0}
+    Параметры
+    ---------
+    label   : человекочитаемое имя сценария ('Здоровый', 'Малый ДМЖП (R=5.0)', ...)
+    params  : merged-словарь из load_all_patients(base_physiology=_PHYSIOLOGY).
+              Содержит секции physiology.yaml (heart, lungs, baroreflex,
+              blood, peripheral, liver, kidney, brain, gitract,
+              gas_exchange, systemic, jugular_vein, simulation) плюс
+              top-level overrides из patient_*.yaml (vsd_resistance,
+              flow_dependent_lungs, pressure_remodel, HR_base,
+              E_max_rv, E_max_lv, EDV_rv, k_hr, k_inotropy, ...).
+    t_span  : (t0, t1), переопределяет params['simulation']['t_span'].
+    t_calib : длительность калибровки, переопределяет
+              params['simulation']['t_calib'].
 
-    if HR_base is None:
-        HR_base = 72 if vsd_resistance != np.inf else 70
-    heart_params = {
-        'hr': HR_base,
-        'R_vsd': vsd_resistance,
-        'R_venous_sys':  0.04,
-        'R_venous_pulm': 0.03,
-    }
-    if E_max_rv_override is not None:
-        heart_params['E_max_rv'] = E_max_rv_override
-    if E_max_lv_override is not None:
-        heart_params['E_max_lv'] = E_max_lv_override
-    if EDV_rv_override is not None:
-        heart_params['EDV_rv'] = EDV_rv_override
+    Возвращает
+    ----------
+    dict с массивами выходов + 't' + 'Qp_Qs_steady'.
+    """
+    model = build_model_from_params(params)
 
-    baroreflex_params = {'P_set': 80.0, 'HR_base': HR_base}
-    if baroreflex_overrides:
-        for key in _BARO_KEYS:
-            if key in baroreflex_overrides:
-                baroreflex_params[key] = baroreflex_overrides[key]
-
-    model = WholeBodyModel(
-        baroreflex_params=baroreflex_params,
-        blood_params=blood_params,
-        flow_dependent_lungs=flow_dependent_lungs,
-        lungs_params={
-            'flow_sensitivity': flow_sensitivity,
-            'pressure_remodel': pressure_remodel,
-            'P_pa_threshold': (P_pa_threshold_override
-                               if P_pa_threshold_override is not None
-                               else 25.0),
-            'pressure_sensitivity': pressure_sensitivity,
-            'R_remodel_max': R_remodel_max,
-            'tau_remodel': tau_remodel,
-        },
-        heart_params=heart_params,
-        peripheral_params={'VO2_base': PERIPH_VO2_BASE},
-        R_sys_peripheral=None,
-        target_MAP=85.0, target_CO=83.0,
-    )
-
-    # Адаптивный t_calib
-    t_calib_eff = t_calib
-    if not pressure_remodel and t_calib >= 600:
-        t_calib_eff = T_CALIB_HEALTHY
-
-    print(f"  [PID {os.getpid()}] [{label}] Калибровка t_calib={t_calib_eff:.0f}с...",
-          flush=True)
+    # --- Адаптивный t_calib: быстрый для healthy без ремоделирования ---
+    sc = extract_simulation_config(params)
+    t_span      = tuple(t_span) if t_span is not None else sc['t_span']
+    t_calib_eff = float(t_calib) if t_calib is not None else sc['t_calib']
+    n_eval      = sc['n_samples_t']
+    max_step    = sc['max_step']
+    rtol        = sc['rtol']
+    atol        = sc['atol']
+    method      = sc['method']
+    steady_frac = sc['steady_frac']
+    
+    print(f"  [PID {os.getpid()}] [{label}] "
+          f"Калибровка t_calib={t_calib_eff:.0f}с...", flush=True)
     with warnings.catch_warnings(record=True) as calib_warns:
         warnings.simplefilter("always", category=UserWarning)
         y0 = model.calibrate_initial_state(t_calib=t_calib_eff)
@@ -244,9 +198,10 @@ def simulate_scenario(vsd_resistance,
             )
     for w in calib_warns:
         if "calibrate:" in str(w.message):
-            print(f"  [PID {os.getpid()}] [{label}] ⚠ CALIBRATION: {w.message}",
-                  flush=True)
+            print(f"  [PID {os.getpid()}] [{label}] "
+                  f"⚠ CALIBRATION: {w.message}", flush=True)
 
+    # --- Диагностика начального состояния ---
     cycle = model.cycle_averaged_flows(0.0, y0, n_pts=24)
     out0  = model.compute_outputs(0.0, y0)
     print(f"  [PID {os.getpid()}] [{label}] CHECK "
@@ -260,43 +215,48 @@ def simulate_scenario(vsd_resistance,
           f"SaO2={cycle['SaO2_cycle_mean']*100:.1f}% "
           f"baro_vaso={out0['baro_vasomotor']:.2f} "
           f"baro_ino={out0['baro_inotropy']:.2f} "
-          f"suppress={out0['suppress']:.2f}")
+          f"suppress={out0['suppress']:.2f}", flush=True)
 
-    n_pts = N_EVAL
-    t_eval = np.linspace(t_span[0], t_span[1], n_pts)
-    max_step_eff = MAX_STEP # max(MAX_STEP, 60.0 / HR_base / 4.0)
-    print(f"  [PID {os.getpid()}] [{label}] Симуляция 0..{t_span[1]:.0f}с "
-          f"LSODA max_step={max_step_eff:.3f} {n_pts} точек...", flush=True)
+    # --- Симуляция ---
+    t_eval = np.linspace(t_span[0], t_span[1], n_eval)
+    print(f"  [PID {os.getpid()}] [{label}] "
+          f"Симуляция {t_span[0]:.0f}..{t_span[1]:.0f}с "
+          f"{method} max_step={max_step:.3f} {n_eval} точек...", flush=True)
     try:
         sol = model.simulate(
-            t_span, t_eval, y0=y0,
-            method='LSODA',
-            rtol=1e-4, atol=1e-5,
-            max_step=max_step_eff,
+            t_span, t_eval,
+            rtol=rtol, atol=atol, max_step=max_step,
         )
     except Exception as e:
-        print(f"  [PID {os.getpid()}] [{label}] ⚠ LSODA FAILED: {e}",
+        print(f"  [PID {os.getpid()}] [{label}] ⚠ Integration Method FAILED: {e}",
               flush=True)
         return None
     print(f"  [PID {os.getpid()}] [{label}] готово {sol.t.size} точек, "
-          f"{sol.nfev} RHS, cache_hits={getattr(model, '_flow_cache_hits', 0)}",
-          flush=True)
+          f"{sol.nfev} RHS, "
+          f"cache_hits={getattr(model, '_flow_cache_hits', 0)}", flush=True)
 
-    # --- ОПТИМИЗАЦИЯ: только установившееся окно ---
+    # --- Установившееся окно (границы — из sim_cfg['steady_frac']) ---
     if sol.t.size > 0:
-        mask_steady = sol.t > STEADY_FRAC * sol.t[-1]
+        mask_steady = sol.t > steady_frac * sol.t[-1]
         if np.sum(mask_steady) < 100:
             mask_steady = np.ones_like(sol.t, dtype=bool)
-            mask_steady[: int((1 - STEADY_FRAC) * len(mask_steady))] = False
+            mask_steady[: int((1.0 - steady_frac) * len(mask_steady))] = False
     else:
         mask_steady = np.array([], dtype=bool)
+
     idx_steady = np.where(mask_steady)[0]
-    outputs = [model.compute_outputs(sol.t[i], sol.y[:, i]) for i in idx_steady]
-    if len(outputs) == 0:
-        raise RuntimeError("Нет точек в установившемся окне")
+    if idx_steady.size == 0:
+        raise RuntimeError(
+            f"[{label}] Нет точек в установившемся окне "
+            f"(steady_frac={steady_frac}, "
+            f"t_end={sol.t[-1] if sol.t.size else 'N/A'})"
+        )
+
+    outputs = [model.compute_outputs(sol.t[i], sol.y[:, i])
+               for i in idx_steady]
     keys = list(outputs[0].keys())
-    data = {k: np.fromiter((o[k] for o in outputs), dtype=float,
-                           count=len(outputs))
+    data = {k: np.fromiter((o[k] for o in outputs),
+                           dtype=float, count=len(outputs))
             for k in keys}
     data['t'] = sol.t[idx_steady]
     data = clean_nans(data)
@@ -718,23 +678,7 @@ def print_detailed_report(results_dict):
 
 def simulate_one_scenario(name, params):
     t0 = time.perf_counter()
-    baroreflex_overrides = {k: params[k] for k in _BARO_KEYS if k in params}
-    data = simulate_scenario(
-        vsd_resistance=params['vsd_resistance'],
-        flow_dependent_lungs=params['flow_dependent_lungs'],
-        label=name,
-        pressure_remodel=params['pressure_remodel'],
-        pressure_sensitivity=params.get('pressure_sensitivity', 0.06),
-        R_remodel_max=params.get('R_remodel_max', 5.0),
-        tau_remodel=params.get('tau_remodel', 200.0),
-        HR_base=params.get('HR_base', None),
-        E_max_rv_override=params.get('E_max_rv', None),
-        E_max_lv_override=params.get('E_max_lv', None),
-        EDV_rv_override=params.get('EDV_rv', None),
-        P_pa_threshold_override=params.get('P_pa_threshold', None),
-        flow_sensitivity=params.get('flow_sensitivity', 0.15),
-        baroreflex_overrides=baroreflex_overrides,
-    )
+    data = simulate_scenario(label=name, params=params)
     dt = time.perf_counter() - t0
     filename = f"vsd_results_{params['id']}.npz"
     np.savez(filename, **data,
@@ -755,8 +699,11 @@ def _main_impl(parallel: bool, n_jobs: int, log_path: str | None) -> None:
     print("=" * 80)
     print(f"Запуск: {dt_start:%Y-%m-%d %H:%M:%S}")
     print("СРАВНЕНИЕ ГЕМОДИНАМИКИ: ЗДОРОВЫЙ vs ДМЖП — v4 PARALLEL")
-    print(f"N_EVAL={N_EVAL}, MAX_STEP={MAX_STEP}, "
-          f"STEADY_FRAC={STEADY_FRAC}, t_calib healthy={T_CALIB_HEALTHY}")
+    print("Per-scenario simulation config (from YAML):")
+    for label, p in _PATIENTS.items():
+        sc = extract_simulation_config(p)
+        print(f"  {label:40s} t_span={sc['t_span']}  "
+            f"n={sc['n_samples_t']:6d}  t_calib={sc['t_calib']:.0f}s")
     print("=" * 80)
     scenarios = _PATIENTS
     print(f"Загружено пациентов: {list(scenarios.keys())}")

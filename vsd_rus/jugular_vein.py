@@ -123,7 +123,7 @@ class JugularVein(OrganModel):
     def get_derivatives(self, t, state, inputs):
         V_jv_raw, C_jv_O2_raw, C_jv_CO2_raw = state
 
-        # --- Мягкие клипы состояния (защита от LSODA retries) ---
+        # --- Мягкие клипы состояния ---
         V_jv      = max(float(V_jv_raw), 0.0)
         C_jv_O2   = max(float(C_jv_O2_raw), 0.0)
         C_jv_CO2  = max(float(C_jv_CO2_raw), 0.0)

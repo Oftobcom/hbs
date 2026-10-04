@@ -8,7 +8,7 @@ class Heart4Chambers(OrganModel):
     Четырёхкамерная модель сердца с клапанами.
     Поддерживает дефект межжелудочковой перегородки (VSD) через параметр R_vsd.
 
-    Состояние: [V_la, V_lv, V_ra, V_rv] — объёмы камер, мл.
+    Состояние: [V_la, V_lv, V_ra, V_rv, phi]
 
     4 клапана односторонние (smooth ReLU, v(0)=0):
         mitral, aortic, tricuspid, pulmonary.
@@ -230,20 +230,25 @@ class Heart4Chambers(OrganModel):
         self._current_E_max = self.E_max_base.copy()
         self._current_flows = {}
 
+        # Начальная фаза кардиоцикла ∈ [0, 1). phi0 = 0 — начало систолы
+        # желудочков: E(0) = E_min, объёмы камер = EDV, что согласовано
+        # с get_initial_state().
+        self.phi0 = 0.0
+
     # ------------------------------------------------------------------
     # Обязательный интерфейс OrganModel
     # ------------------------------------------------------------------
     def get_state_size(self):
-        return 4   # [V_la, V_lv, V_ra, V_rv]
+        return 5   # [V_la, V_lv, V_ra, V_rv, phi]
 
     def get_initial_state(self) -> np.ndarray:
         """
         Начальное состояние — физиологические конечно-диастолические
-        объёмы (мл). Соответствующие давления в диастолу:
-            P_la ≈ 2.4, P_lv ≈ 6.6, P_ra ≈ 1.4, P_rv ≈ 3.3 мм рт. ст.
+        объёмы (мл) + начальная фаза кардиоцикла.
         """
         return np.array([
             self.EDV['LA'], self.EDV['LV'], self.EDV['RA'], self.EDV['RV'],
+            self.phi0,
         ])
 
 
@@ -339,8 +344,11 @@ class Heart4Chambers(OrganModel):
     # ------------------------------------------------------------------
     # Эластанс-профиль цикла
     # ------------------------------------------------------------------
-    def _elastance(self, t, chamber):
-        tau = (t % self._current_T) / self._current_T
+    def _elastance(self, phi, chamber):
+        # phi — накопленное число циклов (state[4]), может быть > 1.
+        # Свёртка в [0, 1) периодическая; профиль e(τ) в точках τ=0 и
+        # τ=1 стыкуется с e=0, de/dτ=0 (C¹ на стыке циклов).
+        tau = float(phi) % 1.0
         Emax = self._current_E_max[chamber]
         Emin = self.E_min[chamber]
 
@@ -378,9 +386,9 @@ class Heart4Chambers(OrganModel):
     # ------------------------------------------------------------------
     # Давление в камере (линейная + пассивная экспонента)
     # ------------------------------------------------------------------
-    def _pressure(self, chamber, V, t):
+    def _pressure(self, chamber, V, phi):
         dV = max(V - self.V0[chamber], 0.0)
-        E = self._elastance(t, chamber)
+        E = self._elastance(phi, chamber)
 
         if chamber in ('LA', 'RA'):
             A = 0.4 if chamber == 'LA' else 0.3
@@ -460,18 +468,20 @@ class Heart4Chambers(OrganModel):
     # Основной метод — производные
     # ------------------------------------------------------------------
     def get_derivatives(self, t, state, inputs):
-        V_la, V_lv, V_ra, V_rv = state
+        V_la, V_lv, V_ra, V_rv, phi = state
         self._update_parameters(inputs)
+
+        dphi = 1.0 / self._current_T
 
         P_sa = inputs['P_sa']
         P_sv = inputs['P_sv']
         P_pa = inputs['P_pa']
         P_pv = inputs['P_pv']
 
-        P_la = self._pressure('LA', V_la, t)
-        P_lv = self._pressure('LV', V_lv, t)
-        P_ra = self._pressure('RA', V_ra, t)
-        P_rv = self._pressure('RV', V_rv, t)
+        P_la = self._pressure('LA', V_la, phi)
+        P_lv = self._pressure('LV', V_lv, phi)
+        P_ra = self._pressure('RA', V_ra, phi)
+        P_rv = self._pressure('RV', V_rv, phi)
 
         # Гладкие односторонние потоки через 4 клапана (C¹)
         Q_mitral    = self._valve_flow(P_la - P_lv, self.R_valve['mitral'])
@@ -539,6 +549,11 @@ class Heart4Chambers(OrganModel):
             # --- HR и период текущего шага ---
             'HR_current': float(self._current_hr),
             'T_current':  float(self._current_T),
+            # --- Фаза кардиоцикла ---
+            # накопленное число циклов, монотонно
+            'phi_raw': float(phi),
+            # текущая фаза в [0, 1)
+            'phi':     float(phi % 1.0),
             # --- rv_afterload (пробрасывается из whole_body) ---
             'rv_afterload': float(self._rv_afterload),
         }
@@ -548,7 +563,7 @@ class Heart4Chambers(OrganModel):
         dV_ra = Q_sv_to_ra - Q_tricuspid
         dV_rv = Q_tricuspid - Q_pulmonary + Q_vsd
 
-        return np.array([dV_la, dV_lv, dV_ra, dV_rv])
+        return np.array([dV_la, dV_lv, dV_ra, dV_rv, dphi])
 
     def get_outputs(self, state):
         return self._current_flows.copy()

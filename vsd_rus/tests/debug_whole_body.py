@@ -52,6 +52,41 @@ if str(ROOT) not in sys.path:
 
 from whole_body import WholeBodyModel
 
+# =====================================================================
+# Сценарии
+# =====================================================================
+
+from physio_config import load_all_patients, load_physiology
+from sim_builder import build_model_from_params, extract_simulation_config
+
+_PHYS = load_physiology()
+_ALL_PATIENTS = load_all_patients(base_physiology=_PHYS)
+
+SCENARIOS = {}
+for label, p in _ALL_PATIENTS.items():
+    for alias in p.get('aliases', []):
+        SCENARIOS[alias] = p
+
+if not SCENARIOS:
+    raise RuntimeError(
+        "debug_whole_body: ни у одного patient_*.yaml нет поля `aliases`. "
+        "Добавьте aliases в config/patient_*.yaml, например:\n"
+        "  aliases: [healthy]\n"
+        "  aliases: [vsd_r5]\n"
+        "  aliases: [vsd_r1]\n"
+        "  aliases: [eisenmenger_comp]\n"
+        "  aliases: [eisenmenger_decomp]"
+    )
+
+# --- Проверка, что все ожидаемые варианты доступны ---
+_EXPECTED_VARIANTS = ('healthy', 'vsd_r5', 'vsd_r1', 'eisenmenger_comp', 'eisenmenger_decomp')
+_missing_variants = [v for v in _EXPECTED_VARIANTS if v not in SCENARIOS]
+if _missing_variants:
+    raise RuntimeError(
+        f"debug_whole_body: отсутствуют варианты {_missing_variants}. "
+        f"Проверьте aliases в config/patient_*.yaml. "
+        f"Доступные сейчас: {sorted(SCENARIOS.keys())}"
+    )        
 
 # =====================================================================
 # Tee-логгер: дублирование вывода в консоль и в файл
@@ -119,99 +154,8 @@ def _resolve_log_path(variant: str,
 
 
 # =====================================================================
-# Сценарии
-# =====================================================================
-
-SCENARIOS = {
-    "healthy": {
-        "label": "Здоровый (R_vsd=inf)",
-        "R_vsd": np.inf,
-        "flow_dependent_lungs": False,
-    },
-    "vsd_r5": {
-        "label": "Малый ДМЖП (R_vsd=5.0)",
-        "R_vsd": 5.0,
-        "flow_dependent_lungs": False,
-    },
-    "vsd_r1": {
-        "label": "Большой ДМЖП (R_vsd=1.0)",
-        "R_vsd": 1.0,
-        "flow_dependent_lungs": True,
-    },
-    "eisenmenger": {
-        "label": "Эйзенменгер (R_remodel_max=10)",
-        "R_vsd": 0.6,
-        "flow_dependent_lungs": True,
-        # --- Ремоделирование лёгких ---
-        "pressure_remodel": True,
-        "P_pa_threshold": 18.0,
-        "pressure_sensitivity": 0.10,
-        "R_remodel_max": 10.0,
-        "tau_remodel": 150.0,
-        "flow_sensitivity": 0.15,
-        # --- Гипертрофия ПЖ ---
-        "rv_hypertrophy_sensitivity": 1.5,
-        "E_max_rv": 2.0,
-        "E_max_lv": 3.0,
-        # --- Пульмональный барорефлекс ---
-        "k_inotropy_pulm": 0.5,
-        # --- Прочее ---
-        "HR_base": 100,
-        "EDV_rv": 200.0,
-        "R_venous_sys": 0.03,
-        "R_tricuspid":  0.015,
-    },
-}
-
-
-# =====================================================================
 # Вспомогательные функции
 # =====================================================================
-
-def _build_model(scenario: dict) -> WholeBodyModel:
-    # --- Heart params ---
-    heart_params = {
-    'hr': scenario.get("HR_base", 70),
-    'R_vsd': scenario["R_vsd"],
-    'R_venous_sys':  scenario.get("R_venous_sys",  0.04),
-    'R_venous_pulm': scenario.get("R_venous_pulm", 0.03),
-    }
-    if "R_tricuspid" in scenario:
-        heart_params['R_tricuspid'] = scenario["R_tricuspid"]
-    if "rv_hypertrophy_sensitivity" in scenario:
-        heart_params['rv_hypertrophy_sensitivity'] = \
-            scenario["rv_hypertrophy_sensitivity"]
-    if "E_max_rv" in scenario:
-        heart_params['E_max_rv'] = scenario["E_max_rv"]
-    if "E_max_lv" in scenario:
-        heart_params['E_max_lv'] = scenario["E_max_lv"]
-    if "EDV_rv" in scenario:
-        heart_params['EDV_rv'] = scenario["EDV_rv"]
-
-    # --- Lungs params (ремоделирование) ---
-    lungs_params = {}
-    for key in ("pressure_remodel", "P_pa_threshold",
-                "pressure_sensitivity", "R_remodel_max",
-                "tau_remodel", "flow_sensitivity"):
-        if key in scenario:
-            lungs_params[key] = scenario[key]
-
-    # --- Baroreflex params (пульмональный рефлекс) ---
-    baroreflex_params = {}
-    if "k_inotropy_pulm" in scenario:
-        baroreflex_params['k_inotropy_pulm'] = scenario["k_inotropy_pulm"]
-    if "HR_base" in scenario:
-        baroreflex_params['HR_base'] = scenario["HR_base"]
-
-    return WholeBodyModel(
-        heart_params=heart_params,
-        lungs_params=lungs_params,
-        baroreflex_params=baroreflex_params,
-        flow_dependent_lungs=scenario["flow_dependent_lungs"],
-        peripheral_params={'VO2_base': 1.5},
-        target_MAP=85.0, target_CO=83.0,
-    )
-
 
 def _collect_data(model: WholeBodyModel, sol) -> dict:
     """Прогоняет compute_outputs по всем точкам решения."""
@@ -735,8 +679,14 @@ def _print_one_cycle(data: dict, label: str) -> None:
 # Один сценарий
 # =====================================================================
 
-def run_scenario(name: str, scenario: dict) -> None:
-    label = scenario["label"]
+def run_scenario(name: str, params: dict) -> None:
+    """
+    Параметры
+    ---------
+    name   : короткое имя variant ('healthy', 'vsd_r5', ...)
+    params : merged-конфиг из load_all_patients(base_physiology=...)
+    """
+    label = params["label"]
     print("\n" + "=" * 78)
     print(f"  SCENARIO: {name}  —  {label}")
     print("=" * 78)
@@ -744,13 +694,21 @@ def run_scenario(name: str, scenario: dict) -> None:
 
     # --- Построение модели ---
     try:
-        model = _build_model(scenario)
+        model = build_model_from_params(params)
     except Exception as e:
         print(f"  ✗ build_model FAILED: {e}")
         return
 
-    # --- Калибровка ---
-    t_calib_eff = 400.0
+    # --- Симуляционные константы из YAML ---
+    sc          = extract_simulation_config(params)
+    t_calib_eff = sc['t_calib']
+    rtol        = sc['rtol']
+    atol        = sc['atol']
+    max_step    = sc['max_step']
+    method      = sc['method']
+    t_span      = sc['t_span']
+    n_pts       = sc['n_samples_t']
+
     print(f"\n  Калибровка t_calib={t_calib_eff:.0f} с...")
     try:
         y0 = model.calibrate_initial_state(t_calib=t_calib_eff)
@@ -762,22 +720,15 @@ def run_scenario(name: str, scenario: dict) -> None:
     P_sa_0 = y0[model.idx['sys_art']][0]
     print(f"  y0: heart={y0[heart_slc]}  P_sa={P_sa_0:.2f}")
 
-    # --- Симуляция ---
-    if scenario.get("pressure_remodel", False):
-        t_end_sim = 1500.0
-        n_pts = 30000
-    else:
-        t_end_sim = 600.0
-        n_pts = 8000
-    print(f"\n  Симуляция 0..{t_end_sim:.0f} с, LSODA "
+    print(f"\n  Симуляция {t_span[0]:.0f}..{t_span[1]:.0f} с, {method} "
           f"(с RHS-счётчиком)")
-    t_eval = np.linspace(0.0, t_end_sim, n_pts)
+    t_eval = np.linspace(t_span[0], t_span[1], n_pts)
     _t_sim_start = time.perf_counter()
     try:
         sol, rhs_counter = simulate_with_counter(
-            model, (0.0, t_end_sim), t_eval=t_eval, y0=y0,
-            bin_size=max(t_end_sim / 2000.0, 0.1),
-            method='LSODA', rtol=1e-4, atol=1e-5, max_step=0.05,
+            model, t_span, t_eval=t_eval, y0=y0,
+            bin_size=max((t_span[1] - t_span[0]) / 2000.0, 0.1),
+            method=method, rtol=rtol, atol=atol, max_step=max_step,
         )
     except Exception as e:
         print(f"  ✗ simulate FAILED: {e}")
@@ -810,7 +761,7 @@ def run_scenario(name: str, scenario: dict) -> None:
         T_cycle = None
 
     _print_solver_cost(
-        sol, rhs_counter, t_end_sim, label,
+        sol, rhs_counter, t_span[1], label,
         T_cycle_hint=T_cycle, wall_time=_wall,
         n_blocks=24, sparkline_width=80,
     )

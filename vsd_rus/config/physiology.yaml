@@ -120,7 +120,8 @@ liver:
   albumin_prod_base: 0.1
   bilirubin_clearance_base: 0.2
   ammonia_clearance_base: 0.15
-  lactate_clearance_base: 0.05
+  V_liver: 1500.0 # эффективный объём распределения
+  lactate_clearance_base: 0.05 # безразмерная доля экстракции (было 1/с)
   k_uptake_bil: 0.1
   k_uptake_amm: 0.1
   k_deg_alb: 0.01
@@ -197,7 +198,6 @@ systemic:
   P_pv0: 12.0
   SYS_VEN_FRACTION: 0.63
   C_sys_ven_eff: 550.0
-  tau_target: 300.0
   VO2_rest: 1.9          # мл/с — сердце + печень + почки + ЖКТ
   RQ: 0.8                # дыхательный коэффициент
   occlusion_factor: 1.0  # 1.0 = норма (для сценариев инсульта)
@@ -205,16 +205,17 @@ systemic:
   insensible_loss_rate: 0.0
 
 simulation:
-  method: LSODA
+  method: BDF # LSODA
   rtol: 1e-4
   atol: 1e-5
   max_step: 0.05
   t_calib: 600.0
+  t_calib_healthy: 400.0
   t_span: [0.0, 1800.0]
   n_samples_t: 12001
-  t_start_stationary: 600.0
-  stationary_rel_tol: 0.10
-  stationary_rel_tol_stage1: 0.01
+  steady_frac: 0.75
+  t_span_remodel: [0.0, 1800.0]
+  n_samples_remodel: 12001
 
 jugular_vein:
   C: 20.0                # комплаенс, мл/мм рт.ст.

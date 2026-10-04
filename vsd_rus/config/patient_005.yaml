@@ -3,7 +3,7 @@ label: "Эйзенменгер, декомпенсированный"
 description: "PVR>SVR → R→L, гипоксемия, ПЖ декомпенс. после гипертрофии"
 order: 5
 color: "#5b2c6f"
-
+aliases: [eisenmenger, eisenmenger_decomp]
 flow_dependent_lungs: true
 pressure_remodel: true
 flow_sensitivity: 0.20

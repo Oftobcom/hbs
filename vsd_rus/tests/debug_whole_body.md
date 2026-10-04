@@ -12,3 +12,8 @@ python debug_whole_body.py --variant vsd_r1
 
 # Синдром Эйзенменгера
 python debug_whole_body.py --variant eisenmenger
+
+python tests/debug_whole_body.py --variant healthy --no-log
+python tests/debug_whole_body.py --variant vsd_r5 --no-log
+python tests/debug_whole_body.py --variant vsd_r1 --no-log
+python tests/debug_whole_body.py --variant eisenmenger --no-log

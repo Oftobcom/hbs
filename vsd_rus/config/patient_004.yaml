@@ -3,7 +3,7 @@ label: "Эйзенменгер, компенсированный"
 description: "PVR≈SVR, ПЖ гипертрофирован, CO сохранен, R→L, SaO2 85-90%"
 order: 4
 color: "#9b59b6"
-
+aliases: [eisenmenger_comp, eisenmenger_compensated]
 vsd_resistance: 0.4
 flow_dependent_lungs: true
 pressure_remodel: true

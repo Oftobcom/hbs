@@ -6,6 +6,9 @@ brain.py
 
 Рапортует O₂/CO₂ в whole_body; в кровь напрямую не пишет (кроме
 dC_lactate_blood и dC_ammonia_blood, которые учитывает whole_body).
+dC_ammonia_blood учитывает только BBB-обмен (amm_in, amm_out);
+внутримозговая детоксикация amm_detox — чистый сток NH3, в кровь
+не возвращается.
 
 Состояния: [P_br, C_O2_tis, C_CO2_tis, C_lac_tis, C_amm_tis] — 5 состояний.
 
@@ -283,7 +286,7 @@ class Brain(OrganModel):
     # Основной метод — производные
     # ------------------------------------------------------------------
     def get_derivatives(self, t, state, inputs):
-        # --- Разбор состояния с мягкими клипами (защита от LSODA retries) ---
+        # --- Разбор состояния с мягкими клипами ---
         P_br        = float(state[0])
         C_O2_tis    = max(float(state[1]), 0.0)
         C_CO2_tis   = max(float(state[2]), 0.0)
@@ -335,7 +338,10 @@ class Brain(OrganModel):
         inhibition = inhib_O2 * inhib_amm
 
         O2_cons_eff = O2_cons * inhibition
-        C_v_O2_brain = max(C_a_O2 - extraction_used, self.C_v_min)
+        # Венозный возврат = тканевая концентрация (well-mixed tissue):
+        # кровь, покидающая мозг, находится в равновесии с тканевым O2.
+        # Нижняя граница C_v_min сохраняется как физиологический пол.
+        C_v_O2_brain = max(C_O2_tis, self.C_v_min)
 
         # --- CO2 ---
         CO2_prod = O2_cons_eff * self.RQ
@@ -372,7 +378,7 @@ class Brain(OrganModel):
 
         # --- Вклады в кровь ---
         dC_lac_blood = (lac_release * self.V_tissue) / V_blood
-        dC_amm_blood = -dC_amm * self.V_tissue / V_blood
+        dC_amm_blood = (amm_out - amm_in) * self.V_tissue / V_blood
 
         # --- Кэш выходов ---
         self._current_outputs = {

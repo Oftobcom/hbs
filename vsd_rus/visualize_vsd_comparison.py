@@ -234,10 +234,20 @@ def plot_hemodynamic_timeseries(results: Dict[str, dict]) -> None:
 # ===========================================================================
 
 def _last_cardiac_cycle(data: dict, n_cycles: float = 2.0) -> slice:
-    """Возвращает slice на последние ~n_cycles кардиоциклов."""
     t = np.asarray(data.get("t", []))
     if t.size < 4:
         return slice(0, t.size)
+
+    # Точный срез по накопленной фазе, если она сохранена.
+    phi = data.get("phi_raw_heart")
+    if phi is not None and len(phi) == len(t):
+        phi = np.asarray(phi, dtype=float)
+        if np.all(np.isfinite(phi)) and phi[-1] > phi[0]:
+            phi_start = phi[-1] - n_cycles
+            idx0 = int(np.searchsorted(phi, phi_start, side="left"))
+            return slice(idx0, t.size)
+
+    # Fallback — старая эвристика (обратная совместимость со старыми .npz).
     hr = float(np.mean(data["HR"][-min(50, t.size):])) if "HR" in data else 70.0
     hr = max(hr, 20.0)
     T = 60.0 / hr

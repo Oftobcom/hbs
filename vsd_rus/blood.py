@@ -115,7 +115,7 @@ class BloodPool(OrganModel):
         ----------
         np.ndarray длины n: dC_with_dilution
         """
-        # --- Разбор состояния с мягким клипом (защита от LSODA retries) ---
+        # --- Разбор состояния с мягким клипом ---
         C_raw = np.asarray(state_slice, dtype=float)
         C = np.maximum(C_raw, 0.0)
 

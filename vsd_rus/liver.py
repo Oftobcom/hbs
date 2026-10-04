@@ -16,6 +16,9 @@ class Liver(OrganModel):
         C_ammonia   — концентрация аммиака в печени
         C_albumin   — концентрация альбумина в печени
         reserve     — резерв (задел, всегда 0)
+        V_liver     — эффективный объём распределения метаболитов (мл),
+                используется для перевода тканевой скорости
+                [мг/(мл·с)] в вклад в кровь [мг/(мл·с)].
 
     Состояние: [P_hv, C_bilirubin, C_ammonia, C_albumin, reserve, P_portal]
 
@@ -40,7 +43,7 @@ class Liver(OrganModel):
     _ALB_PROD_MIN, _ALB_PROD_MAX = 0.0, 5.0
     _BIL_CLEAR_MIN, _BIL_CLEAR_MAX = 0.0, 10.0
     _AMM_CLEAR_MIN, _AMM_CLEAR_MAX = 0.0, 10.0
-    _LAC_CLEAR_MIN, _LAC_CLEAR_MAX = 0.0, 5.0
+    _LAC_CLEAR_MIN, _LAC_CLEAR_MAX = 0.01, 1.0
 
     _C_BIL0_MIN, _C_BIL0_MAX = 0.0, 20.0
     _C_AMM0_MIN, _C_AMM0_MAX = 0.0, 20.0
@@ -51,11 +54,13 @@ class Liver(OrganModel):
     _K_DEG_ALB_MIN, _K_DEG_ALB_MAX = 1e-6, 5.0
     _K_RELEASE_ALB_MIN, _K_RELEASE_ALB_MAX = 1e-6, 5.0
     _K_LAC_CLEAR_MIN, _K_LAC_CLEAR_MAX = 0.01, 100.0
+    _V_LIVER_MIN, _V_LIVER_MAX = 100.0, 3000.0
 
     def __init__(self,
                  R_ha=17.0, R_pv_base=0.25, R_hv_base=0.12,
                  C=5.0, C_portal=1.5,
                  P_hv0=8.0, P_portal0=8.0,
+                 V_liver: float = 1500.0,
                  albumin_prod_base=0.1,
                  bilirubin_clearance_base=0.2,
                  ammonia_clearance_base=0.15,
@@ -115,6 +120,10 @@ class Liver(OrganModel):
             "P_portal0", P_portal0, self._P_PORTAL0_MIN, self._P_PORTAL0_MAX,
             "мм рт.ст., типично 8."
         )
+        self.V_liver = _check_range(
+            "V_liver", V_liver, self._V_LIVER_MIN, self._V_LIVER_MAX,
+            "мл, типично 1500 — эффективный объём распределения метаболитов."
+        )
 
         # --- Скорости метаболизма ---
         self.albumin_prod_base = _check_range(
@@ -135,7 +144,7 @@ class Liver(OrganModel):
         self.lactate_clearance_base = _check_range(
             "lactate_clearance_base", lactate_clearance_base,
             self._LAC_CLEAR_MIN, self._LAC_CLEAR_MAX,
-            "1/с, типично 0.05."
+            "безразмерный, типично 0.05 — доля экстракции лактата за проход."
         )
 
         # --- Начальные концентрации в печени ---
@@ -251,15 +260,21 @@ class Liver(OrganModel):
         dC_alb = synthesis_alb - degradation_alb - release_alb
 
         # --- Вклады в BloodPool ---
-        dC_bil_blood = -uptake_bil / V_blood
-        dC_amm_blood = -uptake_amm / V_blood
-        dC_alb_blood = +release_alb / V_blood
-        dC_lac_blood = (
-            -Q_ha / V_blood
-            * C_lac_blood
-            * self.lactate_clearance_base
-            * self.k_lac_clear
-        )
+        # uptake_* и release_* — скорости изменения ТКАНЕВОЙ концентрации
+        # [мг/(мл·с)]. Масса, обмениваемая с кровью за секунду, = скорость·V_liver
+        # [мг/с]. Деление на V_blood даёт скорость изменения концентрации в
+        # крови [мг/(мл·с)]. Ср. brain.py: dC_amm_blood = (amm_out−amm_in)·V_tissue/V_blood.
+        dC_bil_blood = -uptake_bil * self.V_liver / V_blood
+        dC_amm_blood = -uptake_amm * self.V_liver / V_blood
+        dC_alb_blood = +release_alb * self.V_liver / V_blood
+
+        # Печёночный клиренс лактата — flow-limited. E_lac — безразмерная
+        # доля экстракции за проход, ограниченная 0.95 (нельзя извлечь всю
+        # лактатную нагрузку за один пасс).
+        E_lac = float(np.clip(
+            self.lactate_clearance_base * self.k_lac_clear, 0.0, 0.95
+        ))
+        dC_lac_blood = -Q_ha * E_lac * C_lac_blood / V_blood
 
         self._current_outputs = {
             'Q_liver_out': Q_out,
@@ -272,6 +287,7 @@ class Liver(OrganModel):
             'Q_pv': Q_pv,
             'Q_gut_out': Q_gut_out,
             'functional': 1.0,
+            'E_lac': float(E_lac),
         }
 
         return np.array([dP_hv, dC_bil, dC_amm, dC_alb, 0.0, dP_portal])

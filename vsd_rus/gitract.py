@@ -160,7 +160,7 @@ class GITract(OrganModel):
     def get_derivatives(self, t, state, inputs):
         P_art_raw, P_cap_raw = state
 
-        # --- Мягкие клипы состояния (защита от LSODA retries) ---
+        # --- Мягкие клипы состояния ---
         P_art = max(float(P_art_raw), 0.0)
         P_cap = max(float(P_cap_raw), 0.0)
 

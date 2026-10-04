@@ -39,7 +39,7 @@ class Baroreflex(OrganModel):
     _HR_TARGET_MIN = 40.0
     _HR_TARGET_MAX = 180.0
 
-    # --- Мягкий клип состояния HR (защита от LSODA retries) ---
+    # --- Мягкий клип состояния HR ---
     _HR_STATE_MIN = 10.0
     _HR_STATE_MAX = 300.0
 
@@ -163,7 +163,7 @@ class Baroreflex(OrganModel):
     # Основной метод — производные
     # ------------------------------------------------------------------
     def get_derivatives(self, t, state, inputs):
-        # --- Разбор состояния с мягкими клипами (защита от LSODA retries) ---
+        # --- Разбор состояния с мягкими клипами ---
         HR_raw = float(state[0])
         inotr_raw = float(state[1])
         vaso_raw = float(state[2])

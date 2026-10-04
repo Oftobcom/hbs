@@ -3,7 +3,7 @@ label: "Здоровый"
 description: "Здоровое сердце без дефекта"
 order: 1
 color: "#2ecc71"
-
+aliases: [healthy]
 vsd_resistance: .inf            # YAML-native inf; строка "inf" тоже поддержана
 flow_dependent_lungs: false
 pressure_remodel: false

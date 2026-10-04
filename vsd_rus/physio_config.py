@@ -19,7 +19,7 @@
 from functools import lru_cache
 from pathlib import Path
 import os
-from typing import Optional, List
+from typing import Optional
 import warnings
 import numpy as np
 import yaml
@@ -39,7 +39,82 @@ _REQUIRED_PATIENT_KEYS = (
     "vsd_resistance", "flow_dependent_lungs", "pressure_remodel",
 )
 
+_REQUIRED_PHYSIOLOGY_SECTIONS = (
+    'heart', 'lungs', 'baroreflex', 'blood', 'peripheral',
+    'liver', 'kidney', 'brain', 'gitract', 'gas_exchange',
+    'systemic', 'jugular_vein', 'simulation',
+)
 
+# ---------------------------------------------------------------------------
+# Обязательные ключи meta-секций (проверяются после merge physiology+patient)
+# ---------------------------------------------------------------------------
+_REQUIRED_SYSTEMIC_KEYS = (
+    'target_MAP', 'target_CO', 'C_sys_art', 'C_pul_ven',
+    'P_sa0', 'P_sv0', 'P_pv0', 'SYS_VEN_FRACTION', 'C_sys_ven_eff',
+    'VO2_rest', 'RQ', 'occlusion_factor',
+    'fluid_intake_rate', 'insensible_loss_rate',
+)
+
+_REQUIRED_SIMULATION_KEYS = (
+    'method', 'rtol', 'atol', 'max_step',
+    't_calib', 't_span', 'n_samples_t', 'steady_frac',
+)
+
+_REQUIRED_BLOOD_KEYS = ('V0', 'initial_concentrations')
+
+_VALID_SOLVER_METHODS = frozenset(
+    {'RK45', 'RK23', 'DOP853', 'Radau', 'BDF', 'LSODA'}
+)
+
+def _validate_merged(cfg: dict, label: str) -> None:
+    """Проверка итогового cfg после merge physiology + patient."""
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            f"physio_config: merged cfg для '{label}' должен быть dict."
+        )
+    missing = [s for s in _REQUIRED_PHYSIOLOGY_SECTIONS if s not in cfg]
+    if missing:
+        raise ValueError(
+            f"physio_config: [{label}] после merge отсутствуют секции {missing}."
+        )
+    # --- systemic ---
+    sys = cfg['systemic']
+    missing = [k for k in _REQUIRED_SYSTEMIC_KEYS if k not in sys]
+    if missing:
+        raise ValueError(
+            f"physio_config: [{label}].systemic — отсутствуют {missing}."
+        )
+
+    # --- simulation ---
+    sim = cfg['simulation']
+    missing = [k for k in _REQUIRED_SIMULATION_KEYS if k not in sim]
+    if missing:
+        raise ValueError(
+            f"physio_config: [{label}].simulation — отсутствуют {missing}."
+        )
+
+    # --- blood ---
+    blood = cfg['blood']
+    missing = [k for k in _REQUIRED_BLOOD_KEYS if k not in blood]
+    if missing:
+        raise ValueError(
+            f"physio_config: [{label}].blood — отсутствуют {missing}."
+        )
+
+    meth = cfg['simulation'].get('method')
+    if not isinstance(meth, str) or meth not in _VALID_SOLVER_METHODS:
+        raise ValueError(
+            f"physio_config: [{label}].simulation.method={meth!r} "
+            f"не входит в {sorted(_VALID_SOLVER_METHODS)}. "
+            f"Задаётся в config/physiology.yaml."
+        )
+    
+    for s in _REQUIRED_PHYSIOLOGY_SECTIONS:
+        if not isinstance(cfg[s], dict):
+            raise ValueError(
+                f"physio_config: [{label}].{s} должен быть dict, "
+                f"получено {type(cfg[s]).__name__}."
+            )
 # ===========================================================================
 # Module-level валидация констант — fail-fast при импорте.
 # ===========================================================================
@@ -372,6 +447,9 @@ def _validate_patient(cfg: dict, path: Path) -> None:
     if "tau_hr" in cfg:
         _check_finite_range(f"{path.name}.tau_hr",
                             cfg["tau_hr"], 0.1, 10.0)
+    if "V_liver" in cfg:
+        _check_finite_range(f"{path.name}.V_liver", 
+                            cfg["V_liver"], 100.0, 3000.0)
     if "tau_inotropy" in cfg:
         _check_finite_range(f"{path.name}.tau_inotropy",
                             cfg["tau_inotropy"], 0.1, 15.0)
@@ -420,23 +498,40 @@ def _validate_patient(cfg: dict, path: Path) -> None:
             f"physio_config: {path.name} — pressure_remodel=True, "
             f"но R_remodel_max={rmax}. R_remodel останется 1.0, "
             f"лёгочное сопротивление не вырастет."
-        )        
+        )
+
+    if "aliases" in cfg:
+        aliases = cfg["aliases"]
+        if not isinstance(aliases, list):
+            raise ValueError(
+                f"physio_config: {path.name}.aliases должен быть list, "
+                f"получено {type(aliases).__name__}."
+            )
+        if not all(isinstance(a, str) and a for a in aliases):
+            raise ValueError(
+                f"physio_config: {path.name}.aliases должен содержать "
+                f"непустые строки, получено {aliases!r}."
+            )
 
 
-def load_patient(path) -> dict:
-    """
-    Загружает один patient_*.yaml.
-
-    Резолвит 'inf' → np.inf и валидирует обязательные поля.
-    """
+def load_patient(path, base: Optional[dict] = None) -> dict:
     p = Path(path)
     cfg = _load_yaml_checked(p)
     cfg = _resolve_inf(cfg)
-    _validate_patient(cfg, p)
+    _validate_patient(cfg, p)          # валидация сырого patient-файла
+    if base is not None:
+        if not isinstance(base, dict):
+            raise ValueError(
+                f"physio_config.load_patient: base должен быть dict, "
+                f"получено {type(base).__name__}."
+            )
+        cfg = _deep_merge(base, cfg)
+    _validate_merged(cfg, cfg.get("label", p.stem))   # ← после merge
     return cfg
 
 
-def load_all_patients(config_dir: Optional[str] = None) -> dict:
+def load_all_patients(config_dir=None,
+                      base_physiology: Optional[dict] = None) -> dict:
     """
     Читает все patient_*.yaml из config_dir (по умолчанию ./config),
     сортирует по полю `order`, возвращает {label: cfg}.
@@ -462,7 +557,7 @@ def load_all_patients(config_dir: Optional[str] = None) -> dict:
             f"physio_config: не найдено patient_*.yaml в {d}."
         )
 
-    patients = [load_patient(f) for f in files]
+    patients = [load_patient(f, base=base_physiology) for f in files]
     patients.sort(key=lambda c: int(c["order"]))
 
     # --- Проверка уникальности label ---
@@ -492,5 +587,16 @@ def load_all_patients(config_dir: Optional[str] = None) -> dict:
         raise ValueError(
             f"physio_config: дубликаты order среди patients: {sorted(set(dupes))}."
         )
+
+    # --- Проверка уникальности aliases ---
+    seen_aliases: dict[str, str] = {}
+    for p in patients:
+        for alias in p.get("aliases", []):
+            if alias in seen_aliases:
+                raise ValueError(
+                    f"physio_config: alias '{alias}' встречается у нескольких "
+                    f"пациентов: '{seen_aliases[alias]}' и '{p['label']}'."
+                )
+            seen_aliases[alias] = p["label"]
 
     return {p["label"]: p for p in patients}

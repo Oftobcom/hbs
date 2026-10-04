@@ -47,6 +47,7 @@ class GasExchange(OrganModel):
     _ALPHA_O2_MIN, _ALPHA_O2_MAX = 1e-4, 0.02
     _C_CO2_OFFSET_MIN, _C_CO2_OFFSET_MAX = 0.0, 1.0
     _K_CO2_SLOPE_MIN, _K_CO2_SLOPE_MAX = 1e-4, 0.05
+    _Q_REF_PULSE = 5.0
 
     def __init__(self,
                 # ---- Альвеолярный газ (фиксирован в MVP) ----
@@ -236,42 +237,28 @@ class GasExchange(OrganModel):
         C_v_CO2 = float(np.clip(C_v_CO2, 0.05,  1.00))
         Q_p     = max(float(Q_p), 1e-6)
 
-        # === 1. Системный кровоток (единая формула для обоих направлений) ===
+        # === Системный кровоток (единая формула для обоих направлений) ===
         # Из баланса heart.py: Q_aortic = Q_pulmonary - Q_vsd
         Q_s = max(Q_p - Q_shunt, 1e-6)
 
-        # === 2. Насыщение в конце лёгочного капилляра (равновесие с альвеолой) ===
+        # === Насыщение в конце лёгочного капилляра (равновесие с альвеолой) ===
         C_pv_O2  = self._C_O2_from_P(self.P_alv_O2)
         C_pv_CO2 = self._C_CO2_from_P(self.P_alv_CO2)
 
-        # === 3. Смешивание при право-левом шунте ===
-        # Отсечка Q_p > 5 мл/с: формула f_bypass = |Q_shunt|/Q_s выведена из
-        # баланса за цикл. В диастоле Q_p → 0 и Q_s → 0, поэтому без отсечки
-        # получается 0/0 → clip(0.95) → ложная гипоксемия (SaO2 ≈ 68%).
-        if Q_shunt < 0 and Q_p > 5.0:
-            # Часть венозной крови из ПЖ идёт напрямую в аорту, минуя лёгкие
-            Q_bypass = abs(Q_shunt)
-            f_bypass = float(np.clip(Q_bypass / Q_s, 0.0, 0.95))
-            C_a_O2  = (1.0 - f_bypass) * C_pv_O2  + f_bypass * C_v_O2
-            C_a_CO2 = (1.0 - f_bypass) * C_pv_CO2 + f_bypass * C_v_CO2
-        else:
-            # Лево-правый шунт или диастола: системная кровь = лёгочная
-            f_bypass = 0.0
-            C_a_O2  = C_pv_O2
-            C_a_CO2 = C_pv_CO2
+        # === Смешивание при право-левом шунте (C¹-гладкая версия) ===
+        Q_rl    = max(-float(Q_shunt), 0.0)
+        w_pulse = Q_p * Q_p / (Q_p * Q_p + self._Q_REF_PULSE ** 2)
+        f_raw   = Q_rl / Q_s
+        f_bypass = float(np.clip(f_raw, 0.0, 0.95)) * w_pulse
+        C_a_O2  = (1.0 - f_bypass) * C_pv_O2  + f_bypass * C_v_O2
+        C_a_CO2 = (1.0 - f_bypass) * C_pv_CO2 + f_bypass * C_v_CO2
 
-        # === 6. Парциальные давления (для диагностики) ===
+        # === Парциальные давления (для диагностики) ===
         P_v_O2  = self._P_O2_from_C(C_v_O2)
         P_v_CO2 = self._P_CO2_from_C(C_v_CO2)
 
-        # === 7. Диагностические выходы ===
-        # При отсутствии R→L шунта C_a_O2 = C_pv_O2 → P_a_O2 = P_alv_O2
-        # (равновесие с альвеолой, а не численная инверсия).
-        # При наличии R→L — решаем обратную задачу из смешанного C_a_O2.
-        if Q_shunt >= 0 or Q_p <= 5.0:
-            P_a_O2 = float(self.P_alv_O2)
-        else:
-            P_a_O2 = self._P_O2_from_C(C_a_O2)
+        # === Диагностические выходы ===
+        P_a_O2 = self._P_O2_from_C(C_a_O2)
         SaO2 = self._SaO2_from_P(P_a_O2)
 
         # Доля право-левого шунта в системном выбросе

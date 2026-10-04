@@ -3,7 +3,7 @@ label: "Малый ДМЖП (R=5.0)"
 description: "Малый дефект (d≈4 мм), незначительный L→R шунт"
 order: 2
 color: "#f39c12"
-
+aliases: [vsd_r5]
 vsd_resistance: 5.0
 flow_dependent_lungs: false
 pressure_remodel: false

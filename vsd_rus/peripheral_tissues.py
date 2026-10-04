@@ -24,6 +24,7 @@ class PeripheralTissues(OrganModel):
     """
     Модель периферических тканей.
     Состояние: [C_O2_local, C_lactate_local, R_eff].
+    Венозный возврат O2 = C_O2_loc (well-mixed tissue approximation).
     """
 
     # --- Санити-пороги для валидации конфигурации ---
@@ -291,7 +292,6 @@ class PeripheralTissues(OrganModel):
         V_blood      = max(V_blood, 1e-6)
 
         # --- Мягкие клипы состояния ---
-        # Защита от LSODA retries, не от ошибок конфигурации.
         C_O2_loc = float(np.clip(C_O2_loc_raw, 0.0, max(C_a_O2, 0.0)))
         C_lac_loc = max(float(C_lac_loc), 0.0)
         R_eff = max(float(R_eff), 1e-3)
@@ -366,6 +366,11 @@ class PeripheralTissues(OrganModel):
             # Производные для BloodPool
             '_diagnostic_dC_O2_blood': float(dC_O2_blood),
             'dC_lactate_blood':        float(dC_lactate_blood),
+
+            # Венозный возврат из периферии = тканевая концентрация.
+            # whole_body использует этот ключ для баланса O2 крови вместо
+            # метаболического запроса VO2_eff.
+            'C_v_O2_periph': float(C_O2_loc),
         }
 
         return np.array([dC_O2_loc, dC_lac_loc, dR_eff])
@@ -379,6 +384,9 @@ class PeripheralTissues(OrganModel):
 # =====================================================================
 if __name__ == "__main__":
     from scipy.integrate import solve_ivp
+    from physio_config import load_physiology
+
+    _METHOD = load_physiology()['simulation']['method']
 
     pt = PeripheralTissues()
     print(f"State size: {pt.get_state_size()}")
@@ -391,7 +399,7 @@ if __name__ == "__main__":
         return pt.get_derivatives(t, y, INPUTS)
 
     sol = solve_ivp(rhs, (0, 60), pt.get_initial_state(),
-                    method='LSODA', rtol=1e-6, atol=1e-8, max_step=0.05)
+                    method=_METHOD, rtol=1e-6, atol=1e-8, max_step=0.05)
     y_end = sol.y[:, -1]
     pt.get_derivatives(sol.t[-1], y_end, INPUTS)
     out = pt.get_outputs(y_end)
@@ -407,7 +415,7 @@ if __name__ == "__main__":
     inputs_hyp = dict(INPUTS, P_sa=60.0, C_a_O2=0.12)
     def rhs2(t, y): return pt2.get_derivatives(t, y, inputs_hyp)
     sol2 = solve_ivp(rhs2, (0, 60), pt2.get_initial_state(),
-                     method='LSODA', rtol=1e-6, atol=1e-8, max_step=0.05)
+                     method=_METHOD, rtol=1e-6, atol=1e-8, max_step=0.05)
     pt2.get_derivatives(sol2.t[-1], sol2.y[:, -1], inputs_hyp)
     out2 = pt2.get_outputs(sol2.y[:, -1])
     for k in ('Q_peripheral', 'R_eff', 'C_O2_local',
