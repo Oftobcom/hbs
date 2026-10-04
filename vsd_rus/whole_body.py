@@ -194,8 +194,9 @@ class WholeBodyModel:
         VO2_rest: float = 1.9,
         RQ: float = 0.8,
         occlusion_factor: float = 1.0,
-        method,
-        substance_names=None):
+        substance_names=None,
+        *,
+        method):
 
         # =================================================================
         # Валидация конфигурации — fail-fast при инициализации.
@@ -1246,6 +1247,8 @@ class WholeBodyModel:
     def simulate(self, t_span, t_eval=None, y0=None, method=None, **kwargs):
         if y0 is None:
             y0 = self.calibrate_initial_state()
+        if method is None:
+            method = self.method
         kwargs.setdefault('max_step', 0.05)
         return solve_ivp(
             self.derivatives, t_span, y0,

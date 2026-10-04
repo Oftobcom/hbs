@@ -7,33 +7,115 @@ visualize_vsd_comparison.py
 Загружает .npz, сгенерированные run_simulation.py, и строит набор
 диагностических фигур:
 
-    fig2_phase_portraits.png           — фазовые PV-портреты (если есть P_lv/P_rv)
-    fig3_bar_comparison.png            — столбчатое сравнение установившихся метрик
+    fig1_hemodynamics_timeseries.png   — временные ряды (P, Q, V, SaO2)
+    fig2_phase_portraits.png           — фазовые PV-портреты
+    fig3_bar_comparison.png            — столбчатое сравнение метрик
     fig4_detailed_cardiac.png          — детальный анализ сердца и регионов
-    fig5_gas_exchange.png              — газообмен O₂ / CO₂: 2×3 (O₂ сверху, CO₂ снизу)
+    fig5_gas_exchange.png              — газообмен O₂ / CO₂: 2×3
     comprehensive_dashboard.png        — комплексный дашборд 4×4
     schematic_heart_comparison.png     — схематическая диаграмма
 
+Логирование:
+    По умолчанию весь вывод (консоль + текст статистики) дублируется в
+        <script_dir>/results/visualize_vsd_comparison_<YYYYmmdd_HHMMSS>.log
+    Отключить:      --no-log
+    Свой путь:      --log path/to/file.log
+    Без timestamp:  --log-flat   (results/visualize_vsd_comparison.log, перезапись)
 """
 
 from __future__ import annotations
 
+import argparse
 import glob
+import sys
 import warnings
-from typing import Dict, Optional, Tuple
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Optional
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from matplotlib.patches import Circle
 from scipy.stats import linregress
+
 from utils import safe_savgol_filter as safe_savgol
-from utils import (subsample, steady_mask, steady_mean,
+from utils import (subsample, steady_mean,
                    steady_mean_std, qp_qs_steady,
                    clinical_qp_qs_series)
 from physio_config import load_all_patients
 
 warnings.filterwarnings("ignore")
+
+
+# =====================================================================
+# Tee-логгер: дублирование вывода в консоль и в файл
+# =====================================================================
+
+class Tee:
+    """
+    Перенаправляет вывод одновременно в несколько потоков.
+
+    • write() — буферизация по строкам: flush только при '\\n'.
+    • flush()  — явный сброс всех потоков.
+    • fileno() — проксирует fileno первого потока.
+    Все операции обёрнуты в try/except, чтобы не валить задачу
+    при закрытии одного из потоков.
+    """
+    def __init__(self, *streams):
+        if not streams:
+            raise ValueError("Tee: нужен хотя бы один поток")
+        self.streams = streams
+        self.encoding = getattr(streams[0], 'encoding', 'utf-8')
+
+    def write(self, data):
+        for s in self.streams:
+            try:
+                s.write(data)
+            except Exception:
+                pass
+        if '\n' in data:
+            self.flush()
+
+    def flush(self):
+        for s in self.streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+    def fileno(self):
+        return self.streams[0].fileno()
+
+
+def _resolve_log_path(explicit: str | None,
+                      flat: bool,
+                      no_log: bool) -> Path | None:
+    """
+    Определяет путь лог-файла.
+
+    Приоритеты:
+      no_log=True      → None (логирование отключено)
+      explicit != None → этот путь
+      flat=True        → results/visualize_vsd_comparison.log (перезапись)
+      иначе            → results/visualize_vsd_comparison_<timestamp>.log
+    """
+    if no_log:
+        return None
+    if explicit:
+        p = Path(explicit)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+
+    out_dir = Path(__file__).resolve().parent / "results"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if flat:
+        return out_dir / "visualize_vsd_comparison.log"
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return out_dir / f"visualize_vsd_comparison_{ts}.log"
+
 
 # ---------------------------------------------------------------------------
 # Стиль и палитра
@@ -125,6 +207,7 @@ def load_all_results(pattern: str = "vsd_results_*.npz"
     print(f"\nЗагружено сценариев: {list(ordered.keys())}")
     return ordered
 
+
 # ===========================================================================
 # Рис. 1 — Временные ряды гемодинамики
 # ===========================================================================
@@ -194,8 +277,6 @@ def plot_hemodynamic_timeseries(results: Dict[str, dict]) -> None:
             mask = np.isfinite(y)
             if not np.any(mask):
                 continue
-            # safe_savgol интерполирует NaN — сглаживаем весь ряд,
-            # а не сжатую маску (см. utils.safe_savgol_filter).
             if metric == "SaO2":
                 y = safe_savgol(y, 101, 3)
             ax.plot(t[mask], y[mask], color=_color(sc), lw=1.5, label=sc)
@@ -228,6 +309,7 @@ def plot_hemodynamic_timeseries(results: Dict[str, dict]) -> None:
                 dpi=150, bbox_inches="tight")
     plt.close(fig)
     print("  ✓ fig1_hemodynamics_timeseries.png")
+
 
 # ===========================================================================
 # Рис. 2 — Фазовые PV-портреты
@@ -389,11 +471,6 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
                  fontsize=14, fontweight="bold")
 
     # --- 1. Qp/Qs во времени (скользящее клиническое) ---
-    # Не рисуем data['Qp_Qs'] — мгновенное отношение в диастоле даёт
-    # выбросы 1e5–1e7. Рисуем savgol(Qp)/savgol(Qs) с окном ~150 с (≈200
-    # циклов) — клинический эквивалент Qp/Qs за скользящее окно.
-    # Горизонтальная пунктирная линия — qp_qs_steady(data), финальное
-    # число, которое пойдёт в отчёт.
     ax = axes[0, 0]
     for sc, data in results.items():
         if not has_field(data, "t", "Q_pulmonary", "Q_aortic"):
@@ -457,11 +534,6 @@ def plot_cardiovascular_parameters(results: Dict[str, dict]) -> None:
     ax.grid(True, alpha=0.3)
 
     # --- 4. Корреляция Q_vsd ↔ Qp/Qs (по сценариям) ---
-    # Не scatter мгновенных пар (Q_vsd(t), Qp/Qs(t)) — X-ось тогда
-    # мгновенное отношение с выбросами 1e5–1e7. Вместо этого — одна
-    # точка на сценарий из устойчивых средних:
-    #   X = steady_mean(Q_vsd), Y = qp_qs_steady = mean(Qp)/mean(Qs).
-    # Так R² считается по 5 точкам и отражает реальную корреляцию.
     ax = axes[1, 0]
     xs, ys = [], []
     for sc, data in results.items():
@@ -537,12 +609,6 @@ def plot_gas_exchange(results: Dict[str, dict]) -> None:
     """
     Диаграмма газообмена: верхний ряд — O2, нижний — CO2.
 
-    Требует ключей из централизованного баланса (см. fix_deepseek.md):
-        VO2_brain, VO2_periph, VO2_rest, VO2_total,
-        C_a_O2, C_v_O2, C_jv_O2,
-        P_a_O2, P_v_O2,
-        C_a_CO2, C_v_CO2, C_jv_CO2, P_v_CO2,
-        VCO2_total, CO2_removal, dC_CO2_blood
     Если каких-то ключей нет — соответствующая панель просто пропускается.
     """
     fig, axes = plt.subplots(2, 3, figsize=(16, 9))
@@ -550,8 +616,6 @@ def plot_gas_exchange(results: Dict[str, dict]) -> None:
                  fontsize=14, fontweight="bold")
 
     # ======================= ВЕРХНИЙ РЯД: O₂ =======================
-
-    # 1. Концентрации O₂
     ax = axes[0, 0]
     for sc, data in results.items():
         c = _color(sc)
@@ -574,7 +638,6 @@ def plot_gas_exchange(results: Dict[str, dict]) -> None:
     ax.legend(fontsize=6, ncol=2)
     ax.grid(True, alpha=0.3)
 
-    # 2. Парциальные давления O₂
     ax = axes[0, 1]
     for sc, data in results.items():
         c = _color(sc)
@@ -593,7 +656,6 @@ def plot_gas_exchange(results: Dict[str, dict]) -> None:
     ax.legend(fontsize=6, ncol=2)
     ax.grid(True, alpha=0.3)
 
-    # 3. Компоненты VO2 — bar chart
     ax = axes[0, 2]
     scenarios = list(results.keys())
     components = [("VO2_brain",  "Мозг"),
@@ -627,8 +689,6 @@ def plot_gas_exchange(results: Dict[str, dict]) -> None:
         ax.axis("off")
 
     # ======================= НИЖНИЙ РЯД: CO₂ =======================
-
-    # 4. Концентрации CO₂
     ax = axes[1, 0]
     for sc, data in results.items():
         c = _color(sc)
@@ -651,7 +711,6 @@ def plot_gas_exchange(results: Dict[str, dict]) -> None:
     ax.legend(fontsize=6, ncol=2)
     ax.grid(True, alpha=0.3)
 
-    # 5. Венозное P_vCO2
     ax = axes[1, 1]
     any_p = False
     for sc, data in results.items():
@@ -675,7 +734,6 @@ def plot_gas_exchange(results: Dict[str, dict]) -> None:
         ax.axis("off")
     ax.grid(True, alpha=0.3)
 
-    # 6. Баланс CO₂ — bar chart
     ax = axes[1, 2]
     co2_metrics = [("VCO2_total",    "VCO₂\n(мл/с)"),
                    ("CO2_removal",   "Удаление\nлёгкими (мл/с)"),
@@ -710,7 +768,6 @@ def plot_gas_exchange(results: Dict[str, dict]) -> None:
     plt.savefig("fig5_gas_exchange.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     print("  ✓ fig5_gas_exchange.png")
-
 
 
 # ===========================================================================
@@ -769,13 +826,7 @@ def plot_comprehensive_dashboard(results: Dict[str, dict]) -> None:
     fig = plt.figure(figsize=(18, 14))
     gs = GridSpec(4, 4, figure=fig, hspace=0.45, wspace=0.35)
 
-    # 1. Qp/Qs (скользящее клиническое, не мгновенное)
-    # Не используем _plot_series(..., "Qp_Qs", ...): тот берёт
-    # data['Qp_Qs'] — мгновенное отношение с диастолическими
-    # выбросами 1e5–1e7, и сглаживает их savgol(101). Рисуем
-    # savgol(Qp)/savgol(Qs) с окном ~150 с (≈200 циклов) —
-    # клинический эквивалент; горизонтальная пунктирная линия —
-    # qp_qs_steady(data), финальное число для отчёта.
+    # 1. Qp/Qs (скользящее клиническое)
     ax1 = fig.add_subplot(gs[0, :2])
     for sc, data in results.items():
         if not has_field(data, "t", "Q_pulmonary", "Q_aortic"):
@@ -882,7 +933,7 @@ def plot_comprehensive_dashboard(results: Dict[str, dict]) -> None:
     ax8.legend(fontsize=7)
     ax8.grid(True, alpha=0.3)
 
-    # 9. SaO₂ vs Qp/Qs — по сценариям (не облако!)
+    # 9. SaO₂ vs Qp/Qs — по сценариям
     ax9 = fig.add_subplot(gs[2, 1])
     for sc, data in results.items():
         sao2_mean = steady_mean(data, "SaO2", scale=100.0)
@@ -989,7 +1040,6 @@ def _draw_heart_schematic(ax, title, title_color,
     ax.axis("off")
     ax.set_title(title, fontsize=12, fontweight="bold", color=title_color)
 
-    # Камеры
     for (cx, cy, r, face) in [
         (4, 6, lv_radius, "#e74c3c"),   # ЛЖ
         (8, 6, rv_radius, "#3498db"),   # ПЖ
@@ -999,13 +1049,11 @@ def _draw_heart_schematic(ax, title, title_color,
         ax.add_patch(Circle((cx, cy), r, facecolor=face,
                             edgecolor="black", alpha=0.7))
 
-    # Магистральные сосуды
     ax.plot([4, 4], [6, 3], "r-", lw=3)
     ax.plot([8, 8], [6, 3], "b-", lw=3)
     ax.plot([4, 4], [9, 10.3], "r-", lw=3)
     ax.plot([8, 8], [9, 10.3], "b-", lw=3)
 
-    # Стрелки направления кровотока
     for xy, xytext, color in [
         ((4, 3), (4, 4), "red"),
         ((8, 3), (8, 4), "blue"),
@@ -1015,7 +1063,6 @@ def _draw_heart_schematic(ax, title, title_color,
         ax.annotate("", xy=xy, xytext=xytext,
                     arrowprops=dict(arrowstyle="->", lw=2, color=color))
 
-    # Шунт
     if shunt_direction == "L2R":
         ax.annotate("", xy=(6.1, 6), xytext=(5.8, 5.2),
                     arrowprops=dict(arrowstyle="->", lw=2, color="purple"))
@@ -1023,7 +1070,6 @@ def _draw_heart_schematic(ax, title, title_color,
         ax.annotate("", xy=(5.8, 5.2), xytext=(6.1, 6),
                     arrowprops=dict(arrowstyle="->", lw=2, color="purple"))
 
-    # Подписи
     ax.text(4, 1.5, "Аорта", ha="center", fontsize=10, fontweight="bold")
     ax.text(8, 1.5, "Лёгочная артерия", ha="center",
             fontsize=10, fontweight="bold")
@@ -1039,26 +1085,15 @@ def plot_schematic_heart_comparison() -> None:
     """
     Схематическое сравнение гемодинамики для двух крайних фенотипов:
     «Здоровый» и «Эйзенменгер, декомпенсированный».
-
-    Промежуточные сценарии (малый / большой ДМЖП, компенсированный
-    Эйзенменгер) на этой схеме не показываются — она предназначена
-    для наглядной демонстрации двух полюсов клинического спектра:
-    нормы без шунта и запущенного право-левого шунта с цианозом.
-
-    Цвета панелей подтягиваются из COLORS, если соответствующие метки
-    присутствуют в текущем наборе пациентов; иначе используются
-    разумные дефолты, чтобы функция работала и без физио-конфига.
     """
-    # --- Цвета: пробуем взять из общей палитры, иначе — дефолты ---
     healthy_color = COLORS.get("Здоровый", "#2ecc71")
     eisenmenger_color = (
         COLORS.get("Эйзенменгер, декомпенсированный")
         or COLORS.get("Эйзенменгер декомпенс. (R=0.5)")
         or COLORS.get("Эйзенменгер (R=0.7)")
-        or "#5b2c6f"   # тёмно-фиолетовый — согласован с общей палитрой
+        or "#5b2c6f"
     )
 
-    # --- Фигура: 2 панели вместо 3 ---
     fig, axes = plt.subplots(1, 2, figsize=(14, 7))
     fig.suptitle(
         "Схематическое сравнение гемодинамики:\n"
@@ -1066,7 +1101,6 @@ def plot_schematic_heart_comparison() -> None:
         fontsize=14, fontweight="bold",
     )
 
-    # --- Панель 0: здоровый ---
     _draw_heart_schematic(
         axes[0],
         "Здоровое сердце (норма)",
@@ -1077,12 +1111,11 @@ def plot_schematic_heart_comparison() -> None:
         qs_color=healthy_color,
     )
 
-    # --- Панель 1: декомпенсированный Эйзенменгер ---
     _draw_heart_schematic(
         axes[1],
         "Эйзенменгер, декомпенсированный",
         eisenmenger_color,
-        lv_radius=2.3, rv_radius=2.8,   # ПЖ дилатирован — визуальный акцент
+        lv_radius=2.3, rv_radius=2.8,
         shunt_direction="R2L",
         qs_label="Qs > Qp  (R→L, цианоз)",
         qs_color=eisenmenger_color,
@@ -1107,23 +1140,18 @@ def print_statistical_summary(results: Dict[str, dict]) -> None:
     print("=" * 100)
 
     metrics = [
-        # --- Гемодинамика: давления и потоки ---
         ("P_sa",               "Системное АД",              "мм рт. ст.", "{:.1f} ± {:.1f}", 1.0),
         ("P_pa",               "Лёгочное АД",               "мм рт. ст.", "{:.1f} ± {:.1f}", 1.0),
         ("Q_aortic",           "Системный выброс",          "мл/с",       "{:.1f} ± {:.1f}", 1.0),
         ("Q_pulmonary",        "Лёгочный кровоток",         "мл/с",       "{:.1f} ± {:.1f}", 1.0),
         ("Q_vsd",              "Шунт VSD",                  "мл/с",       "{:+.1f} ± {:.1f}", 1.0),
-        # --- Оксигенация ---
         ("SaO2",               "SaO₂",                      "%",          "{:.1f} ± {:.2f}", 100.0),
         ("shunt_fraction_R2L", "R→L шунт",                  "%",          "{:.1f} ± {:.2f}", 100.0),
-        # --- Объёмы ---
         ("V_lv",               "Объём ЛЖ",                  "мл",         "{:.1f} ± {:.1f}", 1.0),
         ("V_rv",               "Объём ПЖ",                  "мл",         "{:.1f} ± {:.1f}", 1.0),
         ("V_blood",            "Объём крови",               "мл",         "{:.0f} ± {:.0f}", 1.0),
-        # --- Регионарные функции ---
         ("GFR",                "СКФ",                       "мл/с",       "{:.2f} ± {:.2f}", 1.0),
         ("Q_brain",            "Мозговой кровоток",         "мл/с",       "{:.2f} ± {:.2f}", 1.0),
-        # --- Потребление O₂: мозг / периферия / интеграл ---
         ("VO2_brain",             "Потребление O₂ мозгом",      "мл O₂/с", "{:.3f} ± {:.3f}", 1.0),
         ("O2_consumption_periph", "Потребление O₂ периферией",  "мл O₂/с", "{:.3f} ± {:.3f}", 1.0),
         ("O2_uptake",             "Поглощение O₂ лёгкими",      "мл O₂/с", "{:.3f} ± {:.3f}", 1.0),
@@ -1187,7 +1215,8 @@ def print_statistical_summary(results: Dict[str, dict]) -> None:
 # main
 # ===========================================================================
 
-def main() -> None:
+def _main_impl() -> None:
+    """Основная логика. Вызывается внутри Tee-контекста (или напрямую)."""
     print("=" * 70)
     print("ВИЗУАЛИЗАЦИЯ СРАВНЕНИЯ ГЕМОДИНАМИКИ: ЗДОРОВЫЙ vs ДМЖП")
     print("=" * 70)
@@ -1220,5 +1249,74 @@ def main() -> None:
         print(f"   - {f}")
 
 
+def main(log_path: Path | None = None,
+         no_log: bool = False) -> None:
+    """
+    Обёртка main(): Tee-логгер в указанный файл.
+
+    Если log_path=None и no_log=False — авто-путь:
+        results/visualize_vsd_comparison_<timestamp>.log
+    """
+    if no_log or log_path is None:
+        _main_impl()
+        return
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Truncate + append (кросс-платформенно, безопасно для повторного запуска)
+    try:
+        with open(log_path, "w", encoding="utf-8"):
+            pass
+    except OSError as e:
+        print(f"[WARN] Не удалось создать лог-файл {log_path}: {e}. "
+              f"Продолжаем без лога.", file=sys.stderr)
+        _main_impl()
+        return
+
+    with open(log_path, "a", encoding="utf-8", buffering=1) as log_file:
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        sys.stdout = Tee(original_stdout, log_file)
+        sys.stderr = Tee(original_stderr, log_file)
+        try:
+            print(f"[log] Script    : {Path(sys.argv[0]).resolve().name}")
+            print(f"[log] Log file  : {log_path.resolve()}")
+            print(f"[log] Started   : {datetime.now():%Y-%m-%d %H:%M:%S}")
+            _main_impl()
+            print(f"[log] Finished  : {datetime.now():%Y-%m-%d %H:%M:%S}")
+            print(f"[log] Полный лог: {log_path.resolve()}")
+        finally:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+
+
+# ===========================================================================
+# CLI
+# ===========================================================================
+
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Визуализация сравнения гемодинамики: Здоровый vs ДМЖП."
+    )
+    parser.add_argument(
+        '--log', type=str, default=None,
+        help='Путь к лог-файлу. По умолчанию — '
+             'results/visualize_vsd_comparison_<timestamp>.log',
+    )
+    parser.add_argument(
+        '--log-flat', action='store_true',
+        help='Имя лога без timestamp: '
+             'results/visualize_vsd_comparison.log (перезапись).',
+    )
+    parser.add_argument(
+        '--no-log', action='store_true',
+        help='Отключить запись в файл (только консоль).',
+    )
+    args = parser.parse_args()
+
+    log_path = _resolve_log_path(
+        explicit=args.log,
+        flat=args.log_flat,
+        no_log=args.no_log,
+    )
+    main(log_path=log_path, no_log=args.no_log)

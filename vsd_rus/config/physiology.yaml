@@ -205,7 +205,7 @@ systemic:
   insensible_loss_rate: 0.0
 
 simulation:
-  method: BDF # LSODA
+  method: LSODA
   rtol: 1e-4
   atol: 1e-5
   max_step: 0.05
