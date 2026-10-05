@@ -35,6 +35,7 @@ class PeripheralTissues(OrganModel):
     _O2_NORM_MIN, _O2_NORM_MAX = 0.05, 0.25
     _K_O2_MIN, _K_O2_MAX = 0.1, 3.0
     _R_MIN_FACTOR_MIN, _R_MIN_FACTOR_MAX = 0.1, 0.9
+    _R_MYOGENIC_MIN_MIN, _R_MYOGENIC_MIN_MAX = 0.1, 0.9
     _TAU_AUTOREG_MIN, _TAU_AUTOREG_MAX = 0.1, 60.0
 
     _K_P_MYOGENIC_MIN, _K_P_MYOGENIC_MAX = 0.0, 0.05
@@ -54,158 +55,165 @@ class PeripheralTissues(OrganModel):
     _C_LAC0_MIN, _C_LAC0_MAX = 0.0, 1.0
     _C_O2_LOC0_MIN, _C_O2_LOC0_MAX = 0.0, 0.25
 
+
+    @staticmethod
+    def _check_range(name, v, lo, hi, typical=""):
+        if v is None:
+            raise ValueError(
+                f"PeripheralTissues: {name} не задан (None). "
+                f"Все параметры обязательны; дефолты удалены. "
+                f"Задайте peripheral.{name} в physiology.yaml."
+            )
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise TypeError(
+                f"PeripheralTissues: {name}={v!r} должен быть числом, "
+                f"получено {type(v).__name__}."
+            )
+        v = float(v)
+        if not np.isfinite(v) or not (lo <= v <= hi):
+            raise ValueError(
+                f"PeripheralTissues: {name}={v} вне [{lo}, {hi}]. {typical}"
+            )
+        return v
+
     # ------------------------------------------------------------------
     # Конструктор
     # ------------------------------------------------------------------
     def __init__(self,
-        # --- Гемодинамика ---
-        R_base: float = 3.8,
-        C_tissue: float = 8.0,             # не используется, оставлено для расширения
-        P_tissue0: float = 15.0,           # диагностика
+        *,
+        R_base: float,
+        C_tissue: float,
+        P_tissue0: float,
+        O2_norm: float,
+        k_O2_autoreg: float,
+        R_min_factor: float,
+        R_myogenic_min_factor: float,
+        tau_autoreg: float,
+        k_P_myogenic: float,
+        P_sa_norm: float,
+        R_max_factor: float,
+        P_myogenic_deadband: float,
+        VO2_base: float,
+        VO2_basal_frac: float,
+        V_tissue_eff: float,
+        C_a_O2_norm: float,
+        C_O2_lactate_threshold: float,
+        k_lactate_prod: float,
+        k_lactate_clear: float,
+        k_lactate_release: float,
+        C_lactate0: float,
+        C_O2_local0: float):
 
-        # --- Метаболическая ауторегуляция ---
-        O2_norm: float = 0.15,
-        k_O2_autoreg: float = 1.0,         # экспонента в f_O2 (1.0 = линейно)
-        R_min_factor: float = 0.75,        # макс. вазодилатация (f_O2_min)
-        tau_autoreg: float = 3.0,
-
-        # --- Миогенная ауторегуляция ---
-        k_P_myogenic: float = 0.002,
-        P_sa_norm: float = 90.0,
-        R_max_factor: float = 2.5,
-        P_myogenic_deadband: float = 10.0,
-
-        # --- Потребление O2 ---
-        VO2_base: float = 1.5,
-        VO2_basal_frac: float = 0.05,      # доля VO2_base при Q=0 (анаэробный резерв)
-        V_tissue_eff: float = 400.0,
-        C_a_O2_norm: float = 0.20,
-
-        # --- Лактат ---
-        C_O2_lactate_threshold: float = 0.08,
-        k_lactate_prod: float = 0.05,
-        k_lactate_clear: float = 0.02,     # согласовано с physiology.yaml
-        k_lactate_release: float = 0.05,
-        C_lactate0: float = 0.10,
-        C_O2_local0: float = 0.10):
-
-        # =================================================================
-        # Валидация конфигурации — fail-fast при инициализации.
-        # Параметры приходят из YAML и не меняются во время симуляции;
-        # ошибки ловятся один раз, а не в горячем пути RHS.
-        # =================================================================
-        def _check_range(name, v, lo, hi, typical=""):
-            v = float(v)
-            if not np.isfinite(v) or not (lo <= v <= hi):
-                raise ValueError(
-                    f"PeripheralTissues: {name}={v} вне [{lo}, {hi}]. {typical}"
-                )
-            return v
 
         # --- Гемодинамика ---
-        self.R_base = _check_range(
+        self.R_base = self._check_range(
             "R_base", R_base, self._R_BASE_MIN, self._R_BASE_MAX,
             "типично 2–6 мм рт.ст.·с/мл (после калибровки под target_MAP/CO)."
         )
-        self.C_tissue = _check_range(
+        self.C_tissue = self._check_range(
             "C_tissue", C_tissue, self._C_TISSUE_MIN, self._C_TISSUE_MAX,
             "не используется в текущей модели; оставлено для расширения."
         )
-        self.P_tissue0 = _check_range(
+        self.P_tissue0 = self._check_range(
             "P_tissue0", P_tissue0, self._P_TISSUE0_MIN, self._P_TISSUE0_MAX,
             "диагностическое значение, типично 15 мм рт.ст."
         )
 
         # --- Метаболическая ауторегуляция ---
-        self.O2_norm = _check_range(
+        self.O2_norm = self._check_range(
             "O2_norm", O2_norm, self._O2_NORM_MIN, self._O2_NORM_MAX,
             "типично 0.15 мл O2/мл."
         )
-        self.k_O2_autoreg = _check_range(
+        self.k_O2_autoreg = self._check_range(
             "k_O2_autoreg", k_O2_autoreg, self._K_O2_MIN, self._K_O2_MAX,
             "типично 1.0 (линейно). k>1 усиливает дилатацию при глубокой гипоксии, "
             "k<1 делает реакцию более вялой."
         )
-        self.R_min_factor = _check_range(
+        self.R_min_factor = self._check_range(
             "R_min_factor", R_min_factor,
             self._R_MIN_FACTOR_MIN, self._R_MIN_FACTOR_MAX,
-            "типично 0.4–0.5 (дилатация 2–2.5×). 0.75 — консервативно (1.33×)."
+            "типично 0.4–0.5."
         )
-        self.tau_autoreg = _check_range(
+        self.R_myogenic_min_factor = self._check_range(
+            "R_myogenic_min_factor", R_myogenic_min_factor,
+            self._R_MYOGENIC_MIN_MIN, self._R_MYOGENIC_MIN_MAX,
+            "макс. миогенная вазодилатация; типично 0.55–0.7 "
+            "(слабее метаболической R_min_factor)."
+        )
+        self.tau_autoreg = self._check_range(
             "tau_autoreg", tau_autoreg,
-            self._TAU_AUTOREG_MIN, self._TAU_AUTOREG_MAX,
-            "типично 3 с."
+            self._TAU_AUTOREG_MIN, self._TAU_AUTOREG_MAX
         )
 
         # --- Миогенная ауторегуляция ---
-        self.k_P_myogenic = _check_range(
+        self.k_P_myogenic = self._check_range(
             "k_P_myogenic", k_P_myogenic,
             self._K_P_MYOGENIC_MIN, self._K_P_MYOGENIC_MAX,
             "типично 0.002–0.005."
         )
-        self.P_sa_norm = _check_range(
+        self.P_sa_norm = self._check_range(
             "P_sa_norm", P_sa_norm, self._P_SA_NORM_MIN, self._P_SA_NORM_MAX,
             "типично 90 мм рт.ст."
         )
-        self.R_max_factor = _check_range(
+        self.R_max_factor = self._check_range(
             "R_max_factor", R_max_factor,
             self._R_MAX_FACTOR_MIN, self._R_MAX_FACTOR_MAX,
             "типично 2.5 (макс. вазоконстрикция)."
         )
-        self.P_myogenic_deadband = _check_range(
+        self.P_myogenic_deadband = self._check_range(
             "P_myogenic_deadband", P_myogenic_deadband,
             self._DEADBAND_MIN, self._DEADBAND_MAX,
             "типично 10 мм рт.ст."
         )
 
         # --- Потребление O2 ---
-        self.VO2_base = _check_range(
+        self.VO2_base = self._check_range(
             "VO2_base", VO2_base, self._VO2_BASE_MIN, self._VO2_BASE_MAX,
             "типично 1.5 мл/с (мышцы+кожа, ~90 мл/мин)."
         )
-        self.VO2_basal_frac = _check_range(
+        self.VO2_basal_frac = self._check_range(
             "VO2_basal_frac", VO2_basal_frac,
             self._VO2_BASAL_FRAC_MIN, self._VO2_BASAL_FRAC_MAX,
             "типично 0.05 — анаэробный резерв при Q→0."
         )
-        self.V_tissue_eff = _check_range(
+        self.V_tissue_eff = self._check_range(
             "V_tissue_eff", V_tissue_eff,
             self._V_TISSUE_MIN, self._V_TISSUE_MAX,
             "типично 400 мл."
         )
-        self.C_a_O2_norm = _check_range(
+        self.C_a_O2_norm = self._check_range(
             "C_a_O2_norm", C_a_O2_norm,
             self._C_A_O2_NORM_MIN, self._C_A_O2_NORM_MAX,
             "типично 0.20 мл O2/мл."
         )
 
         # --- Лактат ---
-        self.C_O2_lactate_threshold = _check_range(
+        self.C_O2_lactate_threshold = self._check_range(
             "C_O2_lactate_threshold", C_O2_lactate_threshold,
             self._LAC_THRESH_MIN, self._LAC_THRESH_MAX,
             "типично 0.08 мл O2/мл — порог начала анаэробного гликолиза."
         )
-        self.k_lactate_prod = _check_range(
+        self.k_lactate_prod = self._check_range(
             "k_lactate_prod", k_lactate_prod,
             self._K_LAC_PROD_MIN, self._K_LAC_PROD_MAX,
             "типично 0.05 мг/(мл·с)."
         )
-        self.k_lactate_clear = _check_range(
+        self.k_lactate_clear = self._check_range(
             "k_lactate_clear", k_lactate_clear,
             self._K_LAC_CLEAR_MIN, self._K_LAC_CLEAR_MAX,
             "типично 0.02 1/с."
         )
-        self.k_lactate_release = _check_range(
+        self.k_lactate_release = self._check_range(
             "k_lactate_release", k_lactate_release,
             self._K_LAC_REL_MIN, self._K_LAC_REL_MAX,
             "типично 0.05 1/с."
         )
-        self.C_lactate0 = _check_range(
+        self.C_lactate0 = self._check_range(
             "C_lactate0", C_lactate0,
             self._C_LAC0_MIN, self._C_LAC0_MAX,
             "типично 0.10 мг/мл (=1 мМ)."
         )
-        self.C_O2_local0 = _check_range(
+        self.C_O2_local0 = self._check_range(
             "C_O2_local0", C_O2_local0,
             self._C_O2_LOC0_MIN, self._C_O2_LOC0_MAX,
             "типично 0.10 мл O2/мл."
@@ -258,7 +266,7 @@ class PeripheralTissues(OrganModel):
         else:
             signed = excess - np.sign(excess) * self.P_myogenic_deadband
             f_P = 1.0 + self.k_P_myogenic * signed
-        return float(np.clip(f_P, self.R_min_factor, self.R_max_factor))
+        return float(np.clip(f_P, self.R_myogenic_min_factor, self.R_max_factor))
 
     def _autoregulation_target(self, P_sa: float, C_O2_local: float,
                             baro_scale: float = 1.0) -> float:
@@ -378,47 +386,3 @@ class PeripheralTissues(OrganModel):
     def get_outputs(self, state):
         return self._current_outputs.copy()
 
-
-# =====================================================================
-# Быстрый тест (python peripheral_tissues.py)
-# =====================================================================
-if __name__ == "__main__":
-    from scipy.integrate import solve_ivp
-    from physio_config import load_physiology
-
-    _METHOD = load_physiology()['simulation']['method']
-
-    pt = PeripheralTissues()
-    print(f"State size: {pt.get_state_size()}")
-    print(f"Initial state: {pt.get_initial_state()}")
-
-    INPUTS = {'P_sa': 85.0, 'P_sv': 5.0, 'C_a_O2': 0.20,
-              'C_v_lactate': 0.10, 'V_blood': 5000.0}
-
-    def rhs(t, y):
-        return pt.get_derivatives(t, y, INPUTS)
-
-    sol = solve_ivp(rhs, (0, 60), pt.get_initial_state(),
-                    method=_METHOD, rtol=1e-6, atol=1e-8, max_step=0.05)
-    y_end = sol.y[:, -1]
-    pt.get_derivatives(sol.t[-1], y_end, INPUTS)
-    out = pt.get_outputs(y_end)
-    print("\nSteady state (здоровый, P_sa=85, C_a_O2=0.20):")
-    for k in ('Q_peripheral', 'R_eff', 'C_O2_local', 'C_lactate_local',
-              'O2_consumption_periph', 'lactate_production',
-              'f_O2_autoreg', 'f_P_myogenic',
-              '_diagnostic_dC_O2_blood'):
-        print(f"  {k:28s} = {out[k]:+.6g}")
-
-    print("\nГипоксия (P_sa=60, C_a_O2=0.12):")
-    pt2 = PeripheralTissues()
-    inputs_hyp = dict(INPUTS, P_sa=60.0, C_a_O2=0.12)
-    def rhs2(t, y): return pt2.get_derivatives(t, y, inputs_hyp)
-    sol2 = solve_ivp(rhs2, (0, 60), pt2.get_initial_state(),
-                     method=_METHOD, rtol=1e-6, atol=1e-8, max_step=0.05)
-    pt2.get_derivatives(sol2.t[-1], sol2.y[:, -1], inputs_hyp)
-    out2 = pt2.get_outputs(sol2.y[:, -1])
-    for k in ('Q_peripheral', 'R_eff', 'C_O2_local',
-              'f_O2_autoreg', 'f_P_myogenic',
-              'O2_consumption_periph', 'lactate_production'):
-        print(f"  {k:28s} = {out2[k]:+.6g}")

@@ -55,26 +55,30 @@ class Baroreflex(OrganModel):
     _K_VASOMOTOR_MIN, _K_VASOMOTOR_MAX = 0.0, 0.05
     _TAU_VASO_MIN, _TAU_VASO_MAX       = 1.0, 60.0    
 
+    # --- Пульмональный рефлекс ПЖ ---
+    _P_PA_SET_MIN, _P_PA_SET_MAX = 1.0, 100.0
+    
     def __init__(self,
-                P_set=80.0,
-                HR_base=70.0,
+                # --- точка равновесия и базовая ЧСС ---
+                P_set: float,
+                HR_base: float,
                 # --- хронотропная ветвь (быстрая) ---
-                k_hr=0.008,
-                tau_hr=2.0,
+                k_hr: float,
+                tau_hr: float,
                 # --- инотропная ветвь (средняя) ---
-                k_inotropy=0.005,
-                tau_inotropy=4.0,
+                k_inotropy: float,
+                tau_inotropy: float,
                 # --- вазомоторная ветвь (медленная) ---
-                k_vasomotor=0.015,
-                tau_vaso=10.0,
-                # --- пульмональный рефлекс ПЖ (без изменений) ---
-                k_inotropy_pulm=0.5):
+                k_vasomotor: float,
+                tau_vaso: float,
+                # --- пульмональный рефлекс ПЖ ---
+                k_inotropy_pulm: float,
+                P_pa_set: float):
         """
-        Параметры:
-            P_set      – заданное давление (мм рт.ст.), при котором ЧСС = HR_base
-            HR_base    – базовая ЧСС (уд/мин)
-            k_inotropy – коэффициент симпатической инотропии
-                        (множитель baro_activation)
+        Все параметры приходят из physiology.yaml (baroreflex) и/или
+        patient_*.yaml (HR_base, k_hr, k_inotropy, k_vasomotor,
+        tau_hr, tau_inotropy, tau_vaso, k_inotropy_pulm).
+        P_set и P_pa_set задаются только в physiology.yaml.
         """
 
         # =================================================================
@@ -129,7 +133,7 @@ class Baroreflex(OrganModel):
         self.k_vasomotor = _check_range(
             "k_vasomotor", k_vasomotor,
             self._K_VASOMOTOR_MIN, self._K_VASOMOTOR_MAX,
-            "1/(мм рт.ст.), типично 0.015. "
+            "1/(мм рт.ст.). "
             "R_sys_scale_target = 1 − k_vasomotor·ΔP."
         )
         self.tau_vaso = _check_range(
@@ -138,12 +142,20 @@ class Baroreflex(OrganModel):
             "с, типично 10.0 (медленная вазомоторная ветвь)."
         )
 
-        # --- Пульмональный инотропный коэффициент (без изменений) ---
+        # --- Пульмональный инотропный коэффициент ---
         self.k_inotropy_pulm = _check_range(
             "k_inotropy_pulm", k_inotropy_pulm,
             self._K_INOTROPY_MIN, self._K_INOTROPY_MAX,
             "безразмерный, типично 0.3–1.0 — пульмональный "
             "барорефлекс на ПЖ."
+        )
+
+        # --- Опорное P_pa для пульмонального барорефлекса ---
+        self.P_pa_set = _check_range(
+            "P_pa_set", P_pa_set,
+            self._P_PA_SET_MIN, self._P_PA_SET_MAX,
+            "мм рт.ст., типично 15 — «норма» P_pa, от которой "
+            "считается pulm_excess = max(P_pa / P_pa_set − 1, 0)."
         )
 
         self._current_outputs = {}
@@ -173,10 +185,9 @@ class Baroreflex(OrganModel):
         vaso  = float(np.clip(vaso_raw,  self._BARO_SYS_MIN, self._BARO_SYS_MAX))
 
         # --- Входы ---
-        P_sa = float(inputs.get('P_sa', 90.0))
-        P_pa = float(inputs.get('P_pa', 15.0))
-        P_pa_set = float(inputs.get('P_pa_set', 15.0))
-        R_rem = float(inputs.get('R_remodel', 1.0))
+        P_sa  = float(inputs['P_sa'])
+        P_pa  = float(inputs['P_pa'])
+        R_rem = float(inputs['R_remodel'])
 
         # --- Абсолютное отклонение давления ---
         dP = P_sa - self.P_set
@@ -212,7 +223,7 @@ class Baroreflex(OrganModel):
         dVaso   = (vaso_target  - vaso)  / self.tau_vaso
 
         # --- Пульмональная бароактивация (ПЖ) — без изменений ---
-        pulm_excess = max(P_pa / max(P_pa_set, 1e-6) - 1.0, 0.0)
+        pulm_excess = max(P_pa / max(self.P_pa_set, 1e-6) - 1.0, 0.0)
         baro_pulm = 1.0 + self.k_inotropy_pulm * pulm_excess
 
         # --- Диагностика ---

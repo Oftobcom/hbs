@@ -7,31 +7,26 @@ heart:
   hr: 70
   hr_min: 30
   hr_max: 130
-
   # --- Эластанс предсердий ---
   E_max_la: 0.25
   E_min_la: 0.10
   E_max_ra: 0.20
   E_min_ra: 0.06
-
   # --- Эластанс желудочков ---
   E_max_lv: 3.5
   E_min_lv: 0.03
   E_max_rv: 0.8
   E_min_rv: 0.03
-
   # --- Мёртвые объёмы (unstressed) ---
   V0_la: 10
   V0_lv: 10
   V0_ra: 5
   V0_rv: 10
-
   # --- Конечно-диастолические объёмы (начальное условие) ---
   EDV_la: 80.0
   EDV_lv: 120.0
   EDV_ra: 80.0
   EDV_rv: 120.0
-
   # --- Сопротивления клапанов ---
   R_mitral: 0.03
   R_aortic: 0.10
@@ -39,9 +34,16 @@ heart:
   R_pulmonary: 0.05
   R_venous_sys:  0.04   # системный венозный возврат (SVC/IVC → RA)
   R_venous_pulm: 0.02   # пульмональный (PV → LA), низкорезистивный
-
   # --- Клапанная кинетика ---
   k_valve: 9.0
+  # --- Гипертрофия ПЖ (heart.py) ---
+  rv_hypertrophy_sensitivity: 1.5
+  # --- Асимметрия симпатика/парасимпатика для E_max ---
+  k_lv_sympathetic: 1.0
+  k_lv_parasympathetic: 0.3
+  k_rv_sympathetic: 1.0
+  k_rv_parasympathetic: 0.2
+  k_atria_inotropy: 0.2
 
 lungs:
   R1: 0.06
@@ -62,6 +64,8 @@ lungs:
   pressure_sensitivity: 0.04
   R_remodel_max: 5.0
   tau_remodel: 200.0
+  k_rarefaction: 0.5    # безразмерный, типично 0.5 — дополнительный
+                        # рост PVR от запустевания капилляров при фиброзе
 
 baroreflex:
   P_set: 80.0
@@ -73,6 +77,7 @@ baroreflex:
   tau_inotropy: 4.0
   tau_vaso: 10.0
   k_inotropy_pulm: 0.5
+  P_pa_set: 15.0
 
 blood:
   V0: 5800.0
@@ -93,6 +98,7 @@ peripheral:
   O2_norm: 0.15
   k_O2_autoreg: 1.0
   R_min_factor: 0.45
+  R_myogenic_min_factor: 0.60
   tau_autoreg: 2.0
   k_P_myogenic: 0.002
   P_sa_norm: 90.0
@@ -198,6 +204,7 @@ systemic:
   P_pv0: 12.0
   SYS_VEN_FRACTION: 0.63
   C_sys_ven_eff: 550.0
+  R_sys_peripheral: null   # null → auto-calibrate из target_MAP/target_CO
   VO2_rest: 1.9          # мл/с — сердце + печень + почки + ЖКТ
   RQ: 0.8                # дыхательный коэффициент
   occlusion_factor: 1.0  # 1.0 = норма (для сценариев инсульта)
@@ -225,3 +232,16 @@ jugular_vein:
   C_O2_init: 0.12        # мл/мл, SjvO2 ≈ 60%
   C_CO2_init: 0.56
   Hb: 15.0
+
+diagnostics:
+  goal1:
+    R_remodel_min: 4.0
+    P_pa_min: 40.0
+    baro_activation_rv_min: 1.5
+  physiological:
+    P_sa_range: [40.0, 180.0]
+    P_pa_range: [5.0, 80.0]
+    Q_aortic_min: 25.0
+    Qp_Qs_range: [0.5, 5.0]
+    EDV_LV_min: 50.0
+    mass_balance_tol: 2.0

@@ -9,8 +9,8 @@ debug_whole_body.py — изолированная диагностика WholeB
     python debug_whole_body.py --variant vsd_r5            # по умолчанию
     python debug_whole_body.py --variant healthy
     python debug_whole_body.py --variant vsd_r1
-    python debug_whole_body.py --variant eisenmenger
-    python debug_whole_body.py --variant all
+    python debug_whole_body.py --variant eisenmenger_comp
+    python debug_whole_body.py --variant eisenmenger_decomp
 
 Логирование:
     По умолчанию весь вывод дублируется в
@@ -19,11 +19,12 @@ debug_whole_body.py — изолированная диагностика WholeB
     Свой путь:      --log path/to/file.log
     Без timestamp:  --log-flat   (имя без даты/времени, перезаписывается)
 
-Проверяет сценарии:
-    1. healthy       — R_vsd = inf (нет ДМЖП)
-    2. vsd_r5        — R_vsd = 5.0 (малый ДМЖП, как в Stage 1)
-    3. vsd_r1        — R_vsd = 1.0 (большой ДМЖП)
-    4. eisenmenger   — R_remodel_max=10, R_vsd=0.4
+Доступные алиасы (из aliases в config/patient_*.yaml):
+    healthy              — R_vsd = inf (нет ДМЖП)
+    vsd_r5               — R_vsd = 5.0 (малый ДМЖП)
+    vsd_r1               — R_vsd = 1.0 (большой ДМЖП)
+    eisenmenger_comp     — R_remodel_max=5.5, R_vsd=0.4
+    eisenmenger_decomp   — R_remodel_max=10.0, R_vsd=0.3
 
 Для каждого сценария печатает:
     • Сходимость y0 после калибровки
@@ -41,6 +42,7 @@ import time
 import argparse
 from pathlib import Path
 from datetime import datetime
+import warnings
 
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -60,6 +62,20 @@ from physio_config import load_all_patients, load_physiology
 from sim_builder import build_model_from_params, extract_simulation_config
 
 _PHYS = load_physiology()
+_DIAG = _PHYS.get('diagnostics', {})
+_G1   = _DIAG.get('goal1', {})
+_PHYS_R = _DIAG.get('physiological', {})
+
+_G1_R_REM_MIN  = float(_G1.get('R_remodel_min', 4.0))
+_G1_P_PA_MIN   = float(_G1.get('P_pa_min', 40.0))
+_G1_BARO_MIN   = float(_G1.get('baro_activation_rv_min', 1.5))
+
+_P_SA_LO, _P_SA_HI = _PHYS_R.get('P_sa_range', [40.0, 180.0])
+_P_PA_LO, _P_PA_HI = _PHYS_R.get('P_pa_range', [5.0, 80.0])
+_QA_MIN            = float(_PHYS_R.get('Q_aortic_min', 25.0))
+_QPQ_S_LO, _QPQ_S_HI = _PHYS_R.get('Qp_Qs_range', [0.5, 5.0])
+_EDV_LV_MIN        = float(_PHYS_R.get('EDV_LV_min', 50.0))
+_BAL_TOL           = float(_PHYS_R.get('mass_balance_tol', 2.0))
 _ALL_PATIENTS = load_all_patients(base_physiology=_PHYS)
 
 SCENARIOS = {}
@@ -79,14 +95,15 @@ if not SCENARIOS:
     )
 
 # --- Проверка, что все ожидаемые варианты доступны ---
-_EXPECTED_VARIANTS = ('healthy', 'vsd_r5', 'vsd_r1', 'eisenmenger_comp', 'eisenmenger_decomp')
+_EXPECTED_VARIANTS = ('healthy', 'vsd_r5', 'vsd_r1',
+                      'eisenmenger_comp', 'eisenmenger_decomp')
 _missing_variants = [v for v in _EXPECTED_VARIANTS if v not in SCENARIOS]
 if _missing_variants:
-    raise RuntimeError(
-        f"debug_whole_body: отсутствуют варианты {_missing_variants}. "
-        f"Проверьте aliases в config/patient_*.yaml. "
-        f"Доступные сейчас: {sorted(SCENARIOS.keys())}"
-    )        
+    warnings.warn(
+        f"debug_whole_body: отсутствуют ожидаемые алиасы "
+        f"{_missing_variants}. Доступные: {sorted(SCENARIOS.keys())}",
+        RuntimeWarning,
+    )      
 
 # =====================================================================
 # Tee-логгер: дублирование вывода в консоль и в файл
@@ -319,13 +336,16 @@ def _print_convergence(data: dict, label: str) -> None:
     print(f"\n--- {label}: CONVERGENCE WINDOWS ---")
     print(f"{'window':>14}  {'P_sa':>7}  {'P_pa':>7}  {'V_lv':>7}  {'V_rv':>7}  "
         f"{'HR':>5}  {'Qa':>7}  {'Qp':>7}  {'Q_vsd':>8}  {'R_rem':>7}")
-    t = data["t"]
-    for t_lo, t_hi in [(0, 150), (150, 300), (300, 450), (450, 600)]:
-        m = (t >= t_lo) & (t <= t_hi)
-        if not np.any(m):
-            continue
 
-        print(f"[{t_lo:4d}-{t_hi:4d}]  "
+    t = data["t"]
+    t_end = float(t[-1])
+    n_windows = 4
+    step = t_end / n_windows
+    for i in range(n_windows):
+        t_lo = i * step
+        t_hi = (i + 1) * step
+        m = (t >= t_lo) & (t <= t_hi)
+        print(f"[{t_lo:6.0f}-{t_hi:6.0f}]  "
             f"{_window_mean(data, 'P_sa', m):7.2f}  "
             f"{_window_mean(data, 'P_pa', m):7.2f}  "
             f"{_window_mean(data, 'V_lv', m):7.1f}  "
@@ -394,12 +414,12 @@ def _print_goal1_check(data: dict, label: str, model=None, sol=None) -> None:
         mark = "✓" if cond else "✗"
         print(f"  [{mark}] {name:28s} = {value:9.3f}   (критерий: {target})")
 
-    check(R_rem > 4.0,
+    check(R_rem > _G1_R_REM_MIN,
           "R_remodel (steady)",
-          R_rem, "> 4.0")
-    check(P_pa > 40.0,
+          R_rem, f"> {_G1_R_REM_MIN}")
+    check(P_pa > _G1_P_PA_MIN,
           "P_pa (steady, мм рт.ст.)",
-          P_pa, "> 40")
+          P_pa, f"> {_G1_P_PA_MIN}")
     check(dP < 0.0,
           "P_lv_max − P_rv_max (сист.)",
           dP, "< 0")
@@ -413,9 +433,13 @@ def _print_goal1_check(data: dict, label: str, model=None, sol=None) -> None:
     # (лёгочная гипертензия) сигнал > 1.0, при норме ≈ 1.0.
     baro_rv = _window_mean(data, "baro_activation_rv", win)
     if np.isfinite(baro_rv):
-        check(baro_rv > 1.5,
+        check(baro_rv > _G1_BARO_MIN,
               "baro_activation_rv",
-              baro_rv, "> 1.5")    
+              baro_rv, f"> {_G1_BARO_MIN}")
+    else:
+        print(f"  [—] {'baro_activation_rv':28s} = "
+              f"{'N/A':>9s}   (ключ отсутствует в outputs "
+              f"или содержит NaN)")  
 
     # --- Проверка периодичности: y_end vs y(t_end − T) ---
     if sol is not None and len(sol.t) >= 2:
@@ -432,20 +456,22 @@ def _print_goal1_check(data: dict, label: str, model=None, sol=None) -> None:
     # --- Итоговый вердикт ---
     # baro_activation_rv проверяем только при активном ремоделировании,
     # т.к. без лёгочной гипертензии P_pa ≈ P_pa_set и сигнал ≡ 1.0
-    if R_rem > 2.0:
-        all_ok = (R_rem > 4.0 and P_pa > 40.0 and dP < 0.0
-                  and Q_vsd < 0.0 and baro_rv > 1.5)
+    if R_rem <= 2.0:
+        all_ok = False
     else:
-        all_ok = (R_rem > 4.0 and P_pa > 40.0 and dP < 0.0
-                  and Q_vsd < 0.0)
+        all_ok = (R_rem  > _G1_R_REM_MIN
+                  and P_pa   > _G1_P_PA_MIN
+                  and dP     < 0.0
+                  and Q_vsd  < 0.0
+                  and baro_rv > _G1_BARO_MIN)
+
     print()
     if all_ok:
         print(f"  ►►► ЦЕЛЬ 1 ДОСТИГНУТА: устойчивый R→L шунт ◄◄◄")
-    elif R_rem > 4.0 and P_pa > 40.0 and dP < 30.0:
+    elif R_rem > _G1_R_REM_MIN and P_pa > _G1_P_PA_MIN and dP < 30.0:
         print(f"  ► Близко: PVR достаточный, но градиент ещё не перевёрнут")
-    elif R_rem < 4.0:
-        print(f"  ► Ремоделирование не дошло — проверьте P_pa_threshold/"
-              f"pressure_sensitivity/tau_remodel")
+    elif R_rem < _G1_R_REM_MIN:
+        print(f"  ► Ремоделирование не дошло — ...")
     else:
         print(f"  ► Цель 1 пока не достигнута")
 
@@ -598,7 +624,7 @@ def _print_steady(data: dict, label: str, model=None, sol=None) -> None:
     print(f"  Q_tricuspid   = {Q_tricuspid:7.2f} мл/с")
     print(f"  LV: Q_mitral - Q_aortic - Q_vsd = {balance_lv:+.2f} мл/с")
     print(f"  RV: Q_tricuspid + Q_vsd - Qp    = {balance_rv:+.2f} мл/с")
-    if abs(balance_lv) > 2.0 or abs(balance_rv) > 2.0:
+    if abs(balance_lv) > _BAL_TOL or abs(balance_rv) > _BAL_TOL:
         print(f"  ⚠ Mass balance violated → система НЕ в стационаре")
 
     # Дополнительная диагностика: мгновенный срез цикла с фиксированным y_end
@@ -624,22 +650,22 @@ def _print_steady(data: dict, label: str, model=None, sol=None) -> None:
 
     # --- Физиологичность ---
     print()
-    warnings = []
-    if not (40.0 < P_sa < 180.0):
-        warnings.append(f"P_sa={P_sa:.1f} вне [40, 180]")
-    if not (5.0 < P_pa < 80.0):
-        warnings.append(f"P_pa={P_pa:.1f} вне [5, 80]")
-    if Qa < 25.0:
-        warnings.append(f"Q_aortic={Qa:.1f} < 25 (системный коллапс)")
-    if Qp_Qs > 5.0:
-        warnings.append(f"Qp/Qs={Qp_Qs:.2f} > 5 (экстремальный шунт)")
-    if Qp_Qs < 0.5:
-        warnings.append(f"Qp/Qs={Qp_Qs:.2f} < 0.5 (нефизиологичная инверсия)")
-    if EDV_LV < 50.0:
-        warnings.append(f"EDV_LV={EDV_LV:.1f} < 50 (недонаполнение ЛЖ)")
-    if warnings:
+    issues = []
+    if not (_P_SA_LO < P_sa < _P_SA_HI):
+        issues.append(f"P_sa={P_sa:.1f} вне [{_P_SA_LO}, {_P_SA_HI}]")
+    if not (_P_PA_LO < P_pa < _P_PA_HI):
+        issues.append(f"P_pa={P_pa:.1f} вне [{_P_PA_LO}, {_P_PA_HI}]")
+    if Qa < _QA_MIN:
+        issues.append(f"Q_aortic={Qa:.1f} < {_QA_MIN} (системный коллапс)")
+    if Qp_Qs > _QPQ_S_HI:
+        issues.append(f"Qp/Qs={Qp_Qs:.2f} > {_QPQ_S_HI} (экстремальный шунт)")
+    if Qp_Qs < _QPQ_S_LO:
+        issues.append(f"Qp/Qs={Qp_Qs:.2f} < {_QPQ_S_LO} (нефизиологичная инверсия)")
+    if EDV_LV < _EDV_LV_MIN:
+        issues.append(f"EDV_LV={EDV_LV:.1f} < {_EDV_LV_MIN} (недонаполнение ЛЖ)")
+    if issues:
         print("  ⚠ ФИЗИОЛОГИЧЕСКИЕ ПРЕДУПРЕЖДЕНИЯ:")
-        for w in warnings:
+        for w in issues:
             print(f"     - {w}")
     else:
         print("  ✓ Все физиологические метрики в норме")
@@ -839,8 +865,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--variant", "-V", type=str, default="vsd_r5",
-        help="Сценарий: healthy | vsd_r5 | vsd_r1 | eisenmenger | all "
-             "(default: vsd_r5)",
+        help="Алиас сценария из config/patient_*.yaml или 'all'. "
+             "Доступные см. в начале лога. (default: vsd_r5)",
     )
     parser.add_argument(
         "--log", type=str, default=None,

@@ -41,27 +41,37 @@ class Heart4Chambers(OrganModel):
     _BARO_MIN,      _BARO_MAX      = 0.5, 2.0
 
     def __init__(self,
-                 hr=70,
-                 E_max_la=0.25, E_min_la=0.09,
-                 E_max_ra=0.20, E_min_ra=0.05,
-                 E_max_lv=3.5,  E_min_lv=0.03,
-                 E_max_rv=0.8,  E_min_rv=0.02,
-                 V0_la=10, V0_lv=10, V0_ra=5, V0_rv=10,
-                 EDV_la=80.0, EDV_lv=120.0, EDV_ra=40.0, EDV_rv=120.0,
-                 R_mitral=0.02, R_aortic=0.10,
-                 R_tricuspid=0.01, R_pulmonary=0.05,
-                 R_venous_sys=0.04,
-                 R_venous_pulm=0.03,
-                 R_vsd=np.inf,
-                 hr_min=30, hr_max=130,
-                 k_valve=9.0,
-                 rv_hypertrophy_sensitivity: float = 1.5,
+                 # --- ЧСС ---
+                 hr: float,
+                 hr_min: float,
+                 hr_max: float,
+                 # --- Эластанс предсердий ---
+                 E_max_la: float, E_min_la: float,
+                 E_max_ra: float, E_min_ra: float,
+                 # --- Эластанс желудочков ---
+                 E_max_lv: float, E_min_lv: float,
+                 E_max_rv: float, E_min_rv: float,
+                 # --- V0 (unstressed volume) ---
+                 V0_la: float, V0_lv: float, V0_ra: float, V0_rv: float,
+                 # --- EDV (начальное состояние) ---
+                 EDV_la: float, EDV_lv: float,
+                 EDV_ra: float, EDV_rv: float,
+                 # --- Клапанные сопротивления ---
+                 R_mitral: float, R_aortic: float,
+                 R_tricuspid: float, R_pulmonary: float,
+                 R_venous_sys: float, R_venous_pulm: float,
+                 # --- Клапанная кинетика ---
+                 k_valve: float,
+                 # --- VSD ---
+                 R_vsd: float,   # > 0 (шунт) или np.inf (нет шунта)
+                 # --- Гипертрофия ПЖ ---
+                 rv_hypertrophy_sensitivity: float,
                  # --- Асимметрия симпатика/парасимпатика для E_max ---
-                 k_lv_sympathetic: float = 1.0,
-                 k_lv_parasympathetic: float = 0.3,
-                 k_rv_sympathetic: float = 1.0,
-                 k_rv_parasympathetic: float = 0.2,
-                 k_atria_inotropy: float = 0.2):
+                 k_lv_sympathetic: float,
+                 k_lv_parasympathetic: float,
+                 k_rv_sympathetic: float,
+                 k_rv_parasympathetic: float,
+                 k_atria_inotropy: float):
 
         # =================================================================
         # Валидация конфигурации — fail-fast при инициализации.
@@ -211,9 +221,16 @@ class Heart4Chambers(OrganModel):
         )
 
         # --- VSD (двунаправленный резистор) ---
-        # Может быть np.inf (нет шунта), положительным числом, или None.
-        # Негативные/нулевые значения физически невозможны.
-        if R_vsd is None or (isinstance(R_vsd, float) and np.isinf(R_vsd)):
+        # R_vsd: > 0 (есть шунт) или np.inf (нет шунта).
+        # Приходит из patient.vsd_resistance через sim_builder.
+        # Негативные/нулевые/None значения физически невозможны.
+        if R_vsd is None:
+            raise ValueError(
+                "Heart4Chambers: R_vsd=None недопустим. "
+                "Для отсутствия шунта передайте np.inf "
+                "(в YAML: vsd_resistance: .inf)."
+            )
+        if (isinstance(R_vsd, float) and np.isinf(R_vsd)):
             self.R_vsd = np.inf
         else:
             r_vsd = float(R_vsd)

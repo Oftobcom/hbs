@@ -200,6 +200,9 @@ def simulate_scenario(label: str, params: dict,
         if "calibrate:" in str(w.message):
             print(f"  [PID {os.getpid()}] [{label}] "
                   f"⚠ CALIBRATION: {w.message}", flush=True)
+            print(f"  [PID {os.getpid()}] [{label}] "
+                  f"⚠ y0 NOT relaxed — CHECK ниже отражает analytic y0, "
+                  f"не физиологическое равновесие.", flush=True)
 
     # --- Диагностика начального состояния ---
     cycle = model.cycle_averaged_flows(0.0, y0, n_pts=24)
@@ -213,6 +216,7 @@ def simulate_scenario(label: str, params: dict,
           f"Q_vsd={cycle['Q_vsd_cycle_mean']:+.1f} "
           f"balance={cycle['mass_balance_error']:+.2f} "
           f"SaO2={cycle['SaO2_cycle_mean']*100:.1f}% "
+          f"R2L={cycle['shunt_fraction_R2L_mean']*100:.1f}% "
           f"baro_vaso={out0['baro_vasomotor']:.2f} "
           f"baro_ino={out0['baro_inotropy']:.2f} "
           f"suppress={out0['suppress']:.2f}", flush=True)

@@ -1,5 +1,4 @@
 # whole_body.py
-from pprint import pp
 import warnings
 
 import numpy as np
@@ -140,7 +139,6 @@ class WholeBodyModel:
     _C_SYS_ART_MIN, _C_SYS_ART_MAX = 0.1, 20.0
     _C_PUL_VEN_MIN, _C_PUL_VEN_MAX = 1.0, 100.0
     _C_SYS_VEN_MIN, _C_SYS_VEN_MAX = 10.0, 5000.0
-    _C_JUG_VEN_MIN, _C_JUG_VEN_MAX = 1.0, 200.0
 
     _P_SYS_MIN, _P_SYS_MAX = 0.0, 200.0
     _P_PV_MIN, _P_PV_MAX = 0.0, 100.0
@@ -167,36 +165,41 @@ class WholeBodyModel:
     })
 
     def __init__(self,
-        heart_params=None,
-        lungs_params=None,
-        liver_params=None,
-        kidney_params=None,
-        blood_params=None,
-        gitract_params=None,
-        brain_params=None,
-        baroreflex_params=None,
-        gas_exchange_params=None,
-        flow_dependent_lungs=False,
-        R_sys_peripheral=None,
-        target_MAP=85.0, target_CO=83.0,
-        C_sys_art=1.5, C_pul_ven=15.0,
-        P_sa0=85.0, P_sv0=6.0, P_pv0=12.0,
-        SYS_VEN_FRACTION=0.63,
-        C_sys_ven_eff=550.0,
-        fluid_intake_rate=0.015,
-        insensible_loss_rate=0.0,
-        peripheral_params=None,
-        jugular_params=None,
-        C_jug_ven_eff=20.0,
-        P_jv0=6.0,
-        R_jv_out=0.5,
-        JUG_VEN_FRACTION=0.05,
-        VO2_rest: float = 1.9,
-        RQ: float = 0.8,
-        occlusion_factor: float = 1.0,
-        substance_names=None,
+        # --- Organ configs (11) ---
+        heart_params: dict,
+        lungs_params: dict,
+        liver_params: dict,
+        kidney_params: dict,
+        blood_params: dict,
+        gitract_params: dict,
+        brain_params: dict,
+        baroreflex_params: dict,
+        gas_exchange_params: dict,
+        peripheral_params: dict,
+        jugular_params: dict,
+        # --- Systemic vascular (10) ---
+        target_MAP: float,
+        target_CO: float,
+        C_sys_art: float,
+        C_pul_ven: float,
+        P_sa0: float,
+        P_sv0: float,
+        P_pv0: float,
+        SYS_VEN_FRACTION: float,
+        C_sys_ven_eff: float,
+        R_sys_peripheral: float,
+        # --- Fluid balance (2) ---
+        fluid_intake_rate: float,
+        insensible_loss_rate: float,
+        # --- Metabolism (3) ---
+        VO2_rest: float,
+        RQ: float,
+        occlusion_factor: float,
+        # --- Substances (1) ---
+        substance_names: list[str],
         *,
-        method):
+        method: str,
+    ):
 
         # =================================================================
         # Валидация конфигурации — fail-fast при инициализации.
@@ -230,11 +233,6 @@ class WholeBodyModel:
             self._C_SYS_VEN_MIN, self._C_SYS_VEN_MAX,
             "мл/мм рт.ст., типично 550."
         )
-        C_jug_ven_eff = _check_range(
-            "C_jug_ven_eff", C_jug_ven_eff,
-            self._C_JUG_VEN_MIN, self._C_JUG_VEN_MAX,
-            "мл/мм рт.ст., типично 20."
-        )
 
         # --- Начальные давления ---
         P_sa0 = _check_range(
@@ -250,19 +248,10 @@ class WholeBodyModel:
             "мм рт.ст."
         )
 
-        # --- Доли объёма (строго внутри (0, 1)) ---
         SYS_VEN_FRACTION = _check_fraction(
-            "SYS_VEN_FRACTION", SYS_VEN_FRACTION, "типично 0.58."
+            "SYS_VEN_FRACTION", SYS_VEN_FRACTION,
+            "типично 0.63; строго (0, 1)."
         )
-        JUG_VEN_FRACTION = _check_fraction(
-            "JUG_VEN_FRACTION", JUG_VEN_FRACTION, "типично 0.05."
-        )
-        if SYS_VEN_FRACTION + JUG_VEN_FRACTION >= 1.0:
-            raise ValueError(
-                f"WholeBodyModel: SYS_VEN_FRACTION={SYS_VEN_FRACTION} + "
-                f"JUG_VEN_FRACTION={JUG_VEN_FRACTION} ≥ 1.0 — "
-                f"венозные компартменты не могут занимать ≥ 100% V_blood."
-            )
 
         # --- Жидкостный баланс ---
         fluid_intake_rate = _check_range(
@@ -301,34 +290,6 @@ class WholeBodyModel:
             )
         self.method = method
 
-        # --- Яремная вена: доп. параметры (не в jugular_params) ---
-        P_jv0 = _check_range(
-            "P_jv0", P_jv0, self._P_SYS_MIN, self._P_SYS_MAX,
-            "мм рт.ст., типично 6."
-        )
-        R_jv_out = _check_range(
-            "R_jv_out", R_jv_out, 1e-3, 100.0,
-            "мм рт.ст.·с/мл, типично 0.5."
-        )
-
-        # --- Периферическое сопротивление (если задано явно) ---
-        if R_sys_peripheral is not None:
-            R_sys_peripheral = _check_range(
-                "R_sys_peripheral", R_sys_peripheral,
-                self._R_SYS_PERIPH_MIN, self._R_SYS_PERIPH_MAX,
-                "мм рт.ст.·с/мл, типично 2–6."
-            )
-
-        # =================================================================
-        # substance_names — критично для структуры BloodPool
-        # =================================================================
-        if substance_names is None:
-            if blood_params and 'initial_concentrations' in blood_params:
-                substance_names = list(blood_params['initial_concentrations'].keys())
-            else:
-                substance_names = ['tox', 'bilirubin', 'ammonia', 'albumin',
-                                   'glucose', 'oxygen', 'co2', 'lactate']
-
         if not isinstance(substance_names, (list, tuple)):
             raise ValueError(
                 f"WholeBodyModel: substance_names должен быть list/tuple, "
@@ -357,86 +318,68 @@ class WholeBodyModel:
         # =================================================================
 
         # --- BloodPool initial state ---
-        blood_init = {'V0': 5800.0}
-        if blood_params:
-            blood_init.update(blood_params)
-
+        if 'V0' not in blood_params:
+            raise ValueError(
+                "WholeBodyModel: blood_params['V0'] обязателен. "
+                "Дефолт удалён; добавьте blood.V0 в physiology.yaml "
+                "(сейчас уже есть)."
+            )
         V0_blood = _check_range(
-            "blood.V0", blood_init['V0'],
+            "blood.V0", blood_params['V0'],
             self._BLOOD_V0_MIN, self._BLOOD_V0_MAX,
             "мл, типично 5000–6500."
         )
-        blood_init['V0'] = V0_blood
 
-        initial_concentrations = dict(blood_init.get('initial_concentrations', {}))
-        DEFAULT_CONC = {
-            'tox': 0.0, 'bilirubin': 0.5, 'ammonia': 0.3,
-            'albumin': 4.5, 'glucose': 5.0, 'oxygen': 0.15,
-            'co2': 0.52, 'lactate': 0.10,
-        }
-        for name in substance_names:
-            if name not in initial_concentrations:
-                initial_concentrations[name] = DEFAULT_CONC.get(name, 0.0)
+        if 'initial_concentrations' not in blood_params:
+            raise ValueError(
+                "WholeBodyModel: blood_params['initial_concentrations'] "
+                "обязателен."
+            )
+        initial_concentrations = dict(blood_params['initial_concentrations'])
+
+        missing = [s for s in substance_names
+                   if s not in initial_concentrations]
+        if missing:
+            raise ValueError(
+                f"WholeBodyModel: blood.initial_concentrations "
+                f"не содержит {missing}. "
+                f"Все вещества из substance_names должны быть заданы "
+                f"в YAML — DEFAULT_CONC удалён."
+            )
 
         # --- Heart ---
-        heart_params = dict(heart_params or {})
-        if heart_params.get('R_vsd') is None:
-            heart_params['R_vsd'] = np.inf
         self.heart = Heart4Chambers(**heart_params)
 
         # --- Lungs ---
-        lungs_params = dict(lungs_params or {})
-        lungs_params['flow_dependent_resistance'] = bool(flow_dependent_lungs)
         self.lungs = Lungs2Chamber(**lungs_params)
 
         # --- Liver, Kidney, Blood, GITract, Brain ---
-        self.liver = Liver(**(liver_params or {}))
-        self.kidney = KidneyHemodynamic(**(kidney_params or {}))
+        self.liver   = Liver(**liver_params)
+        self.kidney  = KidneyHemodynamic(**kidney_params)
+        self.gitract = GITract(**gitract_params)
+        self.brain   = Brain(**brain_params)
         self.blood = BloodPool(
             substance_names=self.substance_names,
-            V0=blood_init['V0'],
+            V0=V0_blood,
             initial_concentrations=initial_concentrations,
         )
-        self.gitract = GITract(**(gitract_params or {}))
-        self.brain = Brain(**(brain_params or {}))
-
-        # --- Периферическое сопротивление: автокалибровка ---
-        R_renal_est = 4.5
-        R_brain_est = 7.0
-        R_ha_est = 17.0
-        R_gitract_est = 4.5
-
-        if R_sys_peripheral is None:
-            R_total_target = target_MAP / target_CO
-            sum_cond_other = (
-                1/R_renal_est + 1/R_brain_est + 1/R_ha_est + 1/R_gitract_est
-            )
-            cond_per_needed = 1/R_total_target - sum_cond_other
-            cond_per_needed = max(cond_per_needed, 0.1)
-            R_sys_peripheral = 1.0 / cond_per_needed
-
-            # Проверка: полученное значение физиологично?
-            if not (self._R_SYS_PERIPH_MIN <= R_sys_peripheral
-                    <= self._R_SYS_PERIPH_MAX):
-                raise ValueError(
-                    f"WholeBodyModel: автокалибровка R_sys_peripheral дала "
-                    f"{R_sys_peripheral:.3f} вне "
-                    f"[{self._R_SYS_PERIPH_MIN}, {self._R_SYS_PERIPH_MAX}]. "
-                    f"Проверьте target_MAP={target_MAP}, target_CO={target_CO}."
-                )
+        
+        # --- Периферическое сопротивление ---
+        R_sys_peripheral = _check_range(
+            "R_sys_peripheral", R_sys_peripheral,
+            self._R_SYS_PERIPH_MIN, self._R_SYS_PERIPH_MAX,
+            "мм рт.ст.·с/мл, типично 2–6."
+        )
 
         # --- Периферические ткани ---
-        pp = dict(peripheral_params or {})
-        if pp.get('R_base') is None:
-            pp.pop('R_base', None)
-        pp.setdefault('R_base', R_sys_peripheral)
-        self.peripheral = PeripheralTissues(**pp)
+        # R_base разрешён в sim_builder (null → R_sys_peripheral),
+        # здесь peripheral_params приходит уже с числовым R_base.
+        self.peripheral = PeripheralTissues(**peripheral_params)
 
         self.target_MAP = target_MAP
         self.target_CO = target_CO
 
         # --- Барорефлекс ---
-        baroreflex_params = baroreflex_params or {}
         self.baroreflex = Baroreflex(**baroreflex_params)
         # --- Валидация контракта Baroreflex — fail-fast ---
         if self.baroreflex.get_state_size() < 1:
@@ -464,19 +407,13 @@ class WholeBodyModel:
         self.pul_ven = WindkesselVessel(C=C_pul_ven, P0=P_pv0, mode='P')
 
         # --- Системные вены (V-mode) ---
-        V_sv0 = SYS_VEN_FRACTION * blood_init['V0']
+        V_sv0 = SYS_VEN_FRACTION * V0_blood
         self.sys_ven = WindkesselVessel(
             C=C_sys_ven_eff, P0=P_sv0, mode='V', V0=V_sv0,
         )
 
         # --- Яремная вена ---
-        V_jv0 = JUG_VEN_FRACTION * blood_init['V0']
-        jp = dict(jugular_params or {})
-        jp.setdefault('C', C_jug_ven_eff)
-        jp.setdefault('P0', P_jv0)
-        jp.setdefault('V0', V_jv0)
-        jp.setdefault('R_out', R_jv_out)
-        self.jugular_vein = JugularVein(**jp)
+        self.jugular_vein = JugularVein(**jugular_params)
 
         self.VO2_rest = VO2_rest
         self.RQ = RQ
@@ -487,7 +424,7 @@ class WholeBodyModel:
         self.insensible_loss_rate = insensible_loss_rate
 
         # --- Газообмен ---
-        ge = dict(gas_exchange_params or {})
+        ge = dict(gas_exchange_params)
         ge.pop('VO2_base', None)     # legacy-ключи, не поддерживаются
         ge.pop('VCO2_base', None)
         ge.pop('Q_norm', None)
@@ -543,6 +480,40 @@ class WholeBodyModel:
 
         self._negative_vol_warned = False
         self._low_vol_warned = False
+
+
+    @classmethod
+    def auto_calibrate_R_sys_peripheral(cls,
+                                        target_MAP: float,
+                                        target_CO: float) -> float:
+        """
+        Авто-калибровка R_sys_peripheral из target_MAP и target_CO.
+
+        Оценки сопротивлений органов заданы как константы — их замена
+        требует калибровки, а не конфигурации. Если нужен полный
+        контроль, задайте systemic.R_sys_peripheral в YAML явно
+        (null → этот метод).
+        """
+        _R_RENAL_EST   = 4.5
+        _R_BRAIN_EST   = 7.0
+        _R_HA_EST      = 17.0
+        _R_GITRACT_EST = 4.5
+
+        R_total_target = target_MAP / target_CO
+        sum_cond_other = (1/_R_RENAL_EST + 1/_R_BRAIN_EST
+                          + 1/_R_HA_EST + 1/_R_GITRACT_EST)
+        cond_per_needed = max(1/R_total_target - sum_cond_other, 0.1)
+        R = 1.0 / cond_per_needed
+
+        if not (cls._R_SYS_PERIPH_MIN <= R <= cls._R_SYS_PERIPH_MAX):
+            raise ValueError(
+                f"WholeBodyModel.auto_calibrate_R_sys_peripheral: "
+                f"R={R:.3f} вне [{cls._R_SYS_PERIPH_MIN}, "
+                f"{cls._R_SYS_PERIPH_MAX}]. Проверьте target_MAP="
+                f"{target_MAP}, target_CO={target_CO}."
+            )
+        return R
+
 
     # ------------------------------------------------------------------
     # Калибровка начального состояния
@@ -1203,6 +1174,7 @@ class WholeBodyModel:
                 'Qp_cycle_mean': nan, 'Qs_cycle_mean': nan,
                 'Q_vsd_cycle_mean': nan, 'Qp_Qs_cycle': nan,
                 'mass_balance_error': nan, 'SaO2_cycle_mean': nan,
+                'shunt_fraction_R2L_mean': nan,
             }
 
         if sol_cycle.t.size < 2 or not np.any(np.isfinite(sol_cycle.y)):
@@ -1213,10 +1185,11 @@ class WholeBodyModel:
                 'Qp_cycle_mean': nan, 'Qs_cycle_mean': nan,
                 'Q_vsd_cycle_mean': nan, 'Qp_Qs_cycle': nan,
                 'mass_balance_error': nan, 'SaO2_cycle_mean': nan,
+                'shunt_fraction_R2L_mean': nan,
             }
 
         # --- Сбор потоков и SaO2 на равномерной сетке ---
-        Qp, Qs, Qv, SaO2_vals = [], [], [], []
+        Qp, Qs, Qv, SaO2_vals, R2L_vals = [], [], [], [], []
         for i in range(sol_cycle.t.size):
             ti = float(sol_cycle.t[i])
             yi = sol_cycle.y[:, i]
@@ -1225,20 +1198,23 @@ class WholeBodyModel:
             Qs.append(float(out['Q_aortic']))
             Qv.append(float(out['Q_vsd']))
             SaO2_vals.append(float(out['SaO2']))
+            R2L_vals.append(float(out['shunt_fraction_R2L']))
 
         # --- Средние по равномерной сетке ≈ интегральные средние ---
-        Qp_m = float(np.mean(Qp))
-        Qs_m = float(np.mean(Qs))
-        Qv_m = float(np.mean(Qv))
+        Qp_m   = float(np.mean(Qp))
+        Qs_m   = float(np.mean(Qs))
+        Qv_m   = float(np.mean(Qv))
         SaO2_m = float(np.mean(SaO2_vals))
+        R2L_m  = float(np.mean(R2L_vals))
 
         return {
-            'Qp_cycle_mean':      Qp_m,
-            'Qs_cycle_mean':      Qs_m,
-            'Q_vsd_cycle_mean':   Qv_m,
-            'Qp_Qs_cycle':        Qp_m / max(Qs_m, 1e-6),
-            'mass_balance_error': Qp_m - Qs_m - Qv_m,
-            'SaO2_cycle_mean':    SaO2_m,
+            'Qp_cycle_mean':           Qp_m,
+            'Qs_cycle_mean':           Qs_m,
+            'Q_vsd_cycle_mean':        Qv_m,
+            'Qp_Qs_cycle':             Qp_m / max(Qs_m, 1e-6),
+            'mass_balance_error':      Qp_m - Qs_m - Qv_m,
+            'SaO2_cycle_mean':         SaO2_m,
+            'shunt_fraction_R2L_mean': R2L_m,
         }
 
     # ------------------------------------------------------------------

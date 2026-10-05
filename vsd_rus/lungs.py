@@ -3,6 +3,21 @@ import numpy as np
 from organ_base import OrganModel
 
 
+        # =================================================================
+        # Валидация конфигурации — fail-fast при инициализации.
+        # Эти параметры приходят из YAML и не меняются во время симуляции;
+        # ошибки в них должны ловиться один раз, а не в горячем пути RHS.
+        # =================================================================
+
+def _check_range(name, v, lo, hi, typical=""):
+    v = float(v)
+    if not np.isfinite(v) or not (lo <= v <= hi):
+        raise ValueError(
+            f"Lungs2Chamber: {name}={v} вне [{lo}, {hi}]. {typical}"
+        )
+    return v
+
+
 class Lungs2Chamber(OrganModel):
     """
     Модель лёгких с тремя механизмами изменения сопротивления:
@@ -42,39 +57,26 @@ class Lungs2Chamber(OrganModel):
     _R_REMODEL_MAX_LIMIT = 20.0
 
     def __init__(self,
-                 R1=0.06, R2=0.04,
-                 C1=3.0, C2=5.0,
+                 # --- Базовые сопротивления и комплаенсы ---
+                 R1: float, R2: float,
+                 C1: float, C2: float,
                  # --- Быстрая вазоконстрикция от потока ---
-                 flow_dependent_resistance=False,
-                 flow_sensitivity=0.15,
-                 Q_norm: float = 80.0,
-                 k_flow: float = 15.0,
+                 flow_dependent_resistance: bool,
+                 flow_sensitivity: float,
+                 Q_norm: float,
+                 k_flow: float,
                  # --- Passive recruitment / distension ---
-                 recruitment_enabled=True,
-                 P_recruit_50=20.0,        # мм рт. ст., давление полу-рекруитмента
-                 n_recruit=3.0,            # крутизна сигмоиды
-                 f_recruit_min=0.55,       # R при полном рекруитменте (55% от базового)
+                 recruitment_enabled: bool,
+                 P_recruit_50: float,
+                 n_recruit: float,
+                 f_recruit_min: float,
                  # --- Хроническое структурное ремоделирование от давления ---
-                 pressure_remodel=False,
-                 P_pa_threshold=25.0,      # мм рт. ст., порог запуска
-                 pressure_sensitivity=0.04,# прирост R_remodel на 1 мм рт. ст. превышения
-                 R_remodel_max=5.0,
-                 k_rarefaction: float = 0.5, 
-                 tau_remodel=200.0):       # с, время выхода на R_target
-
-        # =================================================================
-        # Валидация конфигурации — fail-fast при инициализации.
-        # Эти параметры приходят из YAML и не меняются во время симуляции;
-        # ошибки в них должны ловиться один раз, а не в горячем пути RHS.
-        # =================================================================
-
-        def _check_range(name, v, lo, hi, typical=""):
-            v = float(v)
-            if not np.isfinite(v) or not (lo <= v <= hi):
-                raise ValueError(
-                    f"Lungs2Chamber: {name}={v} вне [{lo}, {hi}]. {typical}"
-                )
-            return v
+                 pressure_remodel: bool,
+                 P_pa_threshold: float,
+                 pressure_sensitivity: float,
+                 R_remodel_max: float,
+                 k_rarefaction: float,
+                 tau_remodel: float):
 
         # --- k_flow (крутизна виртуального клапана) ---
         # Нижняя граница: δ=1/k_flow ≤ 1 мм рт.ст. — сглаживание не шире шкалы.
@@ -215,7 +217,7 @@ class Lungs2Chamber(OrganModel):
     # ------------------------------------------------------------------
     # 1b. Гладкий односторонний поток (виртуальный клапан)
     # ------------------------------------------------------------------
-    def _valve_flow(self, dP: float, R: float, P_operating: float = 15.0) -> float:
+    def _valve_flow(self, dP: float, R: float, P_operating) -> float:
         """
         Гладкий односторонний клапан.
 

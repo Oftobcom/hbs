@@ -49,6 +49,35 @@ _REQUIRED_SIMULATION_KEYS = (
 
 _REQUIRED_BLOOD_KEYS = ('V0', 'initial_concentrations')
 
+# В `check_yaml_keys.py`, перед основным циклом:
+
+# Параметры сигнатуры, которые приходят НЕ из physiology.yaml,
+# а из других источников (patient_*.yaml, sim_builder). Не считаем
+# их отсутствие в physiology.yaml ошибкой.
+_EXTERNAL_KEYS = {
+    'heart': {'R_vsd'},   # приходит из patient.vsd_resistance
+}
+
+def _check_required_in_yaml(section: str, cls, phys: dict) -> bool:
+    sig = inspect.signature(cls.__init__).parameters
+    required = {
+        name for name, p in sig.items()
+        if name != 'self'
+        and p.default is inspect.Parameter.empty
+        and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+    }
+    required -= _EXTERNAL_KEYS.get(section, set())
+    if not required:
+        return True   # нет required-параметров — нечего проверять, не шумим
+
+    missing = required - set(phys[section])
+    if missing:
+        print(f"  ✗ {section:15s}: в YAML нет required-ключей "
+              f"{sorted(missing)}")
+        return False
+    print(f"  ✓ {section:15s}: все required-ключи в YAML ({len(required)})")
+    return True
+
 def _check_meta_sections(phys: dict) -> bool:
     ok = True
     for section, required in (
@@ -68,6 +97,7 @@ def main() -> None:
     phys = load_physiology()
     failed = False
     for section, cls in _CHECKS:
+        # Forward: все ключи YAML известны конструктору
         allowed = set(inspect.signature(cls.__init__).parameters) - {'self'}
         unknown = set(phys[section]) - allowed
         if unknown:
@@ -75,6 +105,10 @@ def main() -> None:
             failed = True
         else:
             print(f"  ✓ {section:15s}: OK ({len(phys[section])} keys)")
+        # Reverse: все required-параметры конструктора есть в YAML
+        if not _check_required_in_yaml(section, cls, phys):
+            failed = True
+
     if not _check_meta_sections(phys):
         failed = True
     if failed:

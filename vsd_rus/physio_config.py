@@ -51,6 +51,7 @@ _REQUIRED_PHYSIOLOGY_SECTIONS = (
 _REQUIRED_SYSTEMIC_KEYS = (
     'target_MAP', 'target_CO', 'C_sys_art', 'C_pul_ven',
     'P_sa0', 'P_sv0', 'P_pv0', 'SYS_VEN_FRACTION', 'C_sys_ven_eff',
+    'R_sys_peripheral',                            # ← новый
     'VO2_rest', 'RQ', 'occlusion_factor',
     'fluid_intake_rate', 'insensible_loss_rate',
 )
@@ -85,6 +86,11 @@ def _validate_merged(cfg: dict, label: str) -> None:
             f"physio_config: [{label}].systemic — отсутствуют {missing}."
         )
 
+    R_sys = sys.get('R_sys_peripheral')
+    if R_sys is not None:
+        _check_finite_range(f"{label}.systemic.R_sys_peripheral",
+                            R_sys, 0.1, 100.0)
+
     # --- simulation ---
     sim = cfg['simulation']
     missing = [k for k in _REQUIRED_SIMULATION_KEYS if k not in sim]
@@ -108,7 +114,12 @@ def _validate_merged(cfg: dict, label: str) -> None:
             f"не входит в {sorted(_VALID_SOLVER_METHODS)}. "
             f"Задаётся в config/physiology.yaml."
         )
-    
+
+    if 'diagnostics' in cfg and not isinstance(cfg['diagnostics'], dict):
+        raise ValueError(
+            f"physio_config: [{label}].diagnostics должен быть dict."
+        )
+        
     for s in _REQUIRED_PHYSIOLOGY_SECTIONS:
         if not isinstance(cfg[s], dict):
             raise ValueError(
@@ -429,6 +440,12 @@ def _validate_patient(cfg: dict, path: Path) -> None:
     if "k_inotropy_pulm" in cfg:
         _check_finite_range(f"{path.name}.k_inotropy_pulm",
                             cfg["k_inotropy_pulm"], 0.0, 5.0)
+    if "k_rarefaction" in cfg:
+        _check_finite_range(f"{path.name}.k_rarefaction",
+                            cfg["k_rarefaction"], 0.0, 2.0)
+    if "P_pa_set" in cfg:
+        _check_finite_range(f"{path.name}.P_pa_set",
+                            cfg["P_pa_set"], 1.0, 100.0)
 
     # --- Поля трёхветвевого барорефлекса (baroreflex.py) ---
     # Эти ключи пробрасываются per-scenario через

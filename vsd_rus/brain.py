@@ -79,20 +79,29 @@ class Brain(OrganModel):
     _K_AMM_INHIB_MIN, _K_AMM_INHIB_MAX = 0.0, 2.0
 
     def __init__(self,
-                 R_base=7.0, C=4.0, P_autoreg=80.0,
-                 CMRO2_target=0.55,
-                 C_v_min=0.06, max_extraction=0.60,
-                 glucose_extraction=0.1,
-                 P0=47.5,
-                 C_a_O2_norm=0.20, C_a_CO2_norm=0.50,
-                 k_hypoxic_dilation=0.6, k_hypercapnic_dilation=1.2, k_myo=0.30,
-                 V_tissue=150.0, RQ=0.85,
-                 C_O2_critical=0.08,
-                 # Лактат
-                 C_lac_norm=0.15, k_lac_prod=0.08, k_lac_clear=0.02, k_lac_release=0.03,
-                 # Аммиак BBB
-                 C_amm_norm=0.3, k_amm_bbb_in=0.02, k_amm_bbb_out=0.01,
-                 k_amm_detox=0.01, k_amm_inhibition=0.15):
+                 # --- Гемодинамика ---
+                 R_base: float, C: float, P_autoreg: float,
+                 # --- Метаболизм O2 ---
+                 CMRO2_target: float,
+                 C_v_min: float, max_extraction: float,
+                 glucose_extraction: float,
+                 # --- Начальное давление и норм. концентрации ---
+                 P0: float,
+                 C_a_O2_norm: float, C_a_CO2_norm: float,
+                 # --- Коэффициенты ауторегуляции ---
+                 k_hypoxic_dilation: float,
+                 k_hypercapnic_dilation: float,
+                 k_myo: float,
+                 # --- Тканевые параметры ---
+                 V_tissue: float, RQ: float,
+                 C_O2_critical: float,
+                 # --- Лактат ---
+                 C_lac_norm: float, k_lac_prod: float,
+                 k_lac_clear: float, k_lac_release: float,
+                 # --- Аммиак BBB ---
+                 C_amm_norm: float, k_amm_bbb_in: float,
+                 k_amm_bbb_out: float, k_amm_detox: float,
+                 k_amm_inhibition: float):
 
         # =================================================================
         # Валидация конфигурации — fail-fast при инициализации.
@@ -261,21 +270,18 @@ class Brain(OrganModel):
     # Ауторегуляция: R_eff и диагностические факторы
     # ------------------------------------------------------------------
     def _autoregulation_resistance(self, P_sa, C_a_O2,
-                                   C_a_CO2=None, C_tissue_CO2=None):
+                                   C_a_CO2, C_tissue_CO2):
         x = (P_sa - self.P_autoreg) / self.P_autoreg
         f_P = 1.0 + self.k_myo * np.tanh(x)
 
         hypoxia = max(self.C_a_O2_norm - C_a_O2, 0.0) / self.C_a_O2_norm
         f_O2 = 1.0 - self.k_hypoxic_dilation * hypoxia
 
-        if C_a_CO2 is None:
-            C_a_CO2 = self.C_a_CO2_norm
         hypercapnia = (C_a_CO2 - self.C_a_CO2_norm) / self.C_a_CO2_norm
-        if C_tissue_CO2 is not None:
-            hypercapnia = max(
-                hypercapnia,
-                (C_tissue_CO2 - self.C_a_CO2_norm) / self.C_a_CO2_norm,
-            )
+        hypercapnia = max(
+            hypercapnia,
+            (C_tissue_CO2 - self.C_a_CO2_norm) / self.C_a_CO2_norm,
+        )
         f_CO2 = 1.0 - self.k_hypercapnic_dilation * hypercapnia
 
         reg = f_P * f_O2 * f_CO2
@@ -294,19 +300,14 @@ class Brain(OrganModel):
         C_amm_tis   = max(float(state[4]), 0.0)
 
         # --- Входы ---
-        P_sa      = float(inputs.get('P_sa', 80.0))
-        P_sv      = float(inputs.get('P_sv', 5.0))
-        C_a_O2    = float(inputs.get('C_a_O2', self.C_a_O2_norm))
-        C_a_CO2   = float(inputs.get('C_a_CO2', self.C_a_CO2_norm))
-        C_a_lac   = float(inputs.get('C_lactate_blood',
-                                     inputs.get('C_a_lactate', 0.1)))
-        C_a_amm   = float(inputs.get('C_ammonia',
-                                     inputs.get('C_a_ammonia', self.C_amm_norm)))
-        V_blood   = float(inputs.get('V_blood', 5800.0))
-        V_blood   = max(V_blood, 1e-6)
-
-        occlusion = float(inputs.get('occlusion_factor', 1.0))
-        occlusion = float(np.clip(occlusion, 0.0, 1.0))
+        P_sa      = float(inputs['P_sa'])
+        P_sv      = float(inputs['P_sv'])
+        C_a_O2    = float(inputs['C_a_O2'])
+        C_a_CO2   = float(inputs['C_a_CO2'])
+        C_a_lac   = float(inputs['C_lactate_blood'])
+        C_a_amm   = float(inputs['C_ammonia'])
+        V_blood   = max(float(inputs['V_blood']), 1e-6)
+        occlusion = float(np.clip(inputs['occlusion_factor'], 0.0, 1.0))
 
         # --- Гемодинамика ---
         R_eff, f_autoreg = self._autoregulation_resistance(
