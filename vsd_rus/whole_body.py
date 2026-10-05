@@ -437,11 +437,13 @@ class WholeBodyModel:
             self.heart, self.lungs, self.liver, self.blood, self.gitract,
             self.brain, self.peripheral, self.baroreflex,
             self.sys_art, self.sys_ven, self.pul_ven, self.jugular_vein,
+            self.gas_exchange,
         ]
         ORGAN_NAMES = [
             'heart', 'lungs', 'liver', 'blood', 'gitract',
             'brain', 'peripheral', 'baroreflex',
             'sys_art', 'sys_ven', 'pul_ven', 'jugular_vein',
+            'gas_exchange',
         ]
 
         # Проверка синхронизации (raise вместо assert — assert отключается -O)
@@ -588,6 +590,28 @@ class WholeBodyModel:
             )
             return y0
 
+        C_a_O2_end = float(y_steady[self.idx['gas_exchange']][0])
+        if not (0.05 < C_a_O2_end < 0.25):
+            warnings.warn(
+                f"calibrate: C_a_O2={C_a_O2_end:.3f} вне (0.05, 0.25); "
+                f"using analytic y0"
+            )
+            return y0
+        # Проверка: C_a_end должен совпасть с равновесием при конечных потоках
+        out_end = self.compute_outputs(sol.t[-1], y_steady)
+        C_eq = self.gas_exchange._equilibrium_state(
+            C_v_O2=out_end['C_v_O2'],
+            C_v_CO2=out_end['C_v_CO2'],
+            Q_p=out_end['Q_pulmonary'],
+            Q_shunt=out_end['Q_vsd'],
+        )
+        if abs(C_a_O2_end - C_eq[0]) > 0.01:
+            warnings.warn(
+                f"calibrate: C_a_O2={C_a_O2_end:.3f} ≠ равновесие "
+                f"{C_eq[0]:.3f}; CSTR не сошёлся — using analytic y0"
+            )
+            return y0       
+
         if sol.t.size >= 3:
             P_sa_traj = sol.y[self.idx['sys_art'].start, :]
             br_out = self.baroreflex.get_outputs(y_steady[self.idx['baroreflex']])
@@ -702,6 +726,8 @@ class WholeBodyModel:
 
         V_brain_phys = self.brain.C * max(float(y[sl['brain']][0]), 0.0)
 
+        # ВАЖНО: V_mix в GasExchange — ВИРТУАЛЬНЫЙ параметр (τ = V_mix/Q_s),
+        # НЕ физический компартмент. НЕ добавлять его в V_blood_total.
         V_blood_total = (V_heart_phys + V_lungs_phys + V_sv_phys + V_jv_phys
                     + V_sys_art_phys + V_pul_ven_phys + V_liver_phys
                     + V_gitract_phys + V_brain_phys)
@@ -782,12 +808,26 @@ class WholeBodyModel:
             P_sa, P_sv, conc.get('tox', 0.0), Vb,
         )
 
-        # --- Газообмен ---
-        gas_ex = self.gas_exchange.compute_effects(
-            C_v_O2=conc.get('oxygen', 0.15),
-            C_v_CO2=conc.get('co2', 0.52),
-            Q_p=heart_out['Q_pulmonary'],
-            Q_shunt=heart_out['Q_vsd'],
+        # --- Газообмен (CSTR) ---
+        V_gas_ex = y[sl['gas_exchange']]
+        C_v_O2_bulk  = conc.get('oxygen', 0.15)
+        C_v_CO2_bulk = conc.get('co2',   0.52)
+        Q_p_now      = heart_out['Q_pulmonary']
+        Q_shunt_now  = heart_out['Q_vsd']
+
+        gas_inputs = {
+            'C_v_O2':  C_v_O2_bulk,
+            'C_v_CO2': C_v_CO2_bulk,
+            'Q_p':     Q_p_now,
+            'Q_shunt': Q_shunt_now,
+        }
+        d_gas_ex = self.gas_exchange.get_derivatives(t, V_gas_ex, gas_inputs)
+        gas_ex   = self.gas_exchange.compute_effects(
+            state=V_gas_ex,
+            C_v_O2=C_v_O2_bulk,
+            C_v_CO2=C_v_CO2_bulk,
+            Q_p=Q_p_now,
+            Q_shunt=Q_shunt_now,
         )
 
         # --- Яремная вена: извлечение P_jv ---
@@ -958,6 +998,8 @@ class WholeBodyModel:
             'dC_CO2_blood': float(dC_CO2_blood),
             'P_jv':         float(P_jv),
             'dV_external': dV_total,
+            'd_gas_ex': d_gas_ex,
+            'V_gas_ex': V_gas_ex,
         }
         self._flow_cache_t = t
         self._flow_cache_y = y.copy()
@@ -1007,7 +1049,7 @@ class WholeBodyModel:
         return np.concatenate([
             f['d_heart'], f['d_lungs'], f['d_liver'], d_blood,
             f['d_gitract'], f['d_brain'], f['d_peripheral'], f['d_baroreflex'],
-            d_sys_art, d_sys_ven, d_pul_ven, d_jugular_vein,
+            d_sys_art, d_sys_ven, d_pul_ven, d_jugular_vein, f['d_gas_ex'],
         ])
 
     # ------------------------------------------------------------------
@@ -1188,33 +1230,41 @@ class WholeBodyModel:
                 'shunt_fraction_R2L_mean': nan,
             }
 
-        # --- Сбор потоков и SaO2 на равномерной сетке ---
-        Qp, Qs, Qv, SaO2_vals, R2L_vals = [], [], [], [], []
+        # Сбор только потоков — они пульсируют, но не сглажены состояниями
+        Qp, Qs, Qv = [], [], []
         for i in range(sol_cycle.t.size):
-            ti = float(sol_cycle.t[i])
-            yi = sol_cycle.y[:, i]
-            out = self.compute_outputs(ti, yi)
+            out = self.compute_outputs(float(sol_cycle.t[i]),
+                                    sol_cycle.y[:, i])
             Qp.append(float(out['Q_pulmonary']))
             Qs.append(float(out['Q_aortic']))
             Qv.append(float(out['Q_vsd']))
-            SaO2_vals.append(float(out['SaO2']))
-            R2L_vals.append(float(out['shunt_fraction_R2L']))
 
-        # --- Средние по равномерной сетке ≈ интегральные средние ---
-        Qp_m   = float(np.mean(Qp))
-        Qs_m   = float(np.mean(Qs))
-        Qv_m   = float(np.mean(Qv))
-        SaO2_m = float(np.mean(SaO2_vals))
-        R2L_m  = float(np.mean(R2L_vals))
+        Qp_m = float(np.mean(Qp))
+        Qs_m = float(np.mean(Qs))
+        Qv_m = float(np.mean(Qv))
+
+        # SaO2 — из состояния в конце цикла: CSTR уже интегральная величина
+        out_end = self.compute_outputs(float(sol_cycle.t[-1]),
+                                    sol_cycle.y[:, -1])
+        SaO2_m   = float(out_end['SaO2'])
+        C_a_O2_m = float(out_end['C_a_O2'])
+
+        # Цикловое f_bypass
+        Qrl_m = max(-Qv_m, 0.0)
+        Qlr_m = max( Qv_m, 0.0)
+        Qs_eff = max(Qs_m, 1e-6)
+        f_bypass_cycle = Qrl_m / Qs_eff
 
         return {
             'Qp_cycle_mean':           Qp_m,
             'Qs_cycle_mean':           Qs_m,
             'Q_vsd_cycle_mean':        Qv_m,
-            'Qp_Qs_cycle':             Qp_m / max(Qs_m, 1e-6),
+            'Qp_Qs_cycle':             Qp_m / Qs_eff,
             'mass_balance_error':      Qp_m - Qs_m - Qv_m,
             'SaO2_cycle_mean':         SaO2_m,
-            'shunt_fraction_R2L_mean': R2L_m,
+            'C_a_O2_cycle':            C_a_O2_m,
+            'f_bypass_cycle':          f_bypass_cycle,
+            'shunt_fraction_R2L_mean': f_bypass_cycle,
         }
 
     # ------------------------------------------------------------------

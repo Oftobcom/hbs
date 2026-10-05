@@ -652,10 +652,13 @@ def print_detailed_report(results_dict):
                              else "R→L (право-левый)")
                 print(f"  • Шунт через ДМЖП (Q_vsd)          : {_vsd} мл/с  — {direction}")
 
+        n_tail = max(200, len(data['SaO2']) // 6)
+        sao2_steady = float(np.mean(data['SaO2'][-n_tail:])) * 100
+
         print(f"  • Объём ЛЖ (V_lv)                  : {format_mean_std(data, 'V_lv')} мл")
         print(f"  • Объём ПЖ (V_rv)                  : {format_mean_std(data, 'V_rv')} мл")
         print(f"  • Объём крови (V_blood)            : {format_mean_std(data, 'V_blood', fmt='{:.0f}')} мл")
-        print(f"  • Сатурация O₂ (SaO2)              : {format_mean_std(data, 'SaO2', scale=100.0, fmt='{:.1f}')} %")
+        print(f"  • Сатурация O₂ (SaO2)              : {sao2_steady:.1f} %")
         print(f"  • ЧСС (HR)                         : {format_mean_std(data, 'HR')} уд/мин")
         print(f"  • СКФ (GFR)                        : {format_mean_std(data, 'GFR', fmt='{:.2f}')} мл/с")
         print(f"  • Доставка O₂ мозгу (DO₂_br)       : "

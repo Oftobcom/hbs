@@ -6,6 +6,7 @@ tests/debug_whole_body.run_scenario, чтобы избежать дублиро�
 распаковки секций YAML.
 """
 from whole_body import WholeBodyModel
+from kidney import KidneyHemodynamic
 
 _BARO_KEYS = ('k_hr', 'k_inotropy', 'k_vasomotor',
               'tau_hr', 'tau_inotropy', 'tau_vaso')
@@ -20,15 +21,57 @@ _REQUIRED_PERIPHERAL_KEYS = (
     'C_lactate0', 'C_O2_local0',
 )
 
+_REQUIRED_HEART_KEYS = (
+    'hr', 'hr_min', 'hr_max',
+    'E_max_la', 'E_min_la', 'E_max_ra', 'E_min_ra',
+    'E_max_lv', 'E_min_lv', 'E_max_rv', 'E_min_rv',
+    'V0_la', 'V0_lv', 'V0_ra', 'V0_rv',
+    'EDV_la', 'EDV_lv', 'EDV_ra', 'EDV_rv',
+    'R_mitral', 'R_aortic', 'R_tricuspid', 'R_pulmonary',
+    'R_venous_sys', 'R_venous_pulm',
+    'k_valve', 'rv_hypertrophy_sensitivity',
+    'k_lv_sympathetic', 'k_lv_parasympathetic',
+    'k_rv_sympathetic', 'k_rv_parasympathetic', 'k_atria_inotropy',
+    # --- RV remodeling ---
+    'rv_hypertrophy_cap', 'rv_dilation_gain', 'rv_compliance_gain',
+    'baro_rv_cap', 'rv_emax_rel_lv_cap',
+)
+
 _REQUIRED_LIVER_KEYS = (
     'R_ha', 'R_pv_base', 'R_hv_base',
     'C', 'C_portal',
     'P_hv0', 'P_portal0', 'V_liver',
     'albumin_prod_base', 'bilirubin_clearance_base',
-    'ammonia_clearance_base', 'lactate_clearance_base',
+    'ammonia_clearance_base', 'PS_lac',
     'C_bilirubin0', 'C_ammonia0', 'C_albumin0',
     'k_uptake_bil', 'k_uptake_amm',
-    'k_deg_alb', 'k_release_alb', 'k_lac_clear',
+    'k_deg_alb', 'k_release_alb',
+)
+
+_REQUIRED_KIDNEY_KEYS = (
+    'GFR_base', 'P_autoreg',
+    'autoreg_amplitude', 'autoreg_slope',
+    'toxin_clearance_frac', 'volume_reabsorption_frac',
+    'renal_resistance', 'basal_urine_output', 'RBF_target',
+)
+
+_REQUIRED_GITRACT_KEYS = (
+    'R_art', 'R_cap', 'R_venous',
+    'C_art', 'C_cap',
+    'k_absorption_water', 'k_absorption_nutrients',
+    'portal_pressure_sensitivity',
+    'P_art0', 'P_cap0',
+)
+
+_REQUIRED_GAS_EXCHANGE_KEYS = (
+    'P_alv_O2', 'P_alv_CO2', 'V_mix',
+    'Hb', 'P50', 'n_hill', 'alpha_O2',
+    'C_CO2_offset', 'k_CO2_slope',
+)
+
+_REQUIRED_JUGULAR_VEIN_KEYS = (
+    'C', 'P0', 'V0', 'R_out',
+    'C_O2_init', 'C_CO2_init', 'Hb',
 )
 
 def build_model_from_params(params: dict) -> WholeBodyModel:
@@ -51,9 +94,19 @@ def build_model_from_params(params: dict) -> WholeBodyModel:
     heart_cfg['hr']    = params.get('HR_base', heart_cfg['hr'])
     for key in ('E_max_rv', 'E_max_lv', 'EDV_rv',
                 'R_venous_sys', 'R_venous_pulm', 'R_tricuspid',
-                'rv_hypertrophy_sensitivity'):
+                'rv_hypertrophy_sensitivity',
+                'rv_hypertrophy_cap', 'rv_dilation_gain',
+                'rv_compliance_gain', 'baro_rv_cap',
+                'rv_emax_rel_lv_cap'):
         if key in params:
             heart_cfg[key] = params[key]
+
+    missing = [k for k in _REQUIRED_HEART_KEYS if k not in heart_cfg]
+    if missing:
+        raise ValueError(f"sim_builder: heart — отсутствуют ключи {missing}.")
+    none_keys = [k for k in _REQUIRED_HEART_KEYS if heart_cfg[k] is None]
+    if none_keys:
+        raise ValueError(f"sim_builder: heart — ключи не должны быть None: {none_keys}.")
 
     lungs_cfg['flow_dependent_resistance'] = bool(params['flow_dependent_lungs'])
     lungs_cfg['pressure_remodel']          = bool(params['pressure_remodel'])
@@ -105,14 +158,63 @@ def build_model_from_params(params: dict) -> WholeBodyModel:
             f"sim_builder: liver — ключи не должны быть None: {none_keys}."
         )
 
+    missing = [k for k in _REQUIRED_GITRACT_KEYS if k not in gitract_cfg]
+    if missing:
+        raise ValueError(
+            f"sim_builder: gitract — отсутствуют ключи {missing}."
+        )
+    none_keys = [k for k in _REQUIRED_GITRACT_KEYS if gitract_cfg[k] is None]
+    if none_keys:
+        raise ValueError(
+            f"sim_builder: gitract — ключи не должны быть None: {none_keys}."
+        )    
+
+    missing = [k for k in _REQUIRED_GAS_EXCHANGE_KEYS if k not in ge_cfg]
+    if missing:
+        raise ValueError(
+            f"sim_builder: gas_exchange — отсутствуют ключи {missing}."
+        )
+    none_keys = [k for k in _REQUIRED_GAS_EXCHANGE_KEYS if ge_cfg[k] is None]
+    if none_keys:
+        raise ValueError(
+            f"sim_builder: gas_exchange — ключи не должны быть None: {none_keys}."
+        )
+
+    missing = [k for k in _REQUIRED_JUGULAR_VEIN_KEYS if k not in jugular_cfg]
+    if missing:
+        raise ValueError(
+            f"sim_builder: jugular_vein — отсутствуют ключи {missing}."
+        )
+    none_keys = [k for k in _REQUIRED_JUGULAR_VEIN_KEYS if jugular_cfg[k] is None]
+    if none_keys:
+        raise ValueError(
+            f"sim_builder: jugular_vein — ключи не должны быть None: {none_keys}."
+        )
+
     # --- substance_names: источник — blood.initial_concentrations ---
-    if 'initial_concentrations' not in blood_cfg:
+    if (('initial_concentrations' not in blood_cfg)
+            or blood_cfg['initial_concentrations'] is None):
         raise ValueError(
             "sim_builder: blood.initial_concentrations обязателен "
-            "(WholeBodyModel больше не выводит substance_names "
-            "автоматически)."
+            "и не может быть None."
         )
     substance_names = list(blood_cfg['initial_concentrations'].keys())
+
+    # --- kidney.renal_resistance: null → авто-калибровка ---
+    missing = [k for k in _REQUIRED_KIDNEY_KEYS if k not in kidney_cfg]
+    if missing:
+        raise ValueError(f"sim_builder: kidney — отсутствуют ключи {missing}.")
+    if kidney_cfg.get('renal_resistance') is None:
+        kidney_cfg['renal_resistance'] = \
+            KidneyHemodynamic.auto_calibrate_renal_resistance(
+                P_autoreg=kidney_cfg['P_autoreg'],
+                RBF_target=kidney_cfg['RBF_target'],
+            )
+    none_keys = [k for k in _REQUIRED_KIDNEY_KEYS if kidney_cfg[k] is None]
+    if none_keys:
+        raise ValueError(
+            f"sim_builder: kidney — ключи не должны быть None: {none_keys}."
+        )    
 
     return WholeBodyModel(
         heart_params=heart_cfg,

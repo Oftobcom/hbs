@@ -1,6 +1,6 @@
 [log] Script    : visualize_vsd_comparison.py
-[log] Log file  : D:\git\hbs\vsd_rus\results\visualize_vsd_comparison_20261005_150126.log
-[log] Started   : 2026-10-05 15:01:26
+[log] Log file  : D:\git\hbs\vsd_rus\results\visualize_vsd_comparison_20261005_205256.log
+[log] Started   : 2026-10-05 20:52:56
 ======================================================================
 ВИЗУАЛИЗАЦИЯ СРАВНЕНИЯ ГЕМОДИНАМИКИ: ЗДОРОВЫЙ vs ДМЖП
 ======================================================================
@@ -60,5 +60,5 @@ Qp / Qs                                           1.00                  1.07    
    - fig5_gas_exchange.png
    - comprehensive_dashboard.png
    - schematic_heart_comparison.png
-[log] Finished  : 2026-10-05 15:01:43
-[log] Полный лог: D:\git\hbs\vsd_rus\results\visualize_vsd_comparison_20261005_150126.log
+[log] Finished  : 2026-10-05 20:53:12
+[log] Полный лог: D:\git\hbs\vsd_rus\results\visualize_vsd_comparison_20261005_205256.log

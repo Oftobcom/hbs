@@ -28,7 +28,7 @@ class GasExchange(OrganModel):
     """
     Модель газообмена O2/CO2 в лёгких.
 
-    Состояния нет — алгебраический орган, вызывается через compute_effects.
+    Состояния — CSTR-модель артериального смесительного объёма (2 переменные)
 
     Единицы:
         P         — мм рт.ст.
@@ -47,21 +47,19 @@ class GasExchange(OrganModel):
     _ALPHA_O2_MIN, _ALPHA_O2_MAX = 1e-4, 0.02
     _C_CO2_OFFSET_MIN, _C_CO2_OFFSET_MAX = 0.0, 1.0
     _K_CO2_SLOPE_MIN, _K_CO2_SLOPE_MAX = 1e-4, 0.05
-    _Q_REF_PULSE = 5.0
+    _V_MIX_MIN, _V_MIX_MAX = 20.0, 1000.0
 
     def __init__(self,
-                # ---- Альвеолярный газ (фиксирован в MVP) ----
-                P_alv_O2=100.0,           # мм рт. ст.
-                P_alv_CO2=40.0,           # мм рт. ст.
-                # ---- Гемоглобин и кривая Хилла ----
-                Hb=15.0,                  # г/дл
-                P50=26.8,                 # мм рт. ст.
-                n_hill=2.7,
-                alpha_O2=0.003,           # мл O2 / (дл · мм рт. ст.) — растворимость
-                # ---- CO2 (линейная аппроксимация) ----
-                C_CO2_offset=0.22,        # мл/мл при P_CO2 = 0
-                k_CO2_slope=0.0065,       # мл/мл на мм рт. ст.
-                ):
+                *,
+                P_alv_O2: float,
+                P_alv_CO2: float,
+                Hb: float,
+                P50: float,
+                n_hill: float,
+                alpha_O2: float,
+                C_CO2_offset: float,
+                k_CO2_slope: float,
+                V_mix: float):
 
         # =================================================================
         # Валидация конфигурации — fail-fast при инициализации.
@@ -69,6 +67,17 @@ class GasExchange(OrganModel):
         # ошибки в них должны ловиться один раз, а не в горячем пути RHS.
         # =================================================================
         def _check_range(name, v, lo, hi, typical=""):
+            if v is None:
+                raise ValueError(
+                    f"GasExchange: {name} не задан (None). "
+                    f"Все параметры обязательны; дефолты удалены. "
+                    f"Задайте gas_exchange.{name} в physiology.yaml."
+                )
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise TypeError(
+                    f"GasExchange: {name}={v!r} должен быть числом, "
+                    f"получено {type(v).__name__}."
+                )
             v = float(v)
             if not np.isfinite(v) or not (lo <= v <= hi):
                 raise ValueError(
@@ -120,6 +129,11 @@ class GasExchange(OrganModel):
             self._K_CO2_SLOPE_MIN, self._K_CO2_SLOPE_MAX,
             "мл/мл на мм рт.ст., типично 0.0065."
         )
+        self.V_mix = _check_range(
+            "V_mix", V_mix, self._V_MIX_MIN, self._V_MIX_MAX,
+            "мл, типично 200 — ВИРТУАЛЬНЫЙ объём смешивания артериальной крови. "
+            "Описывает τ = V_mix/Q_s. НЕ компартмент, НЕ входит в V_blood_total."
+        )        
 
         # --- Кэш выходов ---
         self._current_outputs = {}
@@ -129,16 +143,59 @@ class GasExchange(OrganModel):
     # =================================================================
 
     def get_state_size(self) -> int:
-        return 0
+        return 2
 
     def get_initial_state(self) -> np.ndarray:
-        return np.array([])
+        # Нейтральный старт: C_a = C_pv (полностью оксигенированная кровь).
+        # При наличии шунта calibrate_initial_state доведёт до равновесия.
+        return np.array([
+            self._C_O2_from_P(self.P_alv_O2),
+            self._C_CO2_from_P(self.P_alv_CO2),
+        ])
 
     def get_derivatives(self, t, state, inputs) -> np.ndarray:
-        return np.array([])
+        """
+        CSTR артериального смесительного объёма.
 
-    def get_outputs(self, state) -> dict:
-        return self._current_outputs.copy()
+        V_mix · dC_a/dt = (Q_p − Q_lr)·C_pv + Q_rl·C_v − Q_s·C_a
+
+        где Q_lr = max(Q_shunt, 0) — L→R шунт (уходит из ЛЖ в ПЖ, минуя аорту),
+            Q_rl = max(-Q_shunt, 0) — R→L шунт (вливается в ЛЖ),
+            Q_s  = Q_p − Q_shunt.
+
+        Стационар:
+        L→R:  C_a = C_pv
+        R→L:  C_a = (Q_p·C_pv + Q_rl·C_v) / (Q_p + Q_rl)
+        нет:  C_a = C_pv
+
+        Guard max(Q_s, 1e-6) НЕ нужен — деления нет.
+        """
+        C_a_O2, C_a_CO2 = state
+        C_a_O2  = max(float(C_a_O2),  0.0)
+        C_a_CO2 = max(float(C_a_CO2), 0.0)
+
+        C_v_O2  = float(inputs['C_v_O2'])
+        C_v_CO2 = float(inputs['C_v_CO2'])
+        Q_p     = max(float(inputs['Q_p']), 0.0)
+        Q_shunt = float(inputs['Q_shunt'])
+
+        # Разложение шунта по направлениям
+        Q_lr = max( Q_shunt, 0.0)          # L→R — вычитается из лёгочного притока
+        Q_rl = max(-Q_shunt, 0.0)          # R→L — добавляется к артериальному притоку
+        # Q_s = Q_p − Q_shunt = Q_p + Q_rl − Q_lr (системный выброс)
+        Q_s = max(Q_p - Q_shunt, 0.0)
+        C_pv_O2  = self._C_O2_from_P(self.P_alv_O2)
+        C_pv_CO2 = self._C_CO2_from_P(self.P_alv_CO2)
+
+        inv_V = 1.0 / self.V_mix
+
+        in_O2   = (Q_p - Q_lr) * C_pv_O2  + Q_rl * C_v_O2
+        out_O2  = Q_s * C_a_O2
+        in_CO2  = (Q_p - Q_lr) * C_pv_CO2 + Q_rl * C_v_CO2
+        out_CO2 = Q_s * C_a_CO2
+
+        return np.array([(in_O2 - out_O2) * inv_V,
+                        (in_CO2 - out_CO2) * inv_V])
 
     # =================================================================
     # Кривые диссоциации: прямые и обратные
@@ -208,109 +265,66 @@ class GasExchange(OrganModel):
         """Обратная линейная кривая CO2."""
         return float(max((C_CO2 - self.C_CO2_offset) / self.k_CO2_slope, 0.0))
 
+    def _equilibrium_state(self, C_v_O2, C_v_CO2, Q_p, Q_shunt) -> np.ndarray:
+        """Стационарное CSTR-состояние при заданных потоках.
+
+        При остановке сердца (Q_s < 1e-8) возвращает C_v — артериальный
+        смесительный объём принимает состав венозной крови.
+        """
+        Q_lr = max( Q_shunt, 0.0)
+        Q_rl = max(-Q_shunt, 0.0)
+        Q_s = max(Q_p - Q_shunt, 0.0)  # = Q_p + Q_rl - Q_lr
+        if Q_s < 1e-8:
+            return np.array([C_v_O2, C_v_CO2])
+        C_pv_O2  = self._C_O2_from_P(self.P_alv_O2)
+        C_pv_CO2 = self._C_CO2_from_P(self.P_alv_CO2)
+        C_a_O2  = ((Q_p - Q_lr) * C_pv_O2  + Q_rl * C_v_O2)  / Q_s
+        C_a_CO2 = ((Q_p - Q_lr) * C_pv_CO2 + Q_rl * C_v_CO2) / Q_s
+        return np.array([C_a_O2, C_a_CO2])
+
     # =================================================================
     # Основной метод
     # =================================================================
 
-    def compute_effects(self,
-                        C_v_O2: float,
-                        C_v_CO2: float,
-                        Q_p: float,
-                        Q_shunt: float) -> dict:
+    def compute_effects(self, *, state, C_v_O2, C_v_CO2, Q_p, Q_shunt) -> dict:
         """
-        Параметры
-        ---------
-        C_v_O2  : смешанная венозная концентрация O2 (мл/мл)
-        C_v_CO2 : смешанная венозная концентрация CO2 (мл/мл)
-        Q_p     : лёгочный кровоток (мл/с), всегда > 0
-        Q_shunt : поток через ДМЖП (мл/с),
-                  > 0 — лево-правый (L→R), < 0 — право-левый (R→L)
+        Диагностический readout из состояния CSTR.
+        НЕ пересчитывает C_a — читает из state.
+        """
+        C_a_O2  = float(np.clip(state[0], 0.001, 0.25))
+        C_a_CO2 = float(np.clip(state[1], 0.2,  1.00))
 
-        Возвращает
-        ----------
-        Словарь с концентрациями (C_a_O2, C_v_O2, C_pv_O2, C_a_CO2, C_v_CO2, C_pv_CO2),
-        парциальными давлениями (P_a_O2, P_v_O2, P_v_CO2) и диагностикой
-        (SaO2, shunt_fraction_R2L, O2_uptake, CO2_removal, f_bypass).
-        """
-        # --- Защита от некорректных входов (runtime-клипы, не конфиг) ---
         C_v_O2  = float(np.clip(C_v_O2,  0.001, 0.25))
         C_v_CO2 = float(np.clip(C_v_CO2, 0.05,  1.00))
         Q_p     = max(float(Q_p), 1e-6)
 
-        # === Системный кровоток (единая формула для обоих направлений) ===
-        # Из баланса heart.py: Q_aortic = Q_pulmonary - Q_vsd
-        Q_s = max(Q_p - Q_shunt, 1e-6)
+        Q_lr = max( Q_shunt, 0.0)
+        Q_rl = max(-Q_shunt, 0.0)
+        Q_s = max(Q_p - Q_shunt, 1e-6)  # = Q_p + Q_rl - Q_lr
 
-        # === Насыщение в конце лёгочного капилляра (равновесие с альвеолой) ===
         C_pv_O2  = self._C_O2_from_P(self.P_alv_O2)
         C_pv_CO2 = self._C_CO2_from_P(self.P_alv_CO2)
 
-        # === Смешивание при право-левом шунте (C¹-гладкая версия) ===
-        Q_rl    = max(-float(Q_shunt), 0.0)
-        w_pulse = Q_p * Q_p / (Q_p * Q_p + self._Q_REF_PULSE ** 2)
-        f_raw   = Q_rl / Q_s
-        f_bypass = float(np.clip(f_raw, 0.0, 0.95)) * w_pulse
-        C_a_O2  = (1.0 - f_bypass) * C_pv_O2  + f_bypass * C_v_O2
-        C_a_CO2 = (1.0 - f_bypass) * C_pv_CO2 + f_bypass * C_v_CO2
-
-        # === Парциальные давления (для диагностики) ===
+        P_a_O2  = self._P_O2_from_C(C_a_O2)
         P_v_O2  = self._P_O2_from_C(C_v_O2)
         P_v_CO2 = self._P_CO2_from_C(C_v_CO2)
+        SaO2    = self._SaO2_from_P(P_a_O2)
 
-        # === Диагностические выходы ===
-        P_a_O2 = self._P_O2_from_C(C_a_O2)
-        SaO2 = self._SaO2_from_P(P_a_O2)
-
-        # Доля право-левого шунта в системном выбросе
-        shunt_fraction_R2L = max(-Q_shunt, 0.0) / Q_s
-
-        # Интегральные показатели газообмена (мл газа / с)
         O2_uptake   = Q_p * max(C_pv_O2  - C_v_O2,  0.0)
         CO2_removal = Q_p * max(C_v_CO2 - C_pv_CO2, 0.0)
 
         self._current_outputs = {
-            # --- Концентрации (мл/мл) ---
-            'C_a_O2':   float(C_a_O2),
-            'C_v_O2':   float(C_v_O2),
-            'C_pv_O2':  float(C_pv_O2),
-            'C_a_CO2':  float(C_a_CO2),
-            'C_v_CO2':  float(C_v_CO2),
-            'C_pv_CO2': float(C_pv_CO2),
-            # --- Парциальные давления (мм рт. ст.) ---
-            'P_v_O2':   float(P_v_O2),
-            'P_v_CO2':  float(P_v_CO2),
-            'P_a_O2':   float(P_a_O2),
-            'P_alv_O2': float(self.P_alv_O2),
-            'P_alv_CO2': float(self.P_alv_CO2),
-            # --- Диагностика ---
-            'SaO2':               float(SaO2),           # сатурация артериальной крови
-            'oxygenation_index':  float(SaO2),           # алиас для обратной совместимости
-            'shunt_fraction_R2L': float(shunt_fraction_R2L),
-            'O2_uptake':          float(O2_uptake),
-            'CO2_removal':        float(CO2_removal),
-            'f_bypass':           float(f_bypass),
+            'C_a_O2': C_a_O2, 'C_v_O2': C_v_O2, 'C_pv_O2': C_pv_O2,
+            'C_a_CO2': C_a_CO2, 'C_v_CO2': C_v_CO2, 'C_pv_CO2': C_pv_CO2,
+            'P_v_O2': P_v_O2, 'P_v_CO2': P_v_CO2, 'P_a_O2': P_a_O2,
+            'P_alv_O2': self.P_alv_O2, 'P_alv_CO2': self.P_alv_CO2,
+            'SaO2': SaO2, 'oxygenation_index': SaO2,
+            'shunt_fraction_R2L': Q_rl / Q_s,
+            'O2_uptake': float(O2_uptake),
+            'CO2_removal': float(CO2_removal),
         }
         return self._current_outputs
 
-
-# =====================================================================
-# Быстрый тест (python gas_exchange.py)
-# =====================================================================
-if __name__ == "__main__":
-    gas = GasExchange()
-
-    print("=" * 70)
-    print("Тест 1: Здоровый (Q_shunt = 0)")
-    print("=" * 70)
-    out = gas.compute_effects(C_v_O2=0.15, C_v_CO2=0.52,
-                              Q_p=83.0, Q_shunt=0.0)
-    for k in ('C_a_O2', 'C_v_O2', 'SaO2', 'shunt_fraction_R2L'):
-        print(f"  {k:22s} = {out[k]:+.6g}")
-
-    print("\n" + "=" * 70)
-    print("Тест 2: Тяжёлый Эйзенменгер (Q_shunt = −60)")
-    print("=" * 70)
-    out = gas.compute_effects(C_v_O2=0.15, C_v_CO2=0.52,
-                              Q_p=80.0, Q_shunt=-60.0)
-    for k in ('C_a_O2', 'SaO2', 'P_a_O2', 'shunt_fraction_R2L'):
-        print(f"  {k:22s} = {out[k]:+.6g}")
+    def get_outputs(self, state) -> dict:
+        return self._current_outputs.copy()
+    

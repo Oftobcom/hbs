@@ -31,16 +31,41 @@ class KidneyHemodynamic(OrganModel):
     _BASAL_URINE_MIN, _BASAL_URINE_MAX = 0.0, 0.1
     _RBF_TARGET_MIN, _RBF_TARGET_MAX = 5.0, 100.0
 
-    def __init__(self,
-                 GFR_base=120.0,
-                 P_autoreg=95.0,
-                 autoreg_amplitude=0.6,       # амплитуда изменения СКФ (0.4..1.6)
-                 autoreg_slope=0.025,         # крутизна сигмоиды
-                 toxin_clearance_frac=0.2,
-                 volume_reabsorption_frac=0.99,
-                 renal_resistance=None,
-                 basal_urine_output: float = 0.005,
-                 RBF_target: float = 20.0):
+
+    @classmethod
+    def auto_calibrate_renal_resistance(cls,
+                                        P_autoreg: float,
+                                        RBF_target: float) -> float:
+        """
+        Авто-калибровка renal_resistance.
+
+        R = (P_autoreg − P_sv_assumed) / RBF_target,
+        где P_sv_assumed = 5.0 мм рт.ст. — типичное венозное давление почки.
+
+        Используется, когда в physiology.yaml стоит `renal_resistance: null`.
+        Параллель — WholeBodyModel.auto_calibrate_R_sys_peripheral.
+        """
+        _P_SV_ASSUMED = 5.0
+        R = (P_autoreg - _P_SV_ASSUMED) / RBF_target
+        if not (cls._R_RENAL_MIN <= R <= cls._R_RENAL_MAX):
+            raise ValueError(
+                f"KidneyHemodynamic.auto_calibrate_renal_resistance: "
+                f"R={R:.3f} вне [{cls._R_RENAL_MIN}, {cls._R_RENAL_MAX}]. "
+                f"Проверьте P_autoreg={P_autoreg}, RBF_target={RBF_target}."
+            )
+        return R
+
+
+    def __init__(self, *,
+                GFR_base: float,
+                P_autoreg: float,
+                autoreg_amplitude: float,
+                autoreg_slope: float,
+                toxin_clearance_frac: float,
+                volume_reabsorption_frac: float,
+                renal_resistance: float,
+                basal_urine_output: float,
+                RBF_target: float):
 
         # =================================================================
         # Валидация конфигурации — fail-fast при инициализации.
@@ -48,6 +73,18 @@ class KidneyHemodynamic(OrganModel):
         # ошибки в них должны ловиться один раз, а не в горячем пути RHS.
         # =================================================================
         def _check_range(name, v, lo, hi, typical=""):
+            if v is None:
+                raise ValueError(
+                    f"KidneyHemodynamic: {name} не задан (None). "
+                    f"Все параметры обязательны; дефолты удалены. "
+                    f"Задайте kidney.{name} в physiology.yaml. "
+                    f"Для renal_resistance допустим null — резолвится в sim_builder."
+                )
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise TypeError(
+                    f"KidneyHemodynamic: {name}={v!r} должен быть числом, "
+                    f"получено {type(v).__name__}."
+                )
             v = float(v)
             if not np.isfinite(v) or not (lo <= v <= hi):
                 raise ValueError(
@@ -100,19 +137,14 @@ class KidneyHemodynamic(OrganModel):
             "мл/с, типично 20 (1200 мл/мин)."
         )
 
-        # --- renal_resistance: auto-consistent или заданное явно ---
-        if renal_resistance is None:
-            # Согласованное значение: R_base подбирается под RBF_target
-            # так, чтобы RBF(95) = RBF_target.
-            # P_sv_assumed = 5 мм рт.ст. (типичное венозное давление почки)
-            self.renal_resistance = (self.P_autoreg - 5.0) / self.RBF_target
-        else:
-            self.renal_resistance = _check_range(
-                "renal_resistance", renal_resistance,
-                self._R_RENAL_MIN, self._R_RENAL_MAX,
-                "мм рт.ст.·с/мл, типично 4.5 = (95−5)/20. "
-                "Или передайте None для авто-расчёта под RBF_target."
-            )
+        # --- renal_resistance ---
+        self.renal_resistance = _check_range(
+            "renal_resistance", renal_resistance,
+            self._R_RENAL_MIN, self._R_RENAL_MAX,
+            "мм рт.ст.·с/мл, типично 4.5 = (95−5)/20. "
+            "None-значение разрешается в sim_builder "
+            "через KidneyHemodynamic.auto_calibrate_renal_resistance."
+        )
 
         # --- Базальный диурез ---
         self.basal_urine_output = _check_range(

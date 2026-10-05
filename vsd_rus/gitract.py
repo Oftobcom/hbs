@@ -49,13 +49,17 @@ class GITract(OrganModel):
     _P_PORTAL_NORM = 8.0        # мм рт.ст. — норм. портальное давление
     _ABS_FACTOR_MIN = 0.2       # минимальный фактор всасывания при гипертензии
 
-    def __init__(self,
-                 R_art=1.8, R_cap=1.2, R_venous=1.5,
-                 C_art=2.0, C_cap=5.0,
-                 k_absorption_water=0.1,
-                 k_absorption_nutrients=0.05,
-                 portal_pressure_sensitivity=0.02,
-                 P_art0=60.0, P_cap0=20.0):
+    def __init__(self, *,
+                R_art: float,
+                R_cap: float,
+                R_venous: float,
+                C_art: float,
+                C_cap: float,
+                k_absorption_water: float,
+                k_absorption_nutrients: float,
+                portal_pressure_sensitivity: float,
+                P_art0: float,
+                P_cap0: float):
 
         # =================================================================
         # Валидация конфигурации — fail-fast при инициализации.
@@ -63,6 +67,17 @@ class GITract(OrganModel):
         # ошибки в них должны ловиться один раз, а не в горячем пути RHS.
         # =================================================================
         def _check_range(name, v, lo, hi, typical=""):
+            if v is None:
+                raise ValueError(
+                    f"GITract: {name} не задан (None). "
+                    f"Все параметры обязательны; дефолты удалены. "
+                    f"Задайте gitract.{name} в physiology.yaml."
+                )
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise TypeError(
+                    f"GITract: {name}={v!r} должен быть числом, "
+                    f"получено {type(v).__name__}."
+                )
             v = float(v)
             if not np.isfinite(v) or not (lo <= v <= hi):
                 raise ValueError(

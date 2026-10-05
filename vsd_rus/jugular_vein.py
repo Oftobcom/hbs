@@ -46,13 +46,14 @@ class JugularVein(OrganModel):
     _HB_MIN, _HB_MAX = 5.0, 25.0
 
     def __init__(self,
-                 C=20.0,                  # мл/мм рт.ст., комплаенс яремной вены
-                 P0=6.0,                  # мм рт.ст., базовое давление
-                 V0=150.0,                # мл, объем при P0
-                 R_out=0.5,               # мм рт.ст.·с/мл, сопротивление оттока
-                 C_O2_init=0.12,          # мл/мл, начальная O2 (венозная мозга)
-                 C_CO2_init=0.56,         # мл/мл, начальная CO2
-                 Hb=15.0):                # г/дл, для расчета сатурации
+                *,
+                C: float,          # мл/мм рт.ст., комплаенс
+                P0: float,         # мм рт.ст., базовое давление
+                V0: float,         # мл, объём при P0
+                R_out: float,      # мм рт.ст.·с/мл, сопротивление оттока
+                C_O2_init: float,  # мл/мл, начальная O2
+                C_CO2_init: float, # мл/мл, начальная CO2
+                Hb: float):        # г/дл, для C_max_O2
 
         # =================================================================
         # Валидация конфигурации — fail-fast при инициализации.
@@ -60,6 +61,17 @@ class JugularVein(OrganModel):
         # ошибки в них должны ловиться один раз, а не в горячем пути RHS.
         # =================================================================
         def _check_range(name, v, lo, hi, typical=""):
+            if v is None:
+                raise ValueError(
+                    f"JugularVein: {name} не задан (None). "
+                    f"Все параметры обязательны; дефолты удалены. "
+                    f"Задайте jugular_vein.{name} в physiology.yaml."
+                )
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise TypeError(
+                    f"JugularVein: {name}={v!r} должен быть числом, "
+                    f"получено {type(v).__name__}."
+                )
             v = float(v)
             if not np.isfinite(v) or not (lo <= v <= hi):
                 raise ValueError(
@@ -180,20 +192,3 @@ class JugularVein(OrganModel):
 
     def get_outputs(self, state):
         return self._current_outputs.copy()
-
-
-# =====================================================================
-# Быстрый тест (python jugular_vein.py)
-# =====================================================================
-if __name__ == "__main__":
-    jv = JugularVein()
-    print(f"State size {jv.get_state_size()}, init {jv.get_initial_state()}")
-    # тест: мозг дает Q=5, C_v=0.10
-    y = jv.get_initial_state()
-    for i in range(10):
-        dy = jv.get_derivatives(0, y, {
-            'Q_in': 5.0, 'C_in_O2': 0.10, 'C_in_CO2': 0.56,
-            'P_sv': 5.0,
-        })
-        y = y + dy * 0.1
-    print("After 1s", jv.get_outputs(y))

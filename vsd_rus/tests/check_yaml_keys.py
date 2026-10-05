@@ -39,7 +39,7 @@ _CHECKS = [
 _REQUIRED_SYSTEMIC_KEYS = (
     'target_MAP', 'target_CO', 'C_sys_art', 'C_pul_ven',
     'P_sa0', 'P_sv0', 'P_pv0', 'SYS_VEN_FRACTION', 'C_sys_ven_eff',
-    'VO2_rest', 'RQ', 'occlusion_factor',
+    'R_sys_peripheral', 'VO2_rest', 'RQ', 'occlusion_factor',
     'fluid_intake_rate', 'insensible_loss_rate',
 )
 _REQUIRED_SIMULATION_KEYS = (

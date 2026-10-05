@@ -106,6 +106,19 @@ def _validate_merged(cfg: dict, label: str) -> None:
         raise ValueError(
             f"physio_config: [{label}].blood — отсутствуют {missing}."
         )
+    # --- blood: V0 и initial_concentrations не могут быть None ---
+    # Отличие от systemic.R_sys_peripheral: там null — sentinel для
+    # auto-calibrate; здесь null физически невозможен.
+    if blood['V0'] is None:
+        raise ValueError(
+            f"physio_config: [{label}].blood.V0=None недопустим. "
+            f"Задайте число в physiology.yaml (типично 5800)."
+        )
+    if blood['initial_concentrations'] is None:
+        raise ValueError(
+            f"physio_config: [{label}].blood.initial_concentrations=None "
+            f"недопустим. Задайте dict {{substance: conc, ...}}."
+        )
 
     meth = cfg['simulation'].get('method')
     if not isinstance(meth, str) or meth not in _VALID_SOLVER_METHODS:

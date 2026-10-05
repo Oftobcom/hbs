@@ -20,9 +20,10 @@ class BloodPool(OrganModel):
     _CONC_MIN, _CONC_MAX = 0.0, 1e4
 
     def __init__(self,
-                 substance_names: List[str],
-                 V0: float = 5000.0,
-                 initial_concentrations: Dict[str, float] = None):
+                *,
+                substance_names: List[str],
+                V0: float,
+                initial_concentrations: Dict[str, float]):
 
         # =================================================================
         # Валидация конфигурации — fail-fast при инициализации.
@@ -51,6 +52,17 @@ class BloodPool(OrganModel):
 
         # --- V0: объём крови ---
         def _check_range(name, v, lo, hi, typical=""):
+            if v is None:
+                raise ValueError(
+                    f"BloodPool: {name} не задан (None). "
+                    f"Все параметры обязательны; дефолты удалены. "
+                    f"Задайте blood.{name} в physiology.yaml."
+                )
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise TypeError(
+                    f"BloodPool: {name}={v!r} должен быть числом, "
+                    f"получено {type(v).__name__}."
+                )
             v = float(v)
             if not np.isfinite(v) or not (lo <= v <= hi):
                 raise ValueError(
@@ -64,24 +76,28 @@ class BloodPool(OrganModel):
         )
 
         # --- initial_concentrations ---
-        if initial_concentrations is None:
-            self.C0 = np.zeros(self.num_substances)
-        else:
-            if not isinstance(initial_concentrations, dict):
+        if not isinstance(initial_concentrations, dict):
+            raise ValueError(
+                f"BloodPool: initial_concentrations должен быть dict, "
+                f"получено {type(initial_concentrations).__name__}. "
+                f"Для пустого набора передайте {{}}."
+            )
+        C0_list = []
+        for name in self.substance_names:
+            if name not in initial_concentrations:
                 raise ValueError(
-                    f"BloodPool: initial_concentrations должен быть dict, "
-                    f"получено {type(initial_concentrations).__name__}."
+                    f"BloodPool: initial_concentrations не содержит {name!r}. "
+                    f"Все вещества из substance_names должны быть заданы; "
+                    f"неявный дефолт 0.0 удалён."
                 )
-            C0_list = []
-            for name in self.substance_names:
-                v = float(initial_concentrations.get(name, 0.0))
-                if not np.isfinite(v) or not (self._CONC_MIN <= v <= self._CONC_MAX):
-                    raise ValueError(
-                        f"BloodPool: initial_concentrations[{name!r}]={v} "
-                        f"вне [{self._CONC_MIN}, {self._CONC_MAX}]."
-                    )
-                C0_list.append(v)
-            self.C0 = np.array(C0_list)
+            v = float(initial_concentrations[name])
+            if not np.isfinite(v) or not (self._CONC_MIN <= v <= self._CONC_MAX):
+                raise ValueError(
+                    f"BloodPool: initial_concentrations[{name!r}]={v} "
+                    f"вне [{self._CONC_MIN}, {self._CONC_MAX}]."
+                )
+            C0_list.append(v)
+        self.C0 = np.array(C0_list)
 
     # ------------------------------------------------------------------
     # Обязательный интерфейс OrganModel

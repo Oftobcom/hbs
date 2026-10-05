@@ -44,6 +44,12 @@ heart:
   k_rv_sympathetic: 1.0
   k_rv_parasympathetic: 0.2
   k_atria_inotropy: 0.2
+  rv_hypertrophy_cap: 2.0        # насыщение массы миокарда
+  rv_dilation_gain: 6.0          # базовый gain дилатации
+  rv_compliance_gain: 0.5        # рост комплаенса (E_min падает)
+  baro_rv_cap: 1.3               # потолок пульмонального барорефлекса
+  rv_emax_rel_lv_cap: 1.15       # E_max_rv ≤ 1.15·E_max_lv  
+  
 
 lungs:
   R1: 0.06
@@ -127,12 +133,11 @@ liver:
   bilirubin_clearance_base: 0.2
   ammonia_clearance_base: 0.15
   V_liver: 1500.0 # эффективный объём распределения
-  lactate_clearance_base: 0.05 # безразмерная доля экстракции (было 1/с)
   k_uptake_bil: 0.1
   k_uptake_amm: 0.1
   k_deg_alb: 0.01
   k_release_alb: 0.05
-  k_lac_clear: 2.0
+  PS_lac: 0.5 # мл/с, permeability-surface product лактата
   # --- Начальные концентрации в печени ---
   C_bilirubin0: 0.0
   C_ammonia0: 0.0
@@ -145,6 +150,8 @@ kidney:
   autoreg_slope: 0.025
   toxin_clearance_frac: 0.2
   volume_reabsorption_frac: 0.99
+  renal_resistance: null
+  basal_urine_output: 0.005
   RBF_target: 20.0
 
 brain:
@@ -197,6 +204,7 @@ gas_exchange:
   alpha_O2: 0.003
   C_CO2_offset: 0.22
   k_CO2_slope: 0.0065
+  V_mix: 200.0
 
 systemic:
   target_MAP: 85.0

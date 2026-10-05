@@ -41,37 +41,42 @@ class Heart4Chambers(OrganModel):
     _BARO_MIN,      _BARO_MAX      = 0.5, 2.0
 
     def __init__(self,
-                 # --- ЧСС ---
-                 hr: float,
-                 hr_min: float,
-                 hr_max: float,
-                 # --- Эластанс предсердий ---
-                 E_max_la: float, E_min_la: float,
-                 E_max_ra: float, E_min_ra: float,
-                 # --- Эластанс желудочков ---
-                 E_max_lv: float, E_min_lv: float,
-                 E_max_rv: float, E_min_rv: float,
-                 # --- V0 (unstressed volume) ---
-                 V0_la: float, V0_lv: float, V0_ra: float, V0_rv: float,
-                 # --- EDV (начальное состояние) ---
-                 EDV_la: float, EDV_lv: float,
-                 EDV_ra: float, EDV_rv: float,
-                 # --- Клапанные сопротивления ---
-                 R_mitral: float, R_aortic: float,
-                 R_tricuspid: float, R_pulmonary: float,
-                 R_venous_sys: float, R_venous_pulm: float,
-                 # --- Клапанная кинетика ---
-                 k_valve: float,
-                 # --- VSD ---
-                 R_vsd: float,   # > 0 (шунт) или np.inf (нет шунта)
-                 # --- Гипертрофия ПЖ ---
-                 rv_hypertrophy_sensitivity: float,
-                 # --- Асимметрия симпатика/парасимпатика для E_max ---
-                 k_lv_sympathetic: float,
-                 k_lv_parasympathetic: float,
-                 k_rv_sympathetic: float,
-                 k_rv_parasympathetic: float,
-                 k_atria_inotropy: float):
+                # --- ЧСС ---
+                hr: float,
+                hr_min: float,
+                hr_max: float,
+                # --- Эластанс предсердий ---
+                E_max_la: float, E_min_la: float,
+                E_max_ra: float, E_min_ra: float,
+                # --- Эластанс желудочков ---
+                E_max_lv: float, E_min_lv: float,
+                E_max_rv: float, E_min_rv: float,
+                # --- V0 (unstressed volume) ---
+                V0_la: float, V0_lv: float, V0_ra: float, V0_rv: float,
+                # --- EDV (начальное состояние) ---
+                EDV_la: float, EDV_lv: float,
+                EDV_ra: float, EDV_rv: float,
+                # --- Клапанные сопротивления ---
+                R_mitral: float, R_aortic: float,
+                R_tricuspid: float, R_pulmonary: float,
+                R_venous_sys: float, R_venous_pulm: float,
+                # --- Клапанная кинетика ---
+                k_valve: float,
+                # --- VSD ---
+                R_vsd: float,   # > 0 (шунт) или np.inf (нет шунта)
+                # --- Гипертрофия ПЖ ---
+                rv_hypertrophy_sensitivity: float,
+                # --- Асимметрия симпатика/парасимпатика для E_max ---
+                k_lv_sympathetic: float,
+                k_lv_parasympathetic: float,
+                k_rv_sympathetic: float,
+                k_rv_parasympathetic: float,
+                k_atria_inotropy: float,
+                rv_hypertrophy_cap: float,
+                rv_dilation_gain: float,
+                rv_compliance_gain: float,
+                baro_rv_cap: float,
+                rv_emax_rel_lv_cap: float):
 
         # =================================================================
         # Валидация конфигурации — fail-fast при инициализации.
@@ -180,6 +185,9 @@ class Heart4Chambers(OrganModel):
                 "типично 5–15 мл."
             )
         self.V0 = V0_in
+        self.V0_base  = {k: float(v) for k, v in self.V0.items()}
+        self.E_min_base = {k: float(v) for k, v in self.E_min.items()}
+        self.E_max_base_orig = dict(self.E_max_base)
 
         # --- EDV (начальное состояние) ---
         EDV_in = {'LA': EDV_la, 'LV': EDV_lv, 'RA': EDV_ra, 'RV': EDV_rv}
@@ -195,6 +203,27 @@ class Heart4Chambers(OrganModel):
                     f"(иначе P(EDV)=0 и камера не наполнена)."
                 )
         self.EDV = EDV_in
+
+        self.rv_hypertrophy_cap    = _check_range(
+            "rv_hypertrophy_cap", rv_hypertrophy_cap, 1.0, 4.0,
+            "типично 2.0 — потолок множителя гипертрофии."
+        )
+        self.rv_dilation_gain      = _check_range(
+            "rv_dilation_gain", rv_dilation_gain, 0.0, 15.0,
+            "типично 6.0 — прирост V0_rv при rv_al=1."
+        )
+        self.rv_compliance_gain    = _check_range(
+            "rv_compliance_gain", rv_compliance_gain, 0.0, 1.0,
+            "типично 0.5 — снижение E_min_rv (рост C) при дилатации."
+        )
+        self.baro_rv_cap           = _check_range(
+            "baro_rv_cap", baro_rv_cap, 1.0, 2.0,
+            "типично 1.3 — потолок пульмонального барорефлекса."
+        )
+        self.rv_emax_rel_lv_cap    = _check_range(
+            "rv_emax_rel_lv_cap", rv_emax_rel_lv_cap, 0.8, 2.0,
+            "типично 1.15 — E_max_rv ≤ cap × E_max_lv при rv_al > 0.5."
+        )
 
         # --- Клапанные сопротивления ---
         R_valve_in = {
@@ -321,7 +350,7 @@ class Heart4Chambers(OrganModel):
             'baro_activation_rv', baro_activation
         ))
         baro_activation_rv = float(np.clip(
-            baro_activation_rv, self._BARO_MIN, self._BARO_MAX
+            baro_activation_rv, self._BARO_MIN, self.baro_rv_cap
         ))
 
         # Постнагрузка ПЖ (0 = норма, 1 = полное ремоделирование лёгких).
@@ -329,9 +358,16 @@ class Heart4Chambers(OrganModel):
         rv_afterload = float(inputs.get('rv_afterload', 0.0))
         rv_afterload = float(np.clip(rv_afterload, 0.0, 5.0))
         self._rv_afterload = rv_afterload
+        rv_al = float(np.clip(rv_afterload, 0.0, 3.0))
+        # Эксцентрическая дилатация:
+        #   V0 растёт (саркомеры в ряд) — 10 → 70 мл при rv_al=1, gain=6
+        self.V0['RV'] = self.V0_base['RV'] * (1.0 + self.rv_dilation_gain * rv_al)
+        # Комплаенс растёт (E_min падает) — камера становится более растяжимой
+        self.E_min['RV'] = self.E_min_base['RV'] / (1.0 + self.rv_compliance_gain * rv_al)
 
         # Гипертрофия ПЖ от хронической лёгочной гипертензии.
-        rv_hypertrophy = 1.0 + self.rv_hypertrophy_sensitivity * rv_afterload
+        rv_hypertrophy_raw = 1.0 + self.rv_hypertrophy_sensitivity * rv_afterload
+        rv_hypertrophy = min(rv_hypertrophy_raw, self.rv_hypertrophy_cap)
 
         for chamber in self.E_max_base:
             factor = 1.0
@@ -358,6 +394,16 @@ class Heart4Chambers(OrganModel):
                 np.clip(e_new, self._E_MAX_LO, cap)
             )
 
+        # В декомпенсации E_max_rv не должен превышать E_max_lv.
+        # При rv_al < 0.5 — не ограничиваем (гипертрофия может быть законной).
+        if rv_al > 0.5:
+            blend = float(np.clip((rv_al - 0.5) / 0.5, 0.0, 1.0))   # 0..1
+            E_rv_current = self._current_E_max['RV']
+            E_lv_current = self._current_E_max['LV']
+            E_rv_capped  = E_lv_current * self.rv_emax_rel_lv_cap
+            E_rv_target  = (1.0 - blend) * E_rv_current + blend * min(E_rv_current, E_rv_capped)
+            self._current_E_max['RV'] = float(np.clip(E_rv_target, self._E_MAX_LO, self._E_MAX_HI + self._RV_CAP_BONUS))        
+
     # ------------------------------------------------------------------
     # Эластанс-профиль цикла
     # ------------------------------------------------------------------
@@ -381,9 +427,9 @@ class Heart4Chambers(OrganModel):
         if chamber == 'RV':
             # Дилатация/гипертрофия ПЖ сдвигает пик позже и удлиняет изгнание:
             # возникает окно, где ПЖ ещё сокращён, а ЛЖ уже расслаблен.
-            rv_al = min(float(getattr(self, '_rv_afterload', 0.0)), 2.0)
-            T_PEAK = 0.33 + 0.03 * rv_al    # 0.33 → 0.39
-            T_END  = 0.45 + 0.05 * rv_al    # 0.45 → 0.55
+            rv_al = min(float(getattr(self, '_rv_afterload', 0.0)), 3.0)
+            T_PEAK = 0.33 + 0.02 * rv_al    # чуть позже пик
+            T_END  = 0.45 + 0.02 * rv_al    # короче систола — длиннее диастола для filling
         else:
             T_PEAK = 0.33
             T_END = 0.45
@@ -418,11 +464,13 @@ class Heart4Chambers(OrganModel):
         if chamber == 'LV':
             A_v, k_v = 0.03, 0.02
         else:  # RV
-            # При дилатации/гипертрофии стенка ПЖ становится жёстче.
-            rv_al = min(float(getattr(self, '_rv_afterload', 0.0)), 2.0)
-            stiffness = 1.0 + 0.4 * rv_al
-            A_v = 0.02 * stiffness
-            k_v = 0.015 * stiffness
+            # При эксцентрической дилатации пассивная жёсткость НЕ растёт,
+            # в отличие от активной (E_max). Это позволяет EDV расти при
+            # низком диастолическом давлении.
+            rv_al = min(float(getattr(self, '_rv_afterload', 0.0)), 3.0)
+            stiffness = 1.0 - 0.15 * rv_al      # было 1.0 + 0.4 * rv_al
+            A_v = max(0.02 * stiffness, 0.005)  # не даём уйти ниже 0.005
+            k_v = max(0.015 * stiffness, 0.004)
         exp_arg = float(np.clip(k_v * dV, 0.0, 8.0))
         P_passive = A_v * (np.exp(exp_arg) - 1.0)
         return E * dV + P_passive
@@ -525,9 +573,15 @@ class Heart4Chambers(OrganModel):
                 Q_sv_to_ra *= factor
         Q_pv_to_la = self._valve_flow(P_pv - P_la, self.R_venous_pulm)
 
-        rv_al = min(float(getattr(self, '_rv_afterload', 0.0)), 2.0)
-        V_min_rv_eff = self.V0['RV'] * max(0.3, 1.0 - 0.3 * rv_al)
-        V_max_rv_eff = 250.0 * (1.0 + 0.5 * rv_al)
+        rv_al = min(float(getattr(self, '_rv_afterload', 0.0)), 3.0)
+        # Пол: остаточный объём камеры. Малый абсолютный порог, не масштабируется
+        # на V0 — при дилатации мы НЕ хотим поднимать пол.
+        V_min_rv_eff = max(5.0, self.V0_base['RV'] * 0.3)
+        # Потолок: должен быть выше разрешённого EDV
+        V_max_rv_eff = max(
+            250.0 * (1.0 + 0.8 * rv_al),
+            self.V0['RV'] * 3.5,     # при V0=70 → 245; при V0=100 → 350
+        )
 
         s_la = self._floor_factor(V_la, self.V0['LA'])
         s_lv = self._floor_factor(V_lv, self.V0['LV'])

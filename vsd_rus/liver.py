@@ -43,7 +43,7 @@ class Liver(OrganModel):
     _ALB_PROD_MIN, _ALB_PROD_MAX = 0.0, 5.0
     _BIL_CLEAR_MIN, _BIL_CLEAR_MAX = 0.0, 10.0
     _AMM_CLEAR_MIN, _AMM_CLEAR_MAX = 0.0, 10.0
-    _LAC_CLEAR_MIN, _LAC_CLEAR_MAX = 0.01, 1.0
+    _PS_LAC_MIN, _PS_LAC_MAX = 0.01, 10.0
 
     _C_BIL0_MIN, _C_BIL0_MAX = 0.0, 20.0
     _C_AMM0_MIN, _C_AMM0_MAX = 0.0, 20.0
@@ -52,8 +52,7 @@ class Liver(OrganModel):
     _K_UPTAKE_BIL_MIN, _K_UPTAKE_BIL_MAX = 1e-4, 10.0
     _K_UPTAKE_AMM_MIN, _K_UPTAKE_AMM_MAX = 1e-4, 10.0
     _K_DEG_ALB_MIN, _K_DEG_ALB_MAX = 1e-6, 5.0
-    _K_RELEASE_ALB_MIN, _K_RELEASE_ALB_MAX = 1e-6, 5.0
-    _K_LAC_CLEAR_MIN, _K_LAC_CLEAR_MAX = 0.01, 100.0
+    _K_RELEASE_ALB_MIN, _K_RELEASE_ALB_MAX = 1e-6, 5.0    
     _V_LIVER_MIN, _V_LIVER_MAX = 100.0, 3000.0
 
     def __init__(self, *,
@@ -68,15 +67,14 @@ class Liver(OrganModel):
                 albumin_prod_base: float,
                 bilirubin_clearance_base: float,
                 ammonia_clearance_base: float,
-                lactate_clearance_base: float,
+                PS_lac: float,
                 C_bilirubin0: float,
                 C_ammonia0: float,
                 C_albumin0: float,
                 k_uptake_bil: float,
                 k_uptake_amm: float,
                 k_deg_alb: float,
-                k_release_alb: float,
-                k_lac_clear: float
+                k_release_alb: float
                 ):
 
         # =================================================================
@@ -157,10 +155,10 @@ class Liver(OrganModel):
             self._AMM_CLEAR_MIN, self._AMM_CLEAR_MAX,
             "1/с, типично 0.15."
         )
-        self.lactate_clearance_base = _check_range(
-            "lactate_clearance_base", lactate_clearance_base,
-            self._LAC_CLEAR_MIN, self._LAC_CLEAR_MAX,
-            "безразмерный, типично 0.05 — доля экстракции лактата за проход."
+        self.PS_lac = _check_range(
+            "PS_lac", PS_lac, self._PS_LAC_MIN, self._PS_LAC_MAX,
+            "мл/с, типично 0.4–0.6 — permeability-surface product лактата. "
+            "E = 1 − exp(−PS_lac/Q_ha); при Q_ha ≈ 4.5 даёт E ≈ 0.10."
         )
 
         # --- Начальные концентрации в печени ---
@@ -200,11 +198,6 @@ class Liver(OrganModel):
             "k_release_alb", k_release_alb,
             self._K_RELEASE_ALB_MIN, self._K_RELEASE_ALB_MAX,
             "1/с, типично 0.05."
-        )
-        self.k_lac_clear = _check_range(
-            "k_lac_clear", k_lac_clear,
-            self._K_LAC_CLEAR_MIN, self._K_LAC_CLEAR_MAX,
-            "безразмерный, типично 2.0."
         )
 
         self._current_outputs = {}
@@ -284,12 +277,13 @@ class Liver(OrganModel):
         dC_amm_blood = -uptake_amm * self.V_liver / V_blood
         dC_alb_blood = +release_alb * self.V_liver / V_blood
 
-        # Печёночный клиренс лактата — flow-limited. E_lac — безразмерная
-        # доля экстракции за проход, ограниченная 0.95 (нельзя извлечь всю
-        # лактатную нагрузку за один пасс).
-        E_lac = float(np.clip(
-            self.lactate_clearance_base * self.k_lac_clear, 0.0, 0.95
-        ))
+        # Печёночный клиренс лактата — Crone-Renkin (1963).
+        #   E = 1 − exp(−PS/Q_ha)
+        #   Q_ha → 0  : E → 1     (flow-limited, вся нагрузка извлекается)
+        #   Q_ha → ∞  : E → PS/Q  (diffusion-limited, клиренс → PS)
+        # Клип 0.95 — предохранитель от нефизичного E ≈ 1.0.
+        E_lac = 1.0 - float(np.exp(-self.PS_lac / max(Q_ha, 1e-3)))
+        E_lac = float(np.clip(E_lac, 0.0, 0.95))
         dC_lac_blood = -Q_ha * E_lac * C_lac_blood / V_blood
 
         self._current_outputs = {

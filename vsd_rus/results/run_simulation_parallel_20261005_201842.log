@@ -1,8 +1,8 @@
 [log] Script    : run_simulation_parallel.py
-[log] Log file  : D:\git\hbs\vsd_rus\results\run_simulation_parallel_20261005_142919.log
-[log] Started   : 2026-10-05 14:29:19
+[log] Log file  : D:\git\hbs\vsd_rus\results\run_simulation_parallel_20261005_201842.log
+[log] Started   : 2026-10-05 20:18:42
 ================================================================================
-Запуск: 2026-10-05 14:29:19
+Запуск: 2026-10-05 20:18:42
 СРАВНЕНИЕ ГЕМОДИНАМИКИ: ЗДОРОВЫЙ vs ДМЖП — v4 PARALLEL
 Per-scenario simulation config (from YAML):
   Здоровый                                 t_span=(0.0, 1800.0)  n= 12001  t_calib=400s
@@ -13,36 +13,36 @@ Per-scenario simulation config (from YAML):
 ================================================================================
 Загружено пациентов: ['Здоровый', 'Малый ДМЖП (R=5.0)', 'Большой ДМЖП (R=1.0)', 'Эйзенменгер, компенсированный', 'Эйзенменгер, декомпенсированный']
 
-🚀 Запуск 5 симуляций параллельно n_jobs=5 (loky), лог: D:\git\hbs\vsd_rus\results\run_simulation_parallel_20261005_142919.log
+🚀 Запуск 5 симуляций параллельно n_jobs=5 (loky), лог: D:\git\hbs\vsd_rus\results\run_simulation_parallel_20261005_201842.log
 [Parallel(n_jobs=5)]: Using backend LokyBackend with 5 concurrent workers.
-  [PID 9604] [Здоровый] Калибровка t_calib=400с...
-  [PID 9800] [Малый ДМЖП (R=5.0)] Калибровка t_calib=400с...
-  [PID 5828] [Эйзенменгер, компенсированный] Калибровка t_calib=600с...
-  [PID 12492] [Эйзенменгер, декомпенсированный] Калибровка t_calib=600с...
-  [PID 15136] [Большой ДМЖП (R=1.0)] Калибровка t_calib=400с...
-  [PID 9604] [Здоровый] CHECK P_sa=76.4 P_pa=12.0 P_sv=6.5 HR=74.5 V_blood=5219 Qp=59.0 Qs=59.6 Qp/Qs=0.99 Q_vsd=+0.0 balance=-0.64 SaO2=97.2% R2L=0.0% baro_vaso=1.17 baro_ino=1.04 suppress=1.00
-  [PID 9604] [Здоровый] Симуляция 0..1800с LSODA max_step=0.050 12001 точек...
-  [PID 9800] [Малый ДМЖП (R=5.0)] CHECK P_sa=77.9 P_pa=14.8 P_sv=6.4 HR=75.4 V_blood=5219 Qp=62.6 Qs=56.3 Qp/Qs=1.11 Q_vsd=+4.4 balance=+1.87 SaO2=97.2% R2L=12.5% baro_vaso=1.18 baro_ino=1.05 suppress=1.00
-  [PID 9800] [Малый ДМЖП (R=5.0)] Симуляция 0..1800с LSODA max_step=0.050 12001 точек...
-  [PID 15136] [Большой ДМЖП (R=1.0)] CHECK P_sa=63.4 P_pa=11.0 P_sv=6.4 HR=80.9 V_blood=5220 Qp=77.6 Qs=57.7 Qp/Qs=1.34 Q_vsd=+19.9 balance=-0.02 SaO2=97.2% R2L=25.0% baro_vaso=1.20 baro_ino=1.05 suppress=1.00
-  [PID 15136] [Большой ДМЖП (R=1.0)] Симуляция 0..1800с LSODA max_step=0.050 12001 точек...
-  [PID 5828] [Эйзенменгер, компенсированный] CHECK P_sa=59.9 P_pa=57.2 P_sv=6.1 HR=92.4 V_blood=5221 Qp=64.6 Qs=61.5 Qp/Qs=1.05 Q_vsd=+8.8 balance=-5.78 SaO2=96.6% R2L=15.0% baro_vaso=1.05 baro_ino=1.01 suppress=0.23
-  [PID 5828] [Эйзенменгер, компенсированный] Симуляция 0..1800с LSODA max_step=0.050 12001 точек...
-  [PID 12492] [Эйзенменгер, декомпенсированный] CHECK P_sa=66.1 P_pa=79.9 P_sv=6.1 HR=108.1 V_blood=5271 Qp=53.3 Qs=60.6 Qp/Qs=0.88 Q_vsd=-9.6 balance=+2.19 SaO2=96.9% R2L=22.0% baro_vaso=1.02 baro_ino=1.01 suppress=0.11
-  [PID 12492] [Эйзенменгер, декомпенсированный] Симуляция 0..1800с LSODA max_step=0.050 12001 точек...
-  [PID 9800] [Малый ДМЖП (R=5.0)] готово 12001 точек, 645904 RHS, cache_hits=1
-  [PID 9800] 💾 vsd_results_patient_002.npz (1179.3с)
-  [PID 9604] [Здоровый] готово 12001 точек, 670443 RHS, cache_hits=1
-  [PID 9604] 💾 vsd_results_patient_001.npz (1191.8с)
-[Parallel(n_jobs=5)]: Done   2 out of   5 | elapsed: 19.9min remaining: 29.9min
-  [PID 15136] [Большой ДМЖП (R=1.0)] готово 12001 точек, 710977 RHS, cache_hits=1
-  [PID 15136] 💾 vsd_results_patient_003.npz (1279.6с)
-[Parallel(n_jobs=5)]: Done   3 out of   5 | elapsed: 21.4min remaining: 14.3min
-  [PID 5828] [Эйзенменгер, компенсированный] готово 12001 точек, 999697 RHS, cache_hits=1
-  [PID 5828] 💾 vsd_results_patient_004.npz (1722.5с)
-  [PID 12492] [Эйзенменгер, декомпенсированный] готово 12001 точек, 1079172 RHS, cache_hits=1
-  [PID 12492] 💾 vsd_results_patient_005.npz (1866.5с)
-[Parallel(n_jobs=5)]: Done   5 out of   5 | elapsed: 31.2min finished
+  [PID 16788] [Большой ДМЖП (R=1.0)] Калибровка t_calib=400с...
+  [PID 17068] [Здоровый] Калибровка t_calib=400с...
+  [PID 8688] [Малый ДМЖП (R=5.0)] Калибровка t_calib=400с...
+  [PID 11864] [Эйзенменгер, компенсированный] Калибровка t_calib=600с...
+  [PID 18664] [Эйзенменгер, декомпенсированный] Калибровка t_calib=600с...
+  [PID 17068] [Здоровый] CHECK P_sa=76.4 P_pa=12.0 P_sv=6.5 HR=74.5 V_blood=5219 Qp=59.0 Qs=59.6 Qp/Qs=0.99 Q_vsd=+0.0 balance=-0.64 SaO2=97.2% R2L=0.0% baro_vaso=1.17 baro_ino=1.04 suppress=1.00
+  [PID 17068] [Здоровый] Симуляция 0..1800с LSODA max_step=0.050 12001 точек...
+  [PID 8688] [Малый ДМЖП (R=5.0)] CHECK P_sa=77.9 P_pa=14.8 P_sv=6.4 HR=75.4 V_blood=5219 Qp=62.6 Qs=56.3 Qp/Qs=1.11 Q_vsd=+4.4 balance=+1.87 SaO2=97.2% R2L=12.5% baro_vaso=1.18 baro_ino=1.05 suppress=1.00
+  [PID 8688] [Малый ДМЖП (R=5.0)] Симуляция 0..1800с LSODA max_step=0.050 12001 точек...
+  [PID 16788] [Большой ДМЖП (R=1.0)] CHECK P_sa=63.4 P_pa=11.0 P_sv=6.4 HR=80.9 V_blood=5220 Qp=77.6 Qs=57.7 Qp/Qs=1.34 Q_vsd=+19.9 balance=-0.02 SaO2=97.2% R2L=25.0% baro_vaso=1.20 baro_ino=1.05 suppress=1.00
+  [PID 16788] [Большой ДМЖП (R=1.0)] Симуляция 0..1800с LSODA max_step=0.050 12001 точек...
+  [PID 11864] [Эйзенменгер, компенсированный] CHECK P_sa=59.9 P_pa=57.2 P_sv=6.1 HR=92.4 V_blood=5221 Qp=64.6 Qs=61.5 Qp/Qs=1.05 Q_vsd=+8.8 balance=-5.78 SaO2=96.6% R2L=15.0% baro_vaso=1.05 baro_ino=1.01 suppress=0.23
+  [PID 11864] [Эйзенменгер, компенсированный] Симуляция 0..1800с LSODA max_step=0.050 12001 точек...
+  [PID 18664] [Эйзенменгер, декомпенсированный] CHECK P_sa=66.1 P_pa=79.9 P_sv=6.1 HR=108.1 V_blood=5271 Qp=53.3 Qs=60.6 Qp/Qs=0.88 Q_vsd=-9.6 balance=+2.19 SaO2=96.9% R2L=22.0% baro_vaso=1.02 baro_ino=1.01 suppress=0.11
+  [PID 18664] [Эйзенменгер, декомпенсированный] Симуляция 0..1800с LSODA max_step=0.050 12001 точек...
+  [PID 8688] [Малый ДМЖП (R=5.0)] готово 12001 точек, 645904 RHS, cache_hits=1
+  [PID 8688] 💾 vsd_results_patient_002.npz (1230.1с)
+  [PID 17068] [Здоровый] готово 12001 точек, 670443 RHS, cache_hits=1
+  [PID 17068] 💾 vsd_results_patient_001.npz (1245.7с)
+[Parallel(n_jobs=5)]: Done   2 out of   5 | elapsed: 20.8min remaining: 31.2min
+  [PID 16788] [Большой ДМЖП (R=1.0)] готово 12001 точек, 710977 RHS, cache_hits=1
+  [PID 16788] 💾 vsd_results_patient_003.npz (1344.4с)
+[Parallel(n_jobs=5)]: Done   3 out of   5 | elapsed: 22.5min remaining: 15.0min
+  [PID 11864] [Эйзенменгер, компенсированный] готово 12001 точек, 999697 RHS, cache_hits=1
+  [PID 11864] 💾 vsd_results_patient_004.npz (1812.6с)
+  [PID 18664] [Эйзенменгер, декомпенсированный] готово 12001 точек, 1079172 RHS, cache_hits=1
+  [PID 18664] 💾 vsd_results_patient_005.npz (1965.1с)
+[Parallel(n_jobs=5)]: Done   5 out of   5 | elapsed: 32.8min finished
 
 📊 Генерация визуализаций (последовательно)...
 
@@ -156,17 +156,17 @@ Per-scenario simulation config (from YAML):
    - vsd_results_*.npz
 
 ⏱  Время по сценариям:
-   • Здоровый                                  1191.8с
-   • Малый ДМЖП (R=5.0)                        1179.3с
-   • Большой ДМЖП (R=1.0)                      1279.6с
-   • Эйзенменгер, компенсированный             1722.5с
-   • Эйзенменгер, декомпенсированный           1866.5с
+   • Здоровый                                  1245.7с
+   • Малый ДМЖП (R=5.0)                        1230.1с
+   • Большой ДМЖП (R=1.0)                      1344.4с
+   • Эйзенменгер, компенсированный             1812.6с
+   • Эйзенменгер, декомпенсированный           1965.1с
 
-⏱  Общее wall time: 1881.0с (31.4 мин)
-   Сумма CPU времени: 7239.7с
-   Ускорение vs последовательно: 3.85x
+⏱  Общее wall time: 1977.8с (33.0 мин)
+   Сумма CPU времени: 7597.8с
+   Ускорение vs последовательно: 3.84x
 
-🏁 Завершение: 2026-10-05 15:00:40
-   Общее время работы: 0:31:21.021407
-[log] Finished  : 2026-10-05 15:00:40
-[log] Полный лог: D:\git\hbs\vsd_rus\results\run_simulation_parallel_20261005_142919.log
+🏁 Завершение: 2026-10-05 20:51:40
+   Общее время работы: 0:32:57.994458
+[log] Finished  : 2026-10-05 20:51:40
+[log] Полный лог: D:\git\hbs\vsd_rus\results\run_simulation_parallel_20261005_201842.log
