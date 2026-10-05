@@ -133,6 +133,10 @@ liver:
   k_deg_alb: 0.01
   k_release_alb: 0.05
   k_lac_clear: 2.0
+  # --- Начальные концентрации в печени ---
+  C_bilirubin0: 0.0
+  C_ammonia0: 0.0
+  C_albumin0: 1.0
 
 kidney:
   GFR_base: 120.0

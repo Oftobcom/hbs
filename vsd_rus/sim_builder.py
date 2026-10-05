@@ -20,6 +20,17 @@ _REQUIRED_PERIPHERAL_KEYS = (
     'C_lactate0', 'C_O2_local0',
 )
 
+_REQUIRED_LIVER_KEYS = (
+    'R_ha', 'R_pv_base', 'R_hv_base',
+    'C', 'C_portal',
+    'P_hv0', 'P_portal0', 'V_liver',
+    'albumin_prod_base', 'bilirubin_clearance_base',
+    'ammonia_clearance_base', 'lactate_clearance_base',
+    'C_bilirubin0', 'C_ammonia0', 'C_albumin0',
+    'k_uptake_bil', 'k_uptake_amm',
+    'k_deg_alb', 'k_release_alb', 'k_lac_clear',
+)
+
 def build_model_from_params(params: dict) -> WholeBodyModel:
     """Строит WholeBodyModel строго из merged-конфига."""
     heart_cfg    = dict(params['heart'])
@@ -81,6 +92,17 @@ def build_model_from_params(params: dict) -> WholeBodyModel:
     if none_keys:
         raise ValueError(
             f"sim_builder: peripheral — ключи не должны быть None: {none_keys}."
+        )
+
+    missing = [k for k in _REQUIRED_LIVER_KEYS if k not in liver_cfg]
+    if missing:
+        raise ValueError(
+            f"sim_builder: liver — отсутствуют ключи {missing}."
+        )
+    none_keys = [k for k in _REQUIRED_LIVER_KEYS if liver_cfg[k] is None]
+    if none_keys:
+        raise ValueError(
+            f"sim_builder: liver — ключи не должны быть None: {none_keys}."
         )
 
     # --- substance_names: источник — blood.initial_concentrations ---

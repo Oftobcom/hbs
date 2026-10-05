@@ -56,23 +56,28 @@ class Liver(OrganModel):
     _K_LAC_CLEAR_MIN, _K_LAC_CLEAR_MAX = 0.01, 100.0
     _V_LIVER_MIN, _V_LIVER_MAX = 100.0, 3000.0
 
-    def __init__(self,
-                 R_ha=17.0, R_pv_base=0.25, R_hv_base=0.12,
-                 C=5.0, C_portal=1.5,
-                 P_hv0=8.0, P_portal0=8.0,
-                 V_liver: float = 1500.0,
-                 albumin_prod_base=0.1,
-                 bilirubin_clearance_base=0.2,
-                 ammonia_clearance_base=0.15,
-                 lactate_clearance_base=0.05,
-                 C_bilirubin0=0.0, C_ammonia0=0.0, C_albumin0=1.0,
-                 # --- Коэффициенты кинетики (были захардкожены в get_derivatives) ---
-                 k_uptake_bil: float = 0.1,      # 1/с — скорость поглощения билирубина печенью
-                 k_uptake_amm: float = 0.1,      # 1/с — скорость поглощения аммиака
-                 k_deg_alb: float = 0.01,        # 1/с — деградация альбумина в печени
-                 k_release_alb: float = 0.05,    # 1/с — высвобождение альбумина в кровь
-                 k_lac_clear: float = 2.0        # безразмерный множитель клиренса лактата
-                 ):
+    def __init__(self, *,
+                R_ha: float,
+                R_pv_base: float,
+                R_hv_base: float,
+                C: float,
+                C_portal: float,
+                P_hv0: float,
+                P_portal0: float,
+                V_liver: float,
+                albumin_prod_base: float,
+                bilirubin_clearance_base: float,
+                ammonia_clearance_base: float,
+                lactate_clearance_base: float,
+                C_bilirubin0: float,
+                C_ammonia0: float,
+                C_albumin0: float,
+                k_uptake_bil: float,
+                k_uptake_amm: float,
+                k_deg_alb: float,
+                k_release_alb: float,
+                k_lac_clear: float
+                ):
 
         # =================================================================
         # Валидация конфигурации — fail-fast при инициализации.
@@ -80,6 +85,17 @@ class Liver(OrganModel):
         # ошибки в них должны ловиться один раз, а не в горячем пути RHS.
         # =================================================================
         def _check_range(name, v, lo, hi, typical=""):
+            if v is None:
+                raise ValueError(
+                    f"Liver: {name} не задан (None). "
+                    f"Все параметры обязательны; дефолты удалены. "
+                    f"Задайте liver.{name} в physiology.yaml."
+                )
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise TypeError(
+                    f"Liver: {name}={v!r} должен быть числом, "
+                    f"получено {type(v).__name__}."
+                )
             v = float(v)
             if not np.isfinite(v) or not (lo <= v <= hi):
                 raise ValueError(
