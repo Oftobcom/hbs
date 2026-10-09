@@ -1,0 +1,18 @@
+st.markdown("""
+### О модели
+- **Алгоритм**: XGBoost (многоклассовая классификация, 5 классов: 0–4)
+- **Данные**: Heart Disease UCI (920 записей после очистки)
+- **Признаки**: age, gender, cp, trestbps, chol, fbs, restecg, thalch, exang, oldpeak, slope, ca, thal
+- **Предобработка**:
+  - числовые признаки — без изменений;
+  - категориальные — заполнение пропусков значением `'missing'`, приведение к строке, OneHotEncoder.
+- **Гиперпараметры лучшей модели** (подобраны RandomizedSearchCV по accuracy):
+  - `n_estimators=500`, `max_depth=4`, `learning_rate=0.03`,
+    `subsample=0.6`, `colsample_bytree=0.7`, `gamma=0`,
+    `reg_alpha=0.1`, `reg_lambda=1.5`, `min_child_weight=3`.
+- **Метрики на тестовой выборке**:
+  - Accuracy ≈ **0.625**
+  - Macro F1 ≈ **0.418**
+- **Особенности**: класс `4` почти не предсказывается (F1 = 0).
+- **Файл модели**: `models/xgb_heart_accuracy.pkl`
+""")
