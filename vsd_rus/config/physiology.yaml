@@ -46,7 +46,7 @@ heart:
   k_atria_inotropy: 0.2
   rv_hypertrophy_cap: 2.0        # насыщение массы миокарда
   rv_dilation_gain: 6.0          # базовый gain дилатации
-  rv_compliance_gain: 0.5        # рост комплаенса (E_min падает)
+  rv_compliance_gain: 0.3        # рост комплаенса (E_min падает)
   baro_rv_cap: 1.3               # потолок пульмонального барорефлекса
   rv_emax_rel_lv_cap: 1.15       # E_max_rv ≤ 1.15·E_max_lv  
   

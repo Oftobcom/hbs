@@ -671,13 +671,10 @@ def print_detailed_report(results_dict):
         print(f"  • Поглощение O₂ лёгкими            : "
               f"{format_mean_std(data, 'O2_uptake', fmt='{:.3f}')} мл O₂/с")
 
-        _sh = format_mean_std(data, 'shunt_fraction_R2L',
-                              scale=100.0, fmt='{:.1f}')
-        if _sh != "N/A":
-            _sh_val = float(_sh.split(' ± ')[0])
-            if _sh_val > 1.0:
-                print(f"  • Доля R→L шунта                   : {_sh} %")
-
+        q_vsd_mean = float(np.mean(data['Q_vsd']))
+        qs_mean    = float(np.mean(data['Q_aortic']))
+        f_r2l = max(-q_vsd_mean, 0.0) / max(qs_mean, 1e-6)
+        print(f"  • Доля R→L шунта                   : {f_r2l*100:.1f} %")
 
 # =====================================================================
 # Обёртка для joblib

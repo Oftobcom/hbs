@@ -10,7 +10,7 @@ flow_sensitivity: 0.20
 E_max_rv: 2.7
 E_max_lv: 3.0
 EDV_rv: 170
-vsd_resistance: 0.3
+vsd_resistance: 0.2
 pressure_sensitivity: 0.15
 R_remodel_max: 10.0
 tau_remodel: 120.0
@@ -21,3 +21,4 @@ k_vasomotor: 0.02
 # полость растёт быстро. Больший gain дилатации.
 rv_dilation_gain: 7.0    # более агрессивная дилатация для декомпенсации
 baro_rv_cap: 1.2         # более слабый барорефлекс
+rv_compliance_gain: 1.5    # переопределение для декомпенсации

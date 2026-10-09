@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ml/stage1_identifiability.py — Stage 1: анализ идентифицируемости WholeBodyModel.
+ml/stage1_identifiability.py — Stage 1: скрининг идентифицируемых параметров.
 
 Источники параметров (единственные):
     config/physiology.yaml      — модель (значения θ₀, X0, солвер).
     config/identifiability.yaml — методология Stage 1 (шкалы, границы,
-                                  пороги фиксации, симуляционный протокол).
+                                  пороги, целевое число оставляемых параметров).
 
-Никакие числа, относящиеся к θ, X, границам, шкалам, порогам, солверу
-или калибровке, не задаются в этом файле. Всё читается через
-load_identifiability_config().
+Алгоритм:
+    1. J_ij = (ΔX_i / X0_i) / (Δθ_j / s_j), центрированная разность,
+       столбцы = vary_params + alt_params.
+    2. SVD(J), cond = S_max / S_min.
+    3. Если cond > cond_threshold — жадное обратное исключение:
+       фиксируем параметр с максимальным |Vt[-1]|, пересчитываем SVD,
+       повторяем до cond < threshold или len(keep) == target_n_keep.
+    4. Приоритетные параметры (priority_to_fix) фиксируются первыми.
 
 Запуск:
     python -m ml.stage1_identifiability                # verbose=1
     python -m ml.stage1_identifiability -v 2           # verbose=2
     python -m ml.stage1_identifiability -v 0           # тихо
     python -m ml.stage1_identifiability debug          # диагностика
-    python -m ml.stage1_identifiability --config path  # альтернативный YAML
+    python -m ml.stage1_identifiability --config path
     python -m ml.stage1_identifiability --physio path
 """
 
@@ -36,8 +41,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# Ограничиваем подавление предупреждений только шумом численных солверов,
-# не «всем подряд».
 warnings.filterwarnings("ignore", category=UserWarning,   module="scipy")
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="scipy")
 
@@ -58,13 +61,6 @@ from ml.identifiability_config import (                       # noqa: E402
 # =============================================================================
 
 class Tee:
-    """
-    Дублирует вывод в несколько потоков.
-
-    write()   — буферизация по строкам: flush только при '\\n'.
-    flush()   — сброс всех потоков.
-    fileno()  — проксирует первый поток.
-    """
     def __init__(self, *streams):
         if not streams:
             raise ValueError("Tee: нужен хотя бы один поток")
@@ -92,11 +88,10 @@ class Tee:
 
 
 # =============================================================================
-# 1. θ → модель: адаптер к sim_builder
+# 1. θ → модель
 # =============================================================================
 
 def d_vsd_to_R_vsd(d_mm: float, k_vsd: float) -> float:
-    """Диаметр ДМЖП (мм) → гидродинамическое сопротивление (Пуазейль)."""
     if d_mm <= 0:
         return float("inf")
     return k_vsd / ((d_mm / 2.0) ** 4)
@@ -106,41 +101,29 @@ def _apply_theta_to_cfg(physio: dict, theta: dict, ident_cfg) -> dict:
     """
     Накладывает θ на merged-physiology cfg.
 
-    Stage-1 не читает patient_*.yaml, но sim_builder.build_model_from_params
-    ожидает top-level ключи (vsd_resistance, flow_dependent_lungs,
-    pressure_remodel) — как если бы они пришли из patient YAML.
-    Синтезируем их здесь из physiology.yaml и θ.
+    d_vsd → heart.R_vsd (через Пуазейля с k_vsd из YAML).
+    HR_base → heart.hr И baroreflex.HR_base.
+    Остальные — по identifiability.theta_sources.
+
+    Универсально: работает для любого набора vary_params при условии,
+    что theta_sources в YAML покрывает их.
     """
     cfg = {k: (dict(v) if isinstance(v, dict) else v) for k, v in physio.items()}
 
-    # --- Синтез top-level ключей, ожидаемых sim_builder ---
-    cfg.setdefault(
-        "flow_dependent_lungs",
-        bool(cfg.get("lungs", {}).get("flow_dependent_resistance", True)),
-    )
-    cfg.setdefault(
-        "pressure_remodel",
-        bool(cfg.get("lungs", {}).get("pressure_remodel", False)),
-    )
-    cfg.setdefault("vsd_resistance", float("inf"))   # перезапишется ниже
-
-    # --- d_vsd → R_vsd (в heart И в top-level) ---
     if theta.get("d_vsd") is not None:
-        r_vsd = (d_vsd_to_R_vsd(theta["d_vsd"], ident_cfg.k_vsd)
-                 if theta["d_vsd"] > 0 else float("inf"))
-        cfg["heart"]["R_vsd"] = r_vsd
-        cfg["vsd_resistance"] = r_vsd
+        cfg["heart"]["R_vsd"] = (
+            d_vsd_to_R_vsd(theta["d_vsd"], ident_cfg.k_vsd)
+            if theta["d_vsd"] > 0 else float("inf")
+        )
 
-    # --- HR_base → heart.hr И baroreflex.HR_base ---
     if theta.get("HR_base") is not None:
         cfg["heart"]["hr"] = float(theta["HR_base"])
         cfg["baroreflex"]["HR_base"] = float(theta["HR_base"])
 
-    # --- Остальные — из theta_sources ---
     for p, src in ident_cfg.ident["theta_sources"].items():
         if src.get("from") == "geometry":
             continue
-        if p in ("HR_base", "d_vsd"):     # уже обработаны выше
+        if p == "HR_base":
             continue
         v = theta.get(p)
         if v is None:
@@ -151,13 +134,11 @@ def _apply_theta_to_cfg(physio: dict, theta: dict, ident_cfg) -> dict:
 
 
 def build_model(theta: dict, ident_cfg: IdentifiabilityConfig) -> WholeBodyModel:
-    """Собирает WholeBodyModel ровно тем же путём, что продакшен."""
     cfg = _apply_theta_to_cfg(ident_cfg.physiology, theta, ident_cfg)
     return build_model_from_params(cfg)
 
 
 def resolve_R_sys(theta: dict, ident_cfg: IdentifiabilityConfig) -> float:
-    """R_sys=None → авто-калибровка через sim_builder (auto_calibrate_...)."""
     if theta.get("R_sys") is not None:
         return float(theta["R_sys"])
     return float(build_model(theta, ident_cfg).R_sys_peripheral)
@@ -176,19 +157,12 @@ _STAGE1_REQUIRED_KEYS = (
 
 def _resolve_stage1_sim_cfg(ident_cfg: IdentifiabilityConfig,
                             verbose: int = 0) -> dict:
-    """
-    sim_cfg для Stage 1 = physiology.simulation ∪ identifiability.simulation.
-
-    Hard limits (если заданы в identifiability.hard_limits) — единственное
-    место, где мы ограничиваем значения из YAML.
-    """
     s = dict(ident_cfg.sim_cfg)
     missing = [k for k in _STAGE1_REQUIRED_KEYS if k not in s]
     if missing:
         raise ValueError(
             "physiology.simulation ∪ identifiability.simulation "
-            f"не содержат обязательных ключей Stage 1: {missing}. "
-            f"Добавьте их в config/identifiability.yaml → simulation."
+            f"не содержат обязательных ключей Stage 1: {missing}."
         )
     hl = ident_cfg.hard_limits
     if "t_end_max" in hl and s["t_end"] > hl["t_end_max"]:
@@ -204,7 +178,6 @@ def _resolve_stage1_sim_cfg(ident_cfg: IdentifiabilityConfig,
 
 
 def _collect_outputs(model, sol) -> dict:
-    """compute_outputs по всем точкам решения → dict[str, np.ndarray]."""
     keys = None
     outputs = []
     for i, ti in enumerate(sol.t):
@@ -219,47 +192,7 @@ def _collect_outputs(model, sol) -> dict:
     return data
 
 
-def _print_window_diagnostics(data: dict, label: str = "WINDOW",
-                              t_start_stationary: float = 300.0) -> None:
-    """28 диагностических ключей за последние 10 кардиоциклов."""
-    try:
-        t = data["t"]
-        mask_hr = t > t_start_stationary
-        hr_tail = data["HR"][mask_hr] if np.any(mask_hr) else data["HR"]
-        mean_hr = max(float(np.mean(hr_tail)), 1.0)
-        win = t > (t[-1] - 10.0 * 60.0 / mean_hr)
-        keys_diag = [
-            "P_sa", "P_pa", "P_sv", "P_pv", "P_la", "P_ra",
-            "V_la", "V_lv", "V_ra", "V_rv",
-            "V_sv", "V_sv_target", "V_sv_fraction", "V_blood",
-            "Q_aortic", "Q_pulmonary", "Q_sv_to_ra", "Q_pv_to_la",
-            "Q_peripheral", "Q_ven_in",
-            "R_eff_peripheral", "f_P_myogenic", "f_O2_autoreg",
-            "HR", "GFR", "Q_brain", "Q_liver_out", "Q_renal",
-        ]
-        print(f"\n--- {label} DIAG (last 10 cycles) ---")
-        for k in keys_diag:
-            if k in data:
-                arr = data[k][win]
-                print(f"  {k:22s} mean={np.mean(arr):8.3f} std={np.std(arr):6.3f} "
-                      f"min={np.min(arr):7.2f} max={np.max(arr):7.2f} "
-                      f"last={arr[-1]:7.2f}")
-        if "Q_ven_in" in data and "Q_peripheral" in data:
-            print(f"  BALANCE Q_ven_in={np.mean(data['Q_ven_in'][win]):.2f} "
-                  f"Q_periph={np.mean(data['Q_peripheral'][win]):.2f} "
-                  f"Qa={np.mean(data['Q_aortic'][win]):.2f}")
-    except Exception as e:
-        print(f"  [diag warn] {e}")
-
-
 def _passes_sanity(X: dict, ident_cfg: IdentifiabilityConfig) -> tuple[bool, str]:
-    """
-    Физиологический sanity-check. Пороги читаются из
-    identifiability.sanity: {P_sa: [lo, hi], ...}.
-
-    Если секция отсутствует — проверка пропускается (но с предупреждением
-    один раз за прогон, см. _main_impl).
-    """
     sanity = ident_cfg.ident.get("sanity", {})
     if not sanity:
         return True, "no sanity section"
@@ -276,10 +209,7 @@ def get_steady_outputs(model, ident_cfg: IdentifiabilityConfig,
                        verbose: int = 0) -> Optional[dict]:
     """
     Калибровка → интегрирование → проверка стационара → усреднение
-    за последние 10 кардиоциклов.
-
-    Возвращает {P_sa, P_pa, Q_aortic, Qp_Qs, EDV_LV, EDV_RV, HR, _data}
-    или None.
+    за последние 10 циклов; EDV — за последний цикл.
     """
     verbose = int(verbose)
     cfg = _resolve_stage1_sim_cfg(ident_cfg, verbose=verbose)
@@ -326,7 +256,6 @@ def get_steady_outputs(model, ident_cfg: IdentifiabilityConfig,
 
     data = _collect_outputs(model, sol)
 
-    # --- CONVERGENCE WINDOWS ---
     if verbose >= 1:
         print("\n--- CONVERGENCE WINDOWS ---")
         for t_lo, t_hi in [(100, 300), (250, 350), (300, 400),
@@ -343,7 +272,7 @@ def get_steady_outputs(model, ident_cfg: IdentifiabilityConfig,
                   f"Q_periph={data['Q_peripheral'][m].mean():6.2f} "
                   f"R_eff={data['R_eff_peripheral'][m].mean():5.3f}")
 
-    # --- Проверка стационарности: средние по двум окнам по 10 циклов ---
+    # --- Стационарность: две волны по 10 циклов ---
     tail_for_hr = data["t"] > t_start_stationary
     if not np.any(tail_for_hr):
         return None
@@ -373,7 +302,6 @@ def get_steady_outputs(model, ident_cfg: IdentifiabilityConfig,
                   f"{rel_diff:.4f} > {stat_tol}")
         return None
 
-    # --- Средние за последние 10 циклов; EDV — за последний цикл ---
     HR_mean = float(np.mean(data["HR"][tail_for_hr]))
     T = 60.0 / max(HR_mean, 1e-6)
     window_avg = data["t"] > (data["t"][-1] - 10.0 * T)
@@ -393,43 +321,29 @@ def get_steady_outputs(model, ident_cfg: IdentifiabilityConfig,
               f"Qa={mean_Qa:.2f} Qp={mean_Qp:.2f} Qp/Qs={X['Qp_Qs']:.3f} "
               f"EDV_LV={X['EDV_LV']:.1f} EDV_RV={X['EDV_RV']:.1f} "
               f"HR={X['HR']:.2f}")
-        print(f"            P_sv={np.mean(data['P_sv'][window_avg]):.2f} "
-              f"P_pv={np.mean(data['P_pv'][window_avg]):.2f} "
-              f"V_sv={np.mean(data['V_sv'][window_avg]):.1f}/"
-              f"{np.mean(data['V_sv_target'][window_avg]):.1f} "
-              f"Q_periph={np.mean(data['Q_peripheral'][window_avg]):.2f} "
-              f"R_eff={np.mean(data['R_eff_peripheral'][window_avg]):.3f}")
 
-    # --- Sanity-check из YAML ---
     ok, reason = _passes_sanity(X, ident_cfg)
     if not ok:
         if verbose >= 1:
             print(f"  [warn] нефизиологично: {reason}")
         return None
 
-    if verbose >= 2:
-        _print_window_diagnostics(
-            data, label="STEADY 10 cycles",
-            t_start_stationary=t_start_stationary,
-        )
-
     X["_data"] = data
     return X
 
 
 # =============================================================================
-# 3. Относительный численный якобиан
+# 3. Численный якобиан
 # =============================================================================
 
 def compute_jacobian(theta0: dict, ident_cfg: IdentifiabilityConfig,
                      verbose: int = 1) -> tuple[np.ndarray, dict, dict]:
     """
-    J_ij = (ΔX_i / X0_i) / (Δθ_j / s_j), центрированная разность.
+    J_ij = (ΔX_i / X0_i) / (Δθ_j / s_j).
 
-    Столбцы: vary_params + alt_params. alt_params считаются заранее —
-    Fallback B использует уже готовый столбец без пересчёта J.
-
-    Возвращает (J, X0_dict, theta0_resolved).
+    Столбцы = vary_params + alt_params (alt может быть пустым).
+    Для каждого параметра: центрированная разность с шагом,
+    клипнутым по param_bounds.
     """
     verbose = int(verbose)
     param_names = list(ident_cfg.vary_params) + list(ident_cfg.alt_params)
@@ -440,16 +354,17 @@ def compute_jacobian(theta0: dict, ident_cfg: IdentifiabilityConfig,
     rel_step = ident_cfg.rel_step
     d_vsd_min_delta = ident_cfg.d_vsd_min_delta
 
-    # --- Полнота конфигурации: fail-fast на старте, а не в середине ---
+    # --- Полнота конфигурации ---
     for p in param_names:
         if p not in scales:
             raise ValueError(
-                f"identifiability.param_scales: нет ключа {p!r} "
-                f"(нужен для {param_names})."
+                f"identifiability.param_scales: нет ключа {p!r}. "
+                f"Добавьте в config/identifiability.yaml."
             )
         if p not in bounds:
             raise ValueError(
-                f"identifiability.param_bounds: нет ключа {p!r}."
+                f"identifiability.param_bounds: нет ключа {p!r}. "
+                f"Добавьте в config/identifiability.yaml."
             )
     for x in x_names:
         if x not in x_scale:
@@ -466,17 +381,13 @@ def compute_jacobian(theta0: dict, ident_cfg: IdentifiabilityConfig,
     if verbose >= 2:
         print("=" * 70 + "\n[Stage1] THETA0 RESOLVED")
         for k in param_names:
-            print(f"  {k:18s} = {theta0.get(k)} scale={scales.get(k)}")
-        print(f"  R_sys resolved = {theta0['R_sys']:.4f}  "
-              f"R_vsd(d_vsd={theta0['d_vsd']}мм) = "
-              f"{d_vsd_to_R_vsd(theta0['d_vsd'], ident_cfg.k_vsd):.4f}")
+            print(f"  {k:28s} = {theta0.get(k)}  scale={scales.get(k)}")
         print("=" * 70)
     elif verbose >= 1:
         print(f"[Stage1] R_sys resolved = {theta0['R_sys']:.4f}")
         print(f"[Stage1] R_vsd(d_vsd={theta0['d_vsd']}мм) = "
               f"{d_vsd_to_R_vsd(theta0['d_vsd'], ident_cfg.k_vsd):.4f}")
 
-    # --- X0 ---
     X0 = get_steady_outputs(build_model(theta0, ident_cfg),
                             ident_cfg, verbose=verbose)
     if X0 is None:
@@ -511,9 +422,9 @@ def compute_jacobian(theta0: dict, ident_cfg: IdentifiabilityConfig,
             continue
 
         if verbose >= 2:
-            print(f"\n--- J param {j} {p} scale={scale:.4g} "
-                  f"delta={delta:.4g} theta={theta0[p]:.4g} "
-                  f"→ plus={theta_plus[p]:.4g} minus={theta_minus[p]:.4g} ---")
+            print(f"\n--- J param {j:2d} {p:28s} scale={scale:.4g} "
+                  f"delta={delta:.4g} → plus={theta_plus[p]:.4g} "
+                  f"minus={theta_minus[p]:.4g}")
 
         Xp = get_steady_outputs(build_model(theta_plus, ident_cfg),
                                 ident_cfg, verbose=0)
@@ -536,7 +447,7 @@ def compute_jacobian(theta0: dict, ident_cfg: IdentifiabilityConfig,
                       f"Xm={Xm[x]:8.3f} dX={Xp[x] - Xm[x]:+8.3f} "
                       f"J={J[x_names.index(x), j]:+8.4f}")
         elif verbose >= 1:
-            print(f"  [ok] {p:18s} delta={delta:.4g}  "
+            print(f"  [ok] {p:28s} delta={delta:.4g}  "
                   f"dX(P_sa)={Xp['P_sa'] - X0['P_sa']:+.4g}  "
                   f"dX(Qp_Qs)={Xp['Qp_Qs'] - X0['Qp_Qs']:+.4g}")
 
@@ -544,12 +455,11 @@ def compute_jacobian(theta0: dict, ident_cfg: IdentifiabilityConfig,
 
 
 # =============================================================================
-# 4. SVD и выбор фиксируемых
+# 4. SVD и жадное обратное исключение
 # =============================================================================
 
 def analyze_svd(J: np.ndarray, param_names: list, x_names: list,
                 verbose: int = 0) -> dict:
-    """SVD + cond + последний правый сингулярный вектор."""
     verbose = int(verbose)
 
     if np.any(np.isnan(J)):
@@ -565,129 +475,109 @@ def analyze_svd(J: np.ndarray, param_names: list, x_names: list,
                 .sort_values(ascending=False)
 
     if verbose >= 1:
-        print("\n=== SVD FULL ===")
-        print(f"S = {S}\ncond = {cond:.4f} "
-              f"S_max={S[0]:.4f} S_min={S[-1]:.6f}")
-        print("Vt matrix:")
-        for i, row in enumerate(Vt):
-            print(f"  Vt[{i}] S={S[i]:.4f} : "
-                  f"{['%+.3f' % v for v in row]} → {param_names}")
-        print("|Vt[-1]| contrib:")
-        for k, v in contrib.items():
-            print(f"  {k:18s} : {v:.6f}")
+        print(f"\n=== SVD ({len(param_names)} params) ===")
+        print(f"cond = {cond:.4f}  S_max={S[0]:.4f}  S_min={S[-1]:.6f}")
+        print("|Vt[-1]| (top-10):")
+        for k, v in contrib.head(10).items():
+            print(f"  {k:28s} : {v:.6f}")
 
     return {"U": U, "S": S, "Vt": Vt, "cond": cond,
             "v_last": v_last, "contrib": contrib, "J_clean": J_clean}
 
 
-def _fix_and_cond(J: np.ndarray, param_names: list, to_fix: list,
-                  x_names: list, verbose: int = 0):
-    """(cond, v_last, keep_names, svd_res) для J со вычеркнутыми to_fix."""
-    keep_idx = [i for i, p in enumerate(param_names) if p not in to_fix]
-    keep_names = [param_names[i] for i in keep_idx]
-    res = analyze_svd(J[:, keep_idx], keep_names, x_names, verbose=verbose)
-    return res["cond"], res["v_last"], keep_names, res
-
-
-def _pick_to_fix_by_name(svd_res: dict, param_names: list, priority: list,
-                         n_fix: int, thr_priority: float,
-                         thr_other: float) -> list:
-    """
-    Ровно n_fix параметров для фиксации.
-
-    Сначала из priority с |contrib| > thr_priority, затем любые с
-    |contrib| > thr_other, при недоборе — top по |contrib|.
-    """
-    contrib = svd_res["contrib"]
-    to_fix: list[str] = []
-    for p in priority:
-        if p in contrib and float(contrib[p]) > thr_priority:
-            to_fix.append(p)
-    for p, v in contrib.items():
-        if p in to_fix:
-            continue
-        if float(v) > thr_other:
-            to_fix.append(p)
-    if len(to_fix) < n_fix:
-        for p in contrib.index:
-            if p not in to_fix:
-                to_fix.append(p)
-            if len(to_fix) >= n_fix:
-                break
-    return to_fix[:n_fix]
+def _svd_on_subset(J: np.ndarray, param_names: list, keep: list,
+                   x_names: list, verbose: int = 0) -> dict:
+    """SVD по подмножеству столбцов (сохраняет исходный порядок param_names)."""
+    keep_idx = [param_names.index(p) for p in keep]
+    return analyze_svd(J[:, keep_idx], keep, x_names, verbose=verbose)
 
 
 def select_final_theta(J: np.ndarray, param_names: list,
                        ident_cfg: IdentifiabilityConfig,
                        verbose: int = 1) -> dict:
     """
-    Логика 6 → 5 → 6_alt.
+    Жадное обратное исключение.
 
-    Fallback B бесплатный: k_inotropy уже посчитан в J (alt_params),
-    надо лишь вычеркнуть alt_replaces и оставить alt_params[0].
+    1. forced_fix = priority_to_fix — фиксируются безусловно.
+    2. keep = param_names \\ forced_fix.
+    3. Пока cond(keep) > cond_threshold и len(keep) > target_n_keep:
+         фиксируем параметр с максимальным |Vt[-1]|,
+         убираем из keep, добавляем в to_fix.
+    4. Если cond(keep) < threshold раньше — останавливаемся.
+       Если достигли target_n_keep, а cond всё ещё > threshold —
+       возвращаем с пометкой status='target_reached_but_ill_conditioned'.
+
+    Возвращает dict с полной историей шагов.
     """
     x_names = list(ident_cfg.x_names)
-    priority = list(ident_cfg.priority_to_fix)
-    n_fix = ident_cfg.n_fix_primary
-    thr_p = ident_cfg.thr_priority
-    thr_o = ident_cfg.thr_other
     cond_thr = ident_cfg.cond_threshold
-    extra_cands = list(ident_cfg.extra_candidates)
-    alt_replaces = ident_cfg.alt_replaces
-    alt_params = list(ident_cfg.alt_params)
+    target_keep = ident_cfg.target_n_keep
+    forced_fix = [p for p in ident_cfg.priority_to_fix if p in param_names]
 
-    res_all = analyze_svd(J, param_names, x_names, verbose=0)
+    # Стартовое состояние
+    keep = [p for p in param_names if p not in forced_fix]
+    to_fix = list(forced_fix)
+    history = []
+
+    # Первая диагностика
+    res_full = analyze_svd(J, param_names, x_names, verbose=0)
     if verbose >= 1:
         print(f"\n[Stage1] cond_full({len(param_names)}) = "
-              f"{res_all['cond']:.2f}")
+              f"{res_full['cond']:.2e}")
 
-    # --- Режим 6 ---
-    to_fix = _pick_to_fix_by_name(res_all, param_names, priority,
-                                  n_fix, thr_p, thr_o)
-    cond6, v6, keep6, res6 = _fix_and_cond(J, param_names, to_fix, x_names)
-    if verbose >= 1:
-        print(f"[Stage1] режим 6: to_fix={to_fix}, cond={cond6:.3f}, "
-              f"keep={keep6}")
-    if cond6 < cond_thr:
-        return {"mode": "6", "theta_final": keep6, "to_fix": to_fix,
-                "cond": cond6, "v_last": v6, "res": res6, "res_all": res_all}
+    # Итеративное исключение
+    while True:
+        res_keep = _svd_on_subset(J, param_names, keep, x_names, verbose=0)
+        cond_keep = res_keep["cond"]
+        history.append({
+            "step": len(history),
+            "n_keep": len(keep),
+            "n_fix": len(to_fix),
+            "cond": cond_keep,
+            "just_fixed": history[-1]["just_fixed"] if history else None,
+        })
+        if verbose >= 1:
+            print(f"[Stage1] step {len(history) - 1:2d}: "
+                  f"keep={len(keep):2d}  cond={cond_keep:.3e}")
 
-    # --- Fallback A (режим 5) ---
-    contrib6 = res6["contrib"]
-    extra = next((p for p in extra_cands if p in contrib6), None)
-    if extra is None and len(contrib6):
-        extra = contrib6.index[0]
-    to_fix_a = list(dict.fromkeys(to_fix + ([extra] if extra else [])))
-    cond5, v5, keep5, res5 = _fix_and_cond(J, param_names, to_fix_a, x_names)
-    if verbose >= 1:
-        print(f"[Stage1] Fallback A: to_fix={to_fix_a}, cond={cond5:.3f}")
-    if cond5 < cond_thr:
-        return {"mode": "5", "theta_final": keep5, "to_fix": to_fix_a,
-                "cond": cond5, "v_last": v5, "res": res5, "res_all": res_all}
+        if cond_keep < cond_thr:
+            if verbose >= 1:
+                print(f"[Stage1] cond < {cond_thr} достигнут при "
+                      f"len(keep)={len(keep)}")
+            status = "converged"
+            break
 
-    # --- Fallback B (режим 6_alt): БЕЗ пересчёта J ---
-    if not alt_params:
-        raise ValueError(
-            "Fallback B требует identifiability.alt_params — "
-            "добавьте, например, [k_inotropy]."
-        )
-    if alt_replaces not in param_names:
-        raise ValueError(
-            f"identifiability.alt_replaces={alt_replaces!r} не найден "
-            f"среди {param_names}. Проверьте YAML."
-        )
-    to_fix_b = list(dict.fromkeys(to_fix_a + [alt_replaces]))
-    keep_names_b = [p for p in param_names if p not in to_fix_b]
-    keep_idx_b = [param_names.index(p) for p in keep_names_b]
-    res_b = analyze_svd(J[:, keep_idx_b], keep_names_b, x_names, verbose=0)
+        if len(keep) <= target_keep:
+            if verbose >= 1:
+                print(f"[Stage1] достигнут target_n_keep={target_keep}, "
+                      f"но cond={cond_keep:.3e} > {cond_thr}")
+            status = "target_reached_but_ill_conditioned"
+            break
 
-    if verbose >= 1:
-        print(f"[Stage1] режим 6_alt (без пересчёта J): "
-              f"to_fix={to_fix_b}, cond={res_b['cond']:.3f}, "
-              f"keep={keep_names_b}")
-    return {"mode": "6_alt", "theta_final": keep_names_b, "to_fix": to_fix_b,
-            "cond": res_b["cond"], "v_last": res_b["v_last"],
-            "res": res_b, "res_all": res_all}
+        # Фиксируем самый вкладной в слабое направление
+        worst = res_keep["contrib"].index[0]
+        keep.remove(worst)
+        to_fix.append(worst)
+        if verbose >= 1:
+            print(f"           → fix {worst!r} "
+                  f"(|Vt[-1]|={res_keep['contrib'][worst]:.4f})")
+        history.append({"just_fixed": worst})
+
+    # Финальный SVD
+    res_final = _svd_on_subset(J, param_names, keep, x_names, verbose=0)
+
+    return {
+        "status":          status,
+        "theta_final":     keep,
+        "to_fix":          to_fix,
+        "cond":            res_final["cond"],
+        "v_last":          res_final["v_last"],
+        "res":             res_final,
+        "res_all":         res_full,
+        "history":         history,
+        "target_n_keep":   target_keep,
+        "forced_fix":      forced_fix,
+    }
 
 
 # =============================================================================
@@ -697,37 +587,34 @@ def select_final_theta(J: np.ndarray, param_names: list,
 def plot_results(J: np.ndarray, svd_res: dict, param_names: list,
                  x_names: list, out_path: Path) -> None:
     """2×2 dashboard: heatmap J, SVD-спектр, Vt[-1], текстовая сводка."""
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(2, 2, figsize=(16, 11))
 
     ax = axes[0, 0]
     j_abs_max = np.nanmax(np.abs(J)) if np.any(np.isfinite(J)) else 1.0
     im = ax.imshow(np.nan_to_num(J, nan=0.0), aspect="auto", cmap="RdBu_r",
                    vmin=-j_abs_max, vmax=j_abs_max)
     ax.set_xticks(range(len(param_names)))
-    ax.set_xticklabels(param_names, rotation=45, ha="right", fontsize=9)
+    ax.set_xticklabels(param_names, rotation=60, ha="right", fontsize=8)
     ax.set_yticks(range(len(x_names)))
     ax.set_yticklabels(x_names, fontsize=9)
     ax.set_title("Относительный якобиан J")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     ax = axes[0, 1]
-    ax.semilogy(np.arange(1, len(svd_res["S"]) + 1), svd_res["S"], "o-")
+    S = svd_res["S"]
+    ax.semilogy(np.arange(1, len(S) + 1), np.maximum(S, 1e-16), "o-")
     ax.set_xlabel("Индекс сингулярного числа")
     ax.set_ylabel("S_i (log)")
-    ax.set_title(f"SVD-спектр, cond = {svd_res['cond']:.2f}")
+    ax.set_title(f"SVD-спектр, cond = {svd_res['cond']:.2e}")
     ax.grid(True, which="both", alpha=0.3)
-    if svd_res["S"][0] > 0:
-        ax.axhline(svd_res["S"][0] / 100.0, color="r", ls="--",
-                   alpha=0.5, label="порог cond=100")
-    ax.legend()
 
     ax = axes[1, 0]
     v = svd_res["v_last"]
     colors = ["crimson" if abs(x) > 0.4 else "steelblue" for x in v]
-    ax.bar(range(len(param_names)), v, color=colors)
-    ax.set_xticks(range(len(param_names)))
-    ax.set_xticklabels(param_names, rotation=45, ha="right", fontsize=9)
-    ax.axhline(0.0, color="k", lw=0.5)
+    ax.barh(range(len(param_names)), v, color=colors)
+    ax.set_yticks(range(len(param_names)))
+    ax.set_yticklabels(param_names, fontsize=8)
+    ax.axvline(0.0, color="k", lw=0.5)
     ax.set_title("Vt[-1] — слабое направление (|v|>0.4 → фиксировать)")
     ax.grid(True, alpha=0.3)
 
@@ -736,12 +623,10 @@ def plot_results(J: np.ndarray, svd_res: dict, param_names: list,
     txt = "|Vt[-1]| — вклад в слабое направление:\n\n"
     for k, val in svd_res["contrib"].items():
         flag = "  <-- FIX" if val > 0.4 else ""
-        txt += f"  {k:18s} : {val:.4f}{flag}\n"
-    txt += f"\ncond = {svd_res['cond']:.2f}"
-    txt += ("\n\ncond > 100 → коллинеарность" if svd_res["cond"] > 100
-            else "\n\ncond ≤ 100 → хорошо обусловлена")
+        txt += f"  {k:28s} : {val:.4f}{flag}\n"
+    txt += f"\ncond = {svd_res['cond']:.3e}"
     ax.text(0.02, 0.98, txt, va="top", ha="left",
-            family="monospace", fontsize=10, transform=ax.transAxes)
+            family="monospace", fontsize=8, transform=ax.transAxes)
 
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -750,40 +635,87 @@ def plot_results(J: np.ndarray, svd_res: dict, param_names: list,
 
 
 # =============================================================================
-# 6. Self-test: θ₀ ↔ модель
+# 6. Self-test: θ₀ ↔ модель (покрывает все theta_sources)
 # =============================================================================
 
 def _self_test_theta0(ident_cfg: IdentifiabilityConfig) -> None:
     """
     Проверка, что θ₀ из YAML действительно попадает в модель.
-    Ловит случайный рассинхрон physiology.yaml ↔ theta_sources.
+    Универсально: проходит по всем theta_sources и сравнивает с атрибутом
+    модели, соответствующим (section, key).
     """
     t0 = dict(ident_cfg.theta0)
     if t0.get("R_sys") is None:
         t0["R_sys"] = resolve_R_sys(t0, ident_cfg)
     m = build_model(t0, ident_cfg)
 
+    # Карта (section, key) → атрибут построенной модели.
+    # Только для ключей, которые реально доступны как m.<organ>.<attr>.
+    # Если ключа в карте нет — молча пропускаем.
+    section_to_organ = {
+        "heart":      "heart",
+        "lungs":      "lungs",
+        "baroreflex": "baroreflex",
+        "blood":      "blood",
+        "systemic":   None,       # системные собираются в WindkesselVessel
+    }
+    key_to_attr = {
+        ("heart",      "E_max_lv"):    ("E_max_base", "LV"),
+        ("heart",      "E_max_rv"):    ("E_max_base", "RV"),
+        ("heart",      "E_min_lv"):    ("E_min",      "LV"),
+        ("heart",      "E_min_rv"):    ("E_min",      "RV"),
+        ("heart",      "hr"):          ("hr_base",     None),
+        ("heart",      "R_vsd"):       ("R_vsd",       None),
+        ("baroreflex", "HR_base"):     ("HR_base",     None),
+        ("baroreflex", "P_set"):       ("P_set",       None),
+        ("baroreflex", "k_hr"):        ("k_hr",        None),
+        ("baroreflex", "k_inotropy"):  ("k_inotropy",  None),
+        ("lungs",      "flow_sensitivity"): ("flow_sensitivity", None),
+        ("blood",      "V0"):          ("V0",          None),
+    }
+
     checks = []
-    if t0.get("E_max_lv") is not None:
-        checks.append(("E_max_lv", m.heart.E_max_base["LV"], t0["E_max_lv"]))
-    if t0.get("E_max_rv") is not None:
-        checks.append(("E_max_rv", m.heart.E_max_base["RV"], t0["E_max_rv"]))
-    if t0.get("HR_base") is not None:
-        checks.append(("HR_base→heart.hr", m.heart.hr_base, t0["HR_base"]))
-        checks.append(("HR_base→baro",     m.baroreflex.HR_base, t0["HR_base"]))
-    if t0.get("V0_blood") is not None:
-        checks.append(("V0_blood", m.blood.V0, t0["V0_blood"]))
-    if t0.get("flow_sensitivity") is not None:
-        checks.append(("flow_sens",
-                       m.lungs.flow_sensitivity, t0["flow_sensitivity"]))
-    if t0.get("R_sys") is not None:
-        checks.append(("R_sys", m.R_sys_peripheral, t0["R_sys"]))
+    for p, src in ident_cfg.ident["theta_sources"].items():
+        if src.get("from") == "geometry":
+            continue
+        section, key = src["section"], src["key"]
+        organ_name = section_to_organ.get(section)
+        if organ_name is None:
+            continue
+        attr_map = key_to_attr.get((section, key))
+        if attr_map is None:
+            continue
+        organ = getattr(m, organ_name, None)
+        if organ is None:
+            continue
+        attr, sub = attr_map
+        obj = getattr(organ, attr, None)
+        if obj is None:
+            continue
+        actual = obj[sub] if sub is not None else obj
+        expected = t0.get(p)
+        if expected is None:
+            continue
+        checks.append((f"{p} ({section}.{key})", actual, expected))
+
+    if not checks:
+        print("[Stage1] self-test: нечего проверять "
+              "(key_to_attr не покрывает theta_sources).")
 
     for name, actual, expected in checks:
         if not np.isclose(float(actual), float(expected), rtol=1e-6):
             raise RuntimeError(
                 f"Stage1 self-test: {name}: модель={actual} ≠ θ₀={expected}. "
                 f"Проверьте physiology.yaml и theta_sources."
+            )
+
+    # Дополнительно: R_sys — через m.R_sys_peripheral
+    if t0.get("R_sys") is not None:
+        if not np.isclose(float(m.R_sys_peripheral), float(t0["R_sys"]),
+                          rtol=1e-6):
+            raise RuntimeError(
+                f"Stage1 self-test: R_sys: модель={m.R_sys_peripheral} "
+                f"≠ θ₀={t0['R_sys']}."
             )
 
 
@@ -793,17 +725,19 @@ def _self_test_theta0(ident_cfg: IdentifiabilityConfig) -> None:
 
 def _main_impl(verbose: int, out_dir: Path, t_start: datetime,
                ident_cfg: IdentifiabilityConfig) -> None:
-    """Основная логика main() внутри Tee-контекста."""
     print(f"[Stage1] Старт: {t_start:%Y-%m-%d %H:%M:%S} | verbose={verbose}")
     print("=" * 70)
-    print("Stage 1: анализ идентифицируемости WholeBodyModel")
+    print("Stage 1: скрининг идентифицируемых параметров WholeBodyModel")
+    print(f"  vary_params: {len(ident_cfg.vary_params)}")
+    print(f"  alt_params:  {len(ident_cfg.alt_params)}")
+    print(f"  x_names:     {len(ident_cfg.x_names)}")
+    print(f"  target_n_keep: {ident_cfg.target_n_keep}")
     print("=" * 70)
 
     if not ident_cfg.ident.get("sanity"):
         print("[warn] identifiability.sanity не задан — "
               "физиологический sanity-check отключён.")
 
-    # --- Self-test θ₀ ↔ модель ---
     _self_test_theta0(ident_cfg)
     print("[Stage1] self-test θ₀ ↔ модель: OK")
 
@@ -811,7 +745,8 @@ def _main_impl(verbose: int, out_dir: Path, t_start: datetime,
     J, X0, theta0_resolved = compute_jacobian(theta0, ident_cfg,
                                               verbose=verbose)
 
-    all_param_names = list(ident_cfg.vary_params) + list(ident_cfg.alt_params)
+    all_param_names = (list(ident_cfg.vary_params)
+                       + list(ident_cfg.alt_params))
     df_J = pd.DataFrame(J, index=ident_cfg.x_names, columns=all_param_names)
     df_J.to_csv(out_dir / "stage1_J.csv", float_format="%.6g")
     print(f"\n[Stage1] J сохранён: {out_dir / 'stage1_J.csv'}")
@@ -827,37 +762,39 @@ def _main_impl(verbose: int, out_dir: Path, t_start: datetime,
     selection = select_final_theta(J, all_param_names, ident_cfg,
                                    verbose=_sel_verbose)
     if verbose >= 1:
-        print(f"[Stage1] Режим: {selection['mode']} | "
-              f"to_fix={selection['to_fix']} | "
-              f"cond={selection['cond']:.3f} | keep={selection['theta_final']}")
+        print(f"\n[Stage1] Режим: {selection['status']} | "
+              f"θ_final={selection['theta_final']} | "
+              f"cond={selection['cond']:.3e}")
 
     # --- Report ---
     lines = ["# STAGE 1 REPORT\n\n"]
+    lines.append(f"**Status:** `{selection['status']}`\n")
+    lines.append(f"**Target n_keep:** {selection['target_n_keep']}\n")
+    lines.append(f"**Actual n_keep:** {len(selection['theta_final'])}\n")
+    lines.append(f"**cond_final:** {selection['cond']:.3e}\n\n")
 
     lines.append("## Базовая точка θ₀\n")
     lines.append(f"- d_vsd = {theta0_resolved['d_vsd']:.4f} мм → "
                  f"R_vsd = "
                  f"{d_vsd_to_R_vsd(theta0_resolved['d_vsd'], ident_cfg.k_vsd):.4f}\n")
-    lines.append(f"- R_sys = {theta0_resolved['R_sys']:.4f} "
-                 f"(resolved под target_MAP/CO)\n")
-    for p in ("E_max_lv", "E_max_rv", "flow_sensitivity", "C_sys_art",
-              "HR_base", "V0_blood"):
-        if p in theta0_resolved:
-            lines.append(f"- {p} = {theta0_resolved[p]}\n")
+    for p in all_param_names:
+        v = theta0_resolved.get(p)
+        if v is not None:
+            lines.append(f"- {p:28s} = {v}\n")
     lines.append("\n")
 
     lines.append("## YAML sources (θ → physiology.yaml)\n")
     for p, src in ident_cfg.ident["theta_sources"].items():
         if src.get("from") == "geometry":
-            lines.append(f"- {p:18s} ← identifiability.vsd_geometry.d_vsd_ref_mm\n")
+            lines.append(f"- {p:28s} ← identifiability.vsd_geometry.d_vsd_ref_mm\n")
         else:
-            lines.append(f"- {p:18s} ← physiology.{src['section']}.{src['key']}\n")
+            lines.append(f"- {p:28s} ← physiology.{src['section']}.{src['key']}\n")
     lines.append("\n")
 
-    lines.append("## PARAM_SCALES (использованы в формуле J)\n")
+    lines.append("## PARAM_SCALES\n")
     for k, v in ident_cfg.param_scales.items():
         vv = v if v is not None else f"auto → {theta0_resolved.get(k)}"
-        lines.append(f"- {k:18s} = {vv}\n")
+        lines.append(f"- {k:28s} = {vv}\n")
     lines.append("\n")
 
     lines.append("## X0 (mean по 10 циклам; EDV — max за последний цикл)\n")
@@ -866,29 +803,37 @@ def _main_impl(verbose: int, out_dir: Path, t_start: datetime,
     lines.append("\n")
 
     lines.append(f"## cond_full({len(all_param_names)}) = "
-                 f"{svd_res['cond']:.3f}\n\n")
-    lines.append("## |Vt[-1]| (слабое направление)\n")
-    for k, v in svd_res["contrib"].items():
-        flag = "  ← FIX" if k in selection["to_fix"] else ""
-        lines.append(f"- {k:18s} : {v:.4f}{flag}\n")
+                 f"{svd_res['cond']:.3e}\n\n")
+
+    lines.append("## История жадного исключения\n\n")
+    lines.append("| step | n_keep | just_fixed | cond |\n")
+    lines.append("|---|---|---|---|\n")
+    for h in selection["history"]:
+        just = h.get("just_fixed") or "—"
+        lines.append(f"| {h.get('step', '')} | {h.get('n_keep', '')} | "
+                     f"{just} | {h.get('cond', 0):.3e} |\n")
     lines.append("\n")
 
     lines.append("## Решение\n")
-    lines.append(f"- Режим: **{selection['mode']}**\n")
-    lines.append(f"- Зафиксированы: {selection['to_fix']}\n")
-    lines.append(f"- θ_final = {selection['theta_final']}\n")
-    lines.append(f"- cond_final = {selection['cond']:.3f}\n\n")
+    lines.append(f"- Зафиксированы (forced): {selection['forced_fix']}\n")
+    lines.append(f"- Зафиксированы (greedy): "
+                 f"{[p for p in selection['to_fix'] if p not in selection['forced_fix']]}\n")
+    lines.append(f"- θ_final: {selection['theta_final']}\n")
+    lines.append(f"- cond_final: {selection['cond']:.3e}\n\n")
 
     lines.append("## Ограничения\n")
-    lines.append("- C_sys_art на стационаре влияет только на пульсации; "
-                 "если не идентифицируется — фиксируется в Fallback A.\n")
-    lines.append("- Экстраполяция за пределы param_bounds из "
-                 "identifiability.yaml не гарантируется.\n")
-    lines.append("- Формула J использует PARAM_SCALES, а не theta0.\n")
-    lines.append(f"- θ_final должен совпадать с "
-                 f"dataset_generator.VARY_PARAMS.\n")
+    lines.append("- При n_x < n_θ SVD коллапсирует: cond_full может быть "
+                 "порядка 1e10+, это нормальный сигнал, а не ошибка.\n")
+    lines.append("- Параметры, физически неактивные на baseline "
+                 "(например, `pressure_sensitivity` при "
+                 "`pressure_remodel=false`), имеют нулевой столбец J "
+                 "и фиксируются первыми — по причине неактивности, "
+                 "а не слабой идентифицируемости.\n")
+    lines.append("- θ_final должен совпадать с "
+                 "`dataset_generator.VARY_PARAMS`.\n")
 
-    (out_dir / "STAGE1_REPORT.md").write_text("".join(lines), encoding="utf-8")
+    (out_dir / "STAGE1_REPORT.md").write_text("".join(lines),
+                                              encoding="utf-8")
     print(f"[Stage1] Отчёт: {out_dir / 'STAGE1_REPORT.md'}")
 
     t_end_dt = datetime.now()
@@ -899,7 +844,6 @@ def _main_impl(verbose: int, out_dir: Path, t_start: datetime,
 def main(verbose: int = 1,
          ident_path: Optional[str] = None,
          physio_path: Optional[str] = None) -> None:
-    """Обёртка main(): Tee-логгер в results/stage1_verbose.log."""
     verbose = int(verbose)
     ident_cfg = load_identifiability_config(ident_path, physio_path)
     t_start = datetime.now()
@@ -926,7 +870,6 @@ def main(verbose: int = 1,
 
 def _debug_impl(verbose: int, t_start: datetime,
                 ident_cfg: IdentifiabilityConfig) -> None:
-    """Проверка базовой точки: конвергенция, steady-state, один кардиоцикл."""
     print("=" * 70)
     print(f"[Stage1 DEBUG] Старт: {t_start:%Y-%m-%d %H:%M:%S}")
     print("=" * 70)
@@ -988,20 +931,6 @@ def _debug_impl(verbose: int, t_start: datetime,
           f"EDV_RV={np.max(data['V_rv'][win]):.0f} "
           f"V_blood={data['V_blood'][-1]:.0f}")
 
-    print(f"P_sv={data['P_sv'][win].mean():.1f} "
-          f"P_pv={data['P_pv'][win].mean():.1f} "
-          f"P_la={data['P_la'][win].mean():.1f} "
-          f"P_ra={data['P_ra'][win].mean():.1f} "
-          f"V_sv={data['V_sv'][win].mean():.0f}/"
-          f"{data['V_sv_target'][win].mean():.0f} "
-          f"({data['V_sv_fraction'][win].mean() * 100:.0f}%)")
-    print(f"Q_sv_to_ra={data['Q_sv_to_ra'][win].mean():.1f} "
-          f"Q_pv_to_la={data['Q_pv_to_la'][win].mean():.1f} "
-          f"Q_periph={data['Q_peripheral'][win].mean():.1f} "
-          f"Q_ven_in={data['Q_ven_in'][win].mean():.1f} "
-          f"R_eff={data['R_eff_peripheral'][win].mean():.2f} "
-          f"f_P={data['f_P_myogenic'][win].mean():.3f}")
-
     cycle = data["t"] > (data["t"][-1] - T)
     print(f"\n--- Один кардиоцикл ---")
     for k in ("V_lv", "V_rv", "P_lv", "P_rv", "Q_mitral", "Q_tricuspid"):
@@ -1021,7 +950,6 @@ def _debug_impl(verbose: int, t_start: datetime,
 def debug_base_point(verbose: int = 1,
                      ident_path: Optional[str] = None,
                      physio_path: Optional[str] = None) -> None:
-    """Обёртка: Tee-логгер для debug-режима → results/stage1_debug.log."""
     verbose = int(verbose)
     ident_cfg = load_identifiability_config(ident_path, physio_path)
     t_start = datetime.now()
@@ -1048,7 +976,7 @@ def debug_base_point(verbose: int = 1,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Stage 1: анализ идентифицируемости WholeBodyModel",
+        description="Stage 1: скрининг идентифицируемых параметров",
     )
     parser.add_argument(
         "mode", nargs="?", default="run", choices=["run", "debug"],
@@ -1060,8 +988,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--config", type=str, default=None,
-        help="Путь к identifiability.yaml "
-             "(по умолчанию config/identifiability.yaml).",
+        help="Путь к identifiability.yaml.",
     )
     parser.add_argument(
         "--physio", type=str, default=None,

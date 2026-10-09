@@ -599,11 +599,16 @@ class WholeBodyModel:
             return y0
         # Проверка: C_a_end должен совпасть с равновесием при конечных потоках
         out_end = self.compute_outputs(sol.t[-1], y_steady)
+        # Цикловое среднее — не мгновенное — иначе в диастоле Q_p≈0 и
+        # _equilibrium_state срабатывает на early-return C_v (ложный C_eq).
+        cycle_end = self.cycle_averaged_flows(
+            float(sol.t[-1]), y_steady, n_pts=24,
+        )
         C_eq = self.gas_exchange._equilibrium_state(
             C_v_O2=out_end['C_v_O2'],
             C_v_CO2=out_end['C_v_CO2'],
-            Q_p=out_end['Q_pulmonary'],
-            Q_shunt=out_end['Q_vsd'],
+            Q_p=cycle_end['Qp_cycle_mean'],
+            Q_shunt=cycle_end['Q_vsd_cycle_mean'],
         )
         if abs(C_a_O2_end - C_eq[0]) > 0.01:
             warnings.warn(

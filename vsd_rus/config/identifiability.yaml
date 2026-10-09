@@ -1,0 +1,167 @@
+# config/identifiability.yaml
+#
+# Конфигурация Stage 1: анализ идентифицируемости параметров WholeBodyModel.
+# Модель описывается physiology.yaml; этот файл — только методология Stage 1.
+#
+# Совместим с ml/stage1_identifiability.py (Fallback A / Fallback B).
+# Исправления относительно исходника:
+#   - пробел после ':' у rv_hypertrophy_sensitivity (YAML syntax)
+#   - param_bounds для всех vary_params ∪ alt_params (fail-fast в compute_jacobian)
+#   - k_inotropy scale приведён к порядку θ₀ (0.005, было 0.5)
+
+version: 1
+
+# ─── Геометрия VSD (единственные числа, которых нет в physiology.yaml) ───
+vsd_geometry:
+  d_vsd_ref_mm: 4.0          # точка линеаризации
+  r_vsd_ref:    5.0          # R_vsd(d_ref); задаёт K_VSD = R_ref·(d_ref/2)^4
+                             # при d_ref=4, R_ref=5 → K_VSD = 80
+
+# ─── Проекция θ₀ из physiology.yaml ───────────────────────────────────
+# Каждый варьируемый параметр указывает, откуда взять значение.
+# Значения НЕ дублируются — они читаются из physiology.yaml.
+theta_sources:
+  d_vsd:                     {from: geometry}                 # d_vsd_ref_mm
+  E_max_lv:                  {section: heart,      key: E_max_lv}
+  E_max_rv:                  {section: heart,      key: E_max_rv}
+  HR_base:                   {section: baroreflex, key: HR_base}
+  flow_sensitivity:          {section: lungs,      key: flow_sensitivity}
+  C_sys_art:                 {section: systemic,   key: C_sys_art}
+  V0_blood:                  {section: blood,      key: V0}
+  R_sys:                     {section: systemic,   key: R_sys_peripheral}  # null → auto
+  k_inotropy:                {section: baroreflex, key: k_inotropy}
+  E_min_lv:                  {section: heart,      key: E_min_lv}
+  E_min_rv:                  {section: heart,      key: E_min_rv}
+  P_set:                     {section: baroreflex, key: P_set}
+  k_hr:                      {section: baroreflex, key: k_hr}
+  pressure_sensitivity:      {section: lungs,      key: pressure_sensitivity}
+  rv_hypertrophy_sensitivity: {section: heart,     key: rv_hypertrophy_sensitivity}
+  rv_dilation_gain:          {section: heart,      key: rv_dilation_gain}
+
+# ─── Варьируемые параметры (порядок = столбцы J) ──────────────────────
+vary_params:
+  # основной набор (8)
+  - d_vsd
+  - E_max_lv
+  - E_max_rv
+  - R_sys
+  - flow_sensitivity
+  - C_sys_art
+  - HR_base
+  - V0_blood
+  # новые кандидаты (7) — участвуют в J и screening;
+  # на healthy baseline (pressure_remodel=false) столбцы rv_*/pressure_* ≈ 0
+  # и обычно уходят в to_fix через Fallback A
+  - E_min_lv
+  - E_min_rv
+  - P_set
+  - k_hr
+  - pressure_sensitivity
+  - rv_hypertrophy_sensitivity
+  - rv_dilation_gain
+
+alt_params:
+  - k_inotropy
+
+# ─── Характерные шкалы s_j для относительного якобиана ────────────────
+# J_ij = (ΔX_i / max(|X0_i|, x_scale)) / (Δθ_j / s_j)
+# s_j ≈ θ₀ (или характерный диапазон изменения).
+param_scales:
+  d_vsd:                      4.0
+  E_max_lv:                   2.5
+  E_max_rv:                   0.8
+  R_sys:                      null      # null → auto = resolved R_sys_peripheral
+  flow_sensitivity:           0.05
+  C_sys_art:                  1.5
+  HR_base:                    70.0
+  V0_blood:                   5800.0
+  k_inotropy:                 0.005     # = θ₀ из physiology (было 0.5 → столбец занижался ×100)
+  E_min_lv:                   0.03
+  E_min_rv:                   0.03
+  P_set:                      80.0
+  k_hr:                       0.008
+  pressure_sensitivity:       0.05
+  rv_hypertrophy_sensitivity: 1.5
+  rv_dilation_gain:           6.0
+
+# ─── Границы для sanity-check пертурбаций (обязательны для ВСЕХ vary∪alt) ─
+param_bounds:
+  d_vsd:                      [0.5,    7.11]
+  E_max_lv:                   [1.0,    5.0]
+  E_max_rv:                   [0.3,    2.0]
+  R_sys:                      [1.5,    5.0]
+  flow_sensitivity:           [0.0,    0.4]
+  C_sys_art:                  [0.5,    5.0]
+  HR_base:                    [50.0,   100.0]
+  V0_blood:                   [4000.0, 7500.0]
+  k_inotropy:                 [0.0,    1.5]
+  # --- ранее отсутствовали (compute_jacobian fail-fast) ---
+  E_min_lv:                   [0.01,   0.10]
+  E_min_rv:                   [0.01,   0.10]
+  P_set:                      [60.0,   110.0]
+  k_hr:                       [0.001,  0.03]
+  pressure_sensitivity:       [0.0,    0.3]
+  rv_hypertrophy_sensitivity: [0.0,    4.0]
+  rv_dilation_gain:           [0.0,    15.0]
+
+# ─── Наблюдаемые выходы (порядок = строки J) ──────────────────────────
+x_names:
+  - P_sa
+  - P_pa
+  - Q_aortic
+  - Qp_Qs
+  - EDV_LV
+  - EDV_RV
+  - HR
+
+# Характерные масштабы X для деления (защита от деления на ~0)
+x_typical_scale:
+  P_sa:     80.0
+  P_pa:     15.0
+  Q_aortic: 80.0
+  Qp_Qs:    1.0
+  EDV_LV:   100.0
+  EDV_RV:   100.0
+  HR:       70.0
+
+# ─── Численный якобиан ────────────────────────────────────────────────
+jacobian:
+  rel_step:         0.01
+  d_vsd_min_delta:  0.04
+
+# ─── Логика фиксации (Fallback A / Fallback B в stage1_identifiability.py) ─
+selection:
+  cond_threshold:   100.0
+  priority_to_fix:  [V0_blood, HR_base, C_sys_art]
+  n_fix_primary:    2          # из priority фиксируются до 2 «самых слабых»
+  thr_priority:     0.3
+  thr_other:        0.4
+  extra_candidates: [C_sys_art, E_max_lv, R_sys]
+  alt_replaces:     C_sys_art   # Fallback B: заменить на alt_params[0]=k_inotropy
+  # target_n_keep используется только new-версией; old игнорирует
+  target_n_keep:    6
+
+# ─── Симуляция Stage 1 (переопределяет physiology.simulation) ─────────
+simulation:
+  t_calib:            600.0
+  t_end:              800.0
+  n_samples_t:        4000
+  t_start_stationary: 300.0
+  stationary_rel_tol: 0.01
+  # method / rtol / atol / max_step — из physiology.simulation
+
+# ─── Hard limits для защиты от OOM ────────────────────────────────────
+hard_limits:
+  t_end_max:      800.0
+  n_samples_max:  4000
+
+# ─── Отчёт ────────────────────────────────────────────────────────────
+report:
+  top_param_to_log: 3
+
+# ─── Физиологический sanity-check стационара ──────────────────────────
+sanity:
+  P_sa:    [40.0, 180.0]
+  P_pa:    [5.0,  80.0]
+  EDV_LV:  [50.0, 1.0e9]
+  Qp_Qs:   [0.0,  20.0]

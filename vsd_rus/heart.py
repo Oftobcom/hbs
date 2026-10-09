@@ -213,8 +213,9 @@ class Heart4Chambers(OrganModel):
             "типично 6.0 — прирост V0_rv при rv_al=1."
         )
         self.rv_compliance_gain    = _check_range(
-            "rv_compliance_gain", rv_compliance_gain, 0.0, 1.0,
-            "типично 0.5 — снижение E_min_rv (рост C) при дилатации."
+            "rv_compliance_gain", rv_compliance_gain, 0.0, 10.0,
+            "множитель: E_min_rv = E_min_base·(1 + gain·rv_al). "
+            "Типично 0.3 — base, 1.5 — компенс., 3.0 — декомп."
         )
         self.baro_rv_cap           = _check_range(
             "baro_rv_cap", baro_rv_cap, 1.0, 2.0,
@@ -363,7 +364,7 @@ class Heart4Chambers(OrganModel):
         #   V0 растёт (саркомеры в ряд) — 10 → 70 мл при rv_al=1, gain=6
         self.V0['RV'] = self.V0_base['RV'] * (1.0 + self.rv_dilation_gain * rv_al)
         # Комплаенс растёт (E_min падает) — камера становится более растяжимой
-        self.E_min['RV'] = self.E_min_base['RV'] / (1.0 + self.rv_compliance_gain * rv_al)
+        self.E_min['RV'] = self.E_min_base['RV'] * (1.0 + self.rv_compliance_gain * rv_al)
 
         # Гипертрофия ПЖ от хронической лёгочной гипертензии.
         rv_hypertrophy_raw = 1.0 + self.rv_hypertrophy_sensitivity * rv_afterload
@@ -468,7 +469,7 @@ class Heart4Chambers(OrganModel):
             # в отличие от активной (E_max). Это позволяет EDV расти при
             # низком диастолическом давлении.
             rv_al = min(float(getattr(self, '_rv_afterload', 0.0)), 3.0)
-            stiffness = 1.0 - 0.15 * rv_al      # было 1.0 + 0.4 * rv_al
+            stiffness = 1.0 + 0.1 * rv_al      # было 1.0 + 0.4 * rv_al
             A_v = max(0.02 * stiffness, 0.005)  # не даём уйти ниже 0.005
             k_v = max(0.015 * stiffness, 0.004)
         exp_arg = float(np.clip(k_v * dV, 0.0, 8.0))
@@ -580,7 +581,7 @@ class Heart4Chambers(OrganModel):
         # Потолок: должен быть выше разрешённого EDV
         V_max_rv_eff = max(
             250.0 * (1.0 + 0.8 * rv_al),
-            self.V0['RV'] * 3.5,     # при V0=70 → 245; при V0=100 → 350
+            self.V0['RV'] * 3.8,     # при V0=70 → 245; при V0=100 → 350
         )
 
         s_la = self._floor_factor(V_la, self.V0['LA'])
