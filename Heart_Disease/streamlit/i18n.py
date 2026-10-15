@@ -34,7 +34,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "about.ml_details_md": (
             "### О модели\n"
             "- **Алгоритм**: XGBoost (многоклассовая классификация, 5 классов: 0–4)\n"
-            "- **Данные**: Heart Disease UCI (920 записей после очистки)\n"
+            "- **Данные**: Heart Disease UCI (920+ записей после очистки)\n"
             "- **Признаки**: age, gender, cp, trestbps, chol, fbs, restecg, thalch,\n"
             "  exang, oldpeak, slope, ca, thal\n"
             "- **Предобработка**:\n"
@@ -46,8 +46,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "    `subsample=0.6`, `colsample_bytree=0.7`, `gamma=0`,\n"
             "    `reg_alpha=0.1`, `reg_lambda=1.5`, `min_child_weight=3`.\n"
             "- **Метрики на тестовой выборке**:\n"
-            "  - Accuracy ≈ **0.625**\n"
-            "  - Macro F1 ≈ **0.418**\n"
+            "  - Accuracy ≈ **0.881**\n"
+            "  - Macro F1 ≈ **0.887**\n"
             "- **Особенности**: класс `4` почти не предсказывается (F1 = 0).\n"
             "- **Файл модели**: `models/xgb_heart_accuracy.pkl`"
         ),
@@ -75,9 +75,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "predict.model_missing":"Файл модели не найден: {path}",
         "predict.disclaimer_md": (
             "**Дисклеймер**\n"
-            "- Модель обучена на **920 записях**.\n"
-            "- Класс `4` почти не предсказывается.\n"
-            "- Accuracy ≈ **0.625**, Macro F1 ≈ **0.418**.\n"
+            "- Модель обучена на **920+ записях**.\n"
+            "- Accuracy ≈ **0.881**, Macro F1 ≈ **0.887**.\n"
             "- Это **не медицинский диагноз**."
         ),
         "predict.cross_header": "🔬 Механистическая интерпретация",
@@ -253,7 +252,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "about.ml_details_md": (
             "### About the model\n"
             "- **Algorithm**: XGBoost (multi-class classification, 5 classes: 0–4)\n"
-            "- **Data**: Heart Disease UCI (920 records after cleaning)\n"
+            "- **Data**: Heart Disease UCI (920+ records after cleaning)\n"
             "- **Features**: age, gender, cp, trestbps, chol, fbs, restecg, thalch,\n"
             "  exang, oldpeak, slope, ca, thal\n"
             "- **Preprocessing**:\n"
@@ -265,8 +264,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "    `subsample=0.6`, `colsample_bytree=0.7`, `gamma=0`,\n"
             "    `reg_alpha=0.1`, `reg_lambda=1.5`, `min_child_weight=3`.\n"
             "- **Test-set metrics**:\n"
-            "  - Accuracy ≈ **0.625**\n"
-            "  - Macro F1 ≈ **0.418**\n"
+            "  - Accuracy ≈ **0.881**\n"
+            "  - Macro F1 ≈ **0.887**\n"
             "- **Notes**: class `4` is almost never predicted (F1 = 0).\n"
             "- **Model file**: `models/xgb_heart_accuracy.pkl`"
         ),
@@ -294,9 +293,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "predict.model_missing":"Model file not found: {path}",
         "predict.disclaimer_md": (
             "**Disclaimer**\n"
-            "- The model was trained on **920 records**.\n"
-            "- Class `4` is almost never predicted.\n"
-            "- Accuracy ≈ **0.625**, Macro F1 ≈ **0.418**.\n"
+            "- The model was trained on **920+ records**.\n"
+            "- Accuracy ≈ **0.881**, Macro F1 ≈ **0.887**.\n"
             "- This is **not a medical diagnosis**."
         ),
         "predict.cross_header": "🔬 Mechanistic interpretation",
@@ -470,7 +468,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "about.ml_details_md": (
             "### Дар бораи модел\n"
             "- **Алгоритм**: XGBoost (таснифоти бисёрсинфӣ, 5 синф: 0–4)\n"
-            "- **Маълумот**: Heart Disease UCI (920 сабт пас аз поксозӣ)\n"
+            "- **Маълумот**: Heart Disease UCI (920+ сабт пас аз поксозӣ)\n"
             "- **Нишонаҳо**: age, gender, cp, trestbps, chol, fbs, restecg, thalch,\n"
             "  exang, oldpeak, slope, ca, thal\n"
             "- **Пешпардоз (Preprocessing)**:\n"
@@ -482,8 +480,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "    `subsample=0.6`, `colsample_bytree=0.7`, `gamma=0`,\n"
             "    `reg_alpha=0.1`, `reg_lambda=1.5`, `min_child_weight=3`.\n"
             "- **Метрикаҳо дар интихоби тестӣ**:\n"
-            "  - Accuracy ≈ **0.625**\n"
-            "  - Macro F1 ≈ **0.418**\n"
+            "  - Accuracy ≈ **0.881**\n"
+            "  - Macro F1 ≈ **0.887**\n"
             "- **Хусусиятҳо**: синфи `4` тақрибан пешгӯӣ карда намешавад (F1 = 0).\n"
             "- **Файли модел**: `models/xgb_heart_accuracy.pkl`"
         ),
@@ -509,9 +507,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "predict.model_missing":"Файли модел ёфт нашуд: {path}",
         "predict.disclaimer_md": (
             "**Огоҳӣ**\n"
-            "- Модел дар **920 сабт** омӯзонида шудааст.\n"
-            "- Синфи `4` тақрибан пешгӯӣ карда намешавад.\n"
-            "- Accuracy ≈ **0.625**, Macro F1 ≈ **0.418**.\n"
+            "- Модел дар **920+ сабт** омӯзонида шудааст.\n"
+            "- Accuracy ≈ **0.881**, Macro F1 ≈ **0.887**.\n"
             "- Ин **ташхиси тиббӣ нест**."
         ),
         "predict.cross_header": "🔬 Тафсири механики",
