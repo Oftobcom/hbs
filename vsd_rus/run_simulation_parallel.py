@@ -830,7 +830,7 @@ def main(parallel: bool = True,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Сравнение гемодинамики: Здоровый vs ДМЖП — v4 PARALLEL"
+        description="Сравнение гемодинамики: Здоровый vs ДМЖП — PARALLEL"
     )
     parser.add_argument('--no-parallel', action='store_true',
                         help='отключить параллель')
