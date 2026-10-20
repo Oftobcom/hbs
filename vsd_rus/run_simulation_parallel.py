@@ -627,7 +627,7 @@ def plot_shunt_effect_analysis(results_dict):
 
 def print_detailed_report(results_dict):
     print("\n" + "=" * 100)
-    print("ДЕТАЛЬНЫЙ ОТЧЁТ")
+    print("ДЕТАЛЬНЫЙ ОТЧЁТ О РЕЗУЛЬТАТАХ СИМУЛЯЦИИ ДМЖП")
     print("=" * 100)
     print("Формат: mean ± std по установившемуся окну "
           f"(t > {STEADY_FRAC_DEFAULT:.2f}·t_end).")
